@@ -80,7 +80,8 @@ function Get-RuntimeConfig {
             throw "Invalid runtime name: $Name"
         }
 
-        if ($null -eq $Runtime.enabled) {
+        $EnabledProperty = $Runtime.PSObject.Properties['enabled']
+        if ($null -eq $EnabledProperty) {
             $Runtime | Add-Member -NotePropertyName enabled -NotePropertyValue $true
         }
 
@@ -183,8 +184,9 @@ function Test-RuntimeHealthy {
             }
 
             $RequireHealthy = $false
-            if ($null -ne $Check.require_healthy) {
-                $RequireHealthy = [bool]$Check.require_healthy
+            $RequireHealthyProperty = $Check.PSObject.Properties['require_healthy']
+            if ($null -ne $RequireHealthyProperty) {
+                $RequireHealthy = [bool]$RequireHealthyProperty.Value
             }
 
             if ($RequireHealthy) {
@@ -218,8 +220,9 @@ function Invoke-RuntimeRecovery {
 
     $Name = [string]$Runtime.name
     $CooldownSeconds = 30
-    if ($null -ne $Runtime.cooldown_seconds) {
-        $CooldownSeconds = [Math]::Max(5, [int]$Runtime.cooldown_seconds)
+    $CooldownProperty = $Runtime.PSObject.Properties['cooldown_seconds']
+    if ($null -ne $CooldownProperty) {
+        $CooldownSeconds = [Math]::Max(5, [int]$CooldownProperty.Value)
     }
 
     $Now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -252,24 +255,35 @@ function Invoke-RuntimeRecovery {
 
     Write-SupervisorLog "runtime=$Name unhealthy reason=$Reason; starting recovery."
 
-    Push-Location $WorkingDirectory
-    try {
-        $PwshArgs = @(
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy", "Bypass",
-            "-File", $Script
-        ) + $Arguments
+    $Invocation = "& '" + $Script.Replace("'", "''") + "'"
+    foreach ($Argument in $Arguments) {
+        $Invocation += " '" + ([string]$Argument).Replace("'", "''") + "'"
+    }
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Invocation))
 
-        & $Pwsh @PwshArgs *> $null
-        $ExitCode = $LASTEXITCODE
+    $StdOutPath = Join-Path $Control ("runtime-recovery-{0}-{1}.out.log" -f $Name, [guid]::NewGuid().ToString("N"))
+    $StdErrPath = Join-Path $Control ("runtime-recovery-{0}-{1}.err.log" -f $Name, [guid]::NewGuid().ToString("N"))
+
+    try {
+        $Process = Start-Process `
+            -FilePath $Pwsh `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $EncodedCommand) `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $StdOutPath `
+            -RedirectStandardError $StdErrPath `
+            -Wait `
+            -PassThru
+
+        $ExitCode = [int]$Process.ExitCode
     }
     catch {
         $ExitCode = 1
-        Write-SupervisorLog "runtime=$Name recovery exception=$($_.Exception.Message)"
+        Write-SupervisorLog "runtime=$Name recovery process exception=$($_.Exception.Message)"
     }
     finally {
-        Pop-Location
+        Remove-Item -LiteralPath $StdOutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $StdErrPath -Force -ErrorAction SilentlyContinue
     }
 
     if ($ExitCode -ne 0) {
@@ -277,14 +291,22 @@ function Invoke-RuntimeRecovery {
         return
     }
 
-    Start-Sleep -Seconds 1
+    $HealthWaitSeconds = 20
+    $HealthWaitProperty = $Runtime.PSObject.Properties['recovery_wait_seconds']
+    if ($null -ne $HealthWaitProperty) {
+        $HealthWaitSeconds = [Math]::Max(1, [Math]::Min(300, [int]$HealthWaitProperty.Value))
+    }
 
-    if (Test-RuntimeHealthy -Runtime $Runtime) {
-        Write-SupervisorLog "runtime=$Name recovered successfully."
-    }
-    else {
-        Write-SupervisorLog "runtime=$Name recovery command completed but health is still degraded."
-    }
+    $HealthDeadline = (Get-Date).AddSeconds($HealthWaitSeconds)
+    do {
+        if (Test-RuntimeHealthy -Runtime $Runtime) {
+            Write-SupervisorLog "runtime=$Name recovered successfully."
+            return
+        }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $HealthDeadline)
+
+    Write-SupervisorLog "runtime=$Name recovery command completed but health is still degraded after ${HealthWaitSeconds}s."
 }
 
 function Reconcile-All {

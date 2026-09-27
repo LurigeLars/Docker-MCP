@@ -228,7 +228,7 @@ The supervisor contains no credentials and is not exposed as an MCP tool. It onl
 
 The configuration can define one or more container health checks per runtime: whether each named container is running, whether Docker reports it as `healthy`, and whether expected ephemeral files still exist inside it.
 
-Recovery is restricted to an absolute local `.ps1` file plus an argument array. There is no inline shell-command field.
+Recovery is restricted to an absolute local `.ps1` file plus an argument array. There is no inline shell-command field. Recovery scripts are launched as isolated child PowerShell processes so Docker/Compose progress written to stderr cannot be mistaken for a supervisor failure. `recovery_wait_seconds` controls the bounded post-recovery health wait for runtimes that need a few seconds to become healthy.
 
 Start with:
 
