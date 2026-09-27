@@ -18,6 +18,8 @@ if (Test-Path -LiteralPath $Heartbeat) {
 }
 
 Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "DockerLocalMaintenanceRunner" -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName "DockerLocalRuntimeSupervisor" -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName "DockerLocalRuntimeSupervisor" -Confirm:$false -ErrorAction SilentlyContinue
 docker mcp profile server remove $Profile --name dockerlocal
 
 if (Test-Path (Join-Path $InstallDir "compose.public.yaml")) {

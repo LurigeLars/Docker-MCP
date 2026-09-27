@@ -203,6 +203,49 @@ Additional host projects can be configured locally in:
 
 Start from `maintenance-projects.example.json`. The local file is ignored by Git and should not contain secrets.
 
+## Event-driven local runtime supervisor
+
+Some local MCP runtimes intentionally keep credentials only in ephemeral container storage such as `tmpfs`. Those credentials disappear when Docker Desktop or the container is restarted. Requiring a user to rerun a bootstrap script after every Docker restart defeats the purpose of a resilient local runtime.
+
+Docker MCP therefore includes an **optional host-side runtime supervisor**. It is event-driven rather than a fixed polling watchdog:
+
+```text
+Windows logon
+  -> Runtime Supervisor
+  -> Docker events
+  -> relevant container start / restart / health change
+  -> runtime health check
+  -> allowlisted local recovery script
+```
+
+When Docker Engine itself disappears, the supervisor waits. When Docker becomes available again it performs one reconciliation pass and then reconnects to the Docker event stream. It does not query healthy containers every few minutes.
+
+The supervisor contains no credentials and is not exposed as an MCP tool. It only invokes PowerShell scripts explicitly listed in the trusted local configuration file:
+
+```text
+%LOCALAPPDATA%\DockerLocalMCP\runtime-supervisor.local.json
+```
+
+The configuration can check whether a named container is running, whether its Docker health status is `healthy`, and whether expected ephemeral files still exist inside the container.
+
+Recovery is restricted to an absolute local `.ps1` file plus an argument array. There is no inline shell-command field.
+
+Start with:
+
+```powershell
+Copy-Item .\runtime-supervisor.example.json "$env:LOCALAPPDATA\DockerLocalMCP\runtime-supervisor.local.json"
+```
+
+Edit only the local copy to point at runtimes that genuinely need post-restart recovery, then install:
+
+```powershell
+.\install-runtime-supervisor.ps1
+```
+
+The installer registers `DockerLocalRuntimeSupervisor` at Windows logon. The process remains attached to `docker events`; polling is used only while Docker Engine is unavailable so it can reconnect.
+
+Do not add a runtime merely because it is Dockerized. Persistent `.env` configuration and ordinary Docker restart policies do not need this supervisor. It is intended for runtimes with a real host-side recovery step, especially ephemeral secret rehydration.
+
 ## Secret handling
 
 Do not commit:
