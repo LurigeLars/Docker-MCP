@@ -47,6 +47,10 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
         $HandlerProperty = $Cfg.PSObject.Properties['handler']
         if ($null -ne $HandlerProperty) {
             $Handler = $HandlerProperty.Value
+            if ($null -eq $Handler) {
+                throw "Project $Name handler configuration cannot be null."
+            }
+
             $Script = [string]$Handler.script
             if (
                 [string]::IsNullOrWhiteSpace($Script) -or
@@ -57,13 +61,14 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
             }
 
             $OperationsProperty = $Handler.PSObject.Properties['operations']
-            if ($null -eq $OperationsProperty) {
+            if ($null -eq $OperationsProperty -or $null -eq $OperationsProperty.Value) {
                 throw "Project $Name handler must define operations."
             }
 
+            $OperationConfig = $OperationsProperty.Value
             $Operations = @{}
             foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy")) {
-                $OperationProperty = $Handler.operations.PSObject.Properties[$OperationName]
+                $OperationProperty = $OperationConfig.PSObject.Properties[$OperationName]
                 if ($null -ne $OperationProperty) {
                     $Operations[$OperationName] = @(
                         $OperationProperty.Value | ForEach-Object { [string]$_ }
