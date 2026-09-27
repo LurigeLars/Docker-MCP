@@ -115,6 +115,106 @@ function Write-RunnerLog {
     Add-Content -LiteralPath $Log -Value "$(Get-Date -Format o) $Message" -Encoding utf8
 }
 
+function Recover-OrphanedJobs {
+    foreach ($ProcessingFile in @(Get-ChildItem -LiteralPath $Processing -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+        $JobId = [IO.Path]::GetFileNameWithoutExtension($ProcessingFile.Name)
+        if ($JobId -notmatch '^[a-f0-9]{32}$') {
+            Write-RunnerLog "removed invalid orphaned processing file: $($ProcessingFile.Name)"
+            Remove-Item -LiteralPath $ProcessingFile.FullName -Force -ErrorAction SilentlyContinue
+            continue
+        }
+
+        $ResultPath = Join-Path $Results "$JobId.json"
+        if (Test-Path -LiteralPath $ResultPath -PathType Leaf) {
+            Remove-Item -LiteralPath $ProcessingFile.FullName -Force -ErrorAction SilentlyContinue
+            continue
+        }
+
+        $Project = $null
+        try {
+            $OrphanedJob = Get-Content -LiteralPath $ProcessingFile.FullName -Raw | ConvertFrom-Json
+            $Project = [string]$OrphanedJob.project
+        }
+        catch {}
+
+        Write-JsonAtomic -Path $ResultPath -Value @{
+            job_id = $JobId
+            status = "failed"
+            outcome_unknown = $true
+            project = $Project
+            finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            error = "Maintenance runner restarted while this job was in progress; outcome is unknown. Inspect deployment state before retrying."
+        }
+        Write-RunnerLog "recovered orphaned job $JobId as failed/outcome_unknown"
+        Remove-Item -LiteralPath $ProcessingFile.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-ScriptHandler {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Script,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if (-not $PwshCommand) {
+        throw "PowerShell 7 (pwsh.exe) is required for script-backed maintenance projects."
+    }
+
+    $Invocation = "& '" + $Script.Replace("'", "''") + "'"
+    foreach ($Argument in $Arguments) {
+        $Invocation += " '" + ([string]$Argument).Replace("'", "''") + "'"
+    }
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Invocation))
+
+    $StdOutPath = Join-Path $Control ("maintenance-{0}.out.log" -f $JobId)
+    $StdErrPath = Join-Path $Control ("maintenance-{0}.err.log" -f $JobId)
+    Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+
+    $Process = $null
+    try {
+        $Process = Start-Process `
+            -FilePath $PwshCommand.Source `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $EncodedCommand) `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $StdOutPath `
+            -RedirectStandardError $StdErrPath `
+            -PassThru
+
+        while (-not $Process.HasExited) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = $Project
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            Start-Sleep -Seconds 2
+            $Process.Refresh()
+        }
+
+        $ExitCode = [int]$Process.ExitCode
+        $StdOut = if (Test-Path -LiteralPath $StdOutPath) { Get-Content -LiteralPath $StdOutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $StdErr = if (Test-Path -LiteralPath $StdErrPath) { Get-Content -LiteralPath $StdErrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $Output = @($StdOut, $StdErr) -join [Environment]::NewLine
+
+        if ($Output.Length -gt 16000) {
+            $Output = $Output.Substring($Output.Length - 16000)
+        }
+
+        return @{ exit_code = $ExitCode; output = $Output }
+    }
+    finally {
+        if ($Process) { $Process.Dispose() }
+        Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Run-ProjectRedeploy {
     param($Job)
 
@@ -147,36 +247,17 @@ function Run-ProjectRedeploy {
             throw "Allowlisted handler script is missing."
         }
 
-        $PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
-        if (-not $PwshCommand) {
-            throw "PowerShell 7 (pwsh.exe) is required for script-backed maintenance projects."
-        }
-
         $HandlerArgs = @($Cfg.Operations[$Operation] | ForEach-Object { [string]$_ })
-
-        Push-Location $WorkingDir
-        $PreviousErrorActionPreference = $ErrorActionPreference
-        try {
-            # Handler scripts own project-specific configuration and secret recovery.
-            # Their fixed argument arrays come only from the ignored local allowlist.
-            $ErrorActionPreference = "Continue"
-            $Output = (
-                & $PwshCommand.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Script @HandlerArgs 2>&1 |
-                    ForEach-Object { $_.ToString() } |
-                    Out-String
-            )
-            $ExitCode = $LASTEXITCODE
-        }
-        finally {
-            $ErrorActionPreference = $PreviousErrorActionPreference
-            Pop-Location
-        }
-
-        if ($Output.Length -gt 16000) { $Output = $Output.Substring($Output.Length - 16000) }
+        $HandlerRun = Invoke-ScriptHandler `
+            -JobId ([string]$Job.job_id) `
+            -Project $Project `
+            -Script $Script `
+            -Arguments $HandlerArgs `
+            -WorkingDirectory $WorkingDir
 
         return @{
-            exit_code = $ExitCode
-            output = $Output
+            exit_code = $HandlerRun.exit_code
+            output = $HandlerRun.output
             project = $Project
             services = @($Cfg.Services)
             operation = $Operation
@@ -239,6 +320,7 @@ function Run-ProjectRedeploy {
 $Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenanceRunner")
 if (-not $Mutex.WaitOne(0)) { exit 0 }
 
+Recover-OrphanedJobs
 Write-RunnerLog "runner started"
 
 try {
@@ -263,6 +345,7 @@ try {
                 if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
                 if ([string]$Job.action -ne "compose_redeploy") { throw "Action is not allowlisted." }
 
+                Write-RunnerLog "job $JobId action=$([string]$Job.action) project=$([string]$Job.project)"
                 $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                 Write-JsonAtomic -Path $Heartbeat -Value @{
                     status = "busy"
