@@ -95,11 +95,20 @@ function Run-ComposeRedeploy {
     $Args += $Requested
 
     Push-Location $WorkingDir
+    $PreviousErrorActionPreference = $ErrorActionPreference
     try {
-        $Output = (& $Docker @Args 2>&1 | Out-String)
+        # Windows PowerShell 5.1 can promote native stderr records to terminating
+        # errors when ErrorActionPreference is Stop. Docker Compose writes normal
+        # progress such as "Container ... Recreate" to stderr, so the runner must
+        # treat the process exit code as authoritative instead of stderr presence.
+        $ErrorActionPreference = "Continue"
+        $Output = (& $Docker @Args 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
         $ExitCode = $LASTEXITCODE
     }
-    finally { Pop-Location }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+        Pop-Location
+    }
 
     if ($Output.Length -gt 16000) { $Output = $Output.Substring($Output.Length - 16000) }
 
