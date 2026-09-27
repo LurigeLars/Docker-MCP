@@ -261,6 +261,18 @@ function Update-SupervisorConfig {
         throw "Unsupported runtime supervisor config version."
     }
 
+    # The supervisor invokes each configured argument as a quoted positional
+    # expression. Recovery scripts therefore store only the positional action
+    # value here, never a named-parameter token such as "-Action".
+    foreach ($existingRuntime in @($config.runtimes)) {
+        if (
+            [string]$existingRuntime.name -eq "mcp-edge" -and
+            $null -ne $existingRuntime.recovery
+        ) {
+            $existingRuntime.recovery.arguments = @("Up")
+        }
+    }
+
     $existing = @(
         $config.runtimes |
             Where-Object { [string]$_.name -ne "dockerlocal-scout-secrets" }
@@ -284,7 +296,7 @@ function Update-SupervisorConfig {
         }
         recovery = [pscustomobject]@{
             script = $StableScript
-            arguments = @("-Action", "Up")
+            arguments = @("Up")
             working_directory = $ContainerizedRoot
         }
         cooldown_seconds = 30
