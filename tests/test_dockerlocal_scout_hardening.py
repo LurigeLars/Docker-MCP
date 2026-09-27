@@ -36,12 +36,16 @@ class DockerLocalScoutHardeningTests(unittest.TestCase):
         self.assertIn("scout_hub_password.dpapi", RUNTIME)
         self.assertIn("ConvertFrom-SecureString", RUNTIME)
         self.assertIn('name = "dockerlocal-scout-secrets"', RUNTIME)
-        self.assertIn('arguments = @("-Action", "Up")', RUNTIME)
+        self.assertIn('arguments = @("Up")', RUNTIME)
         self.assertIn("required_files", RUNTIME)
+
+    def test_existing_mcp_edge_recovery_is_normalized_to_positional_action(self) -> None:
+        self.assertIn('[string]$existingRuntime.name -eq "mcp-edge"', RUNTIME)
+        self.assertIn('$existingRuntime.recovery.arguments = @("Up")', RUNTIME)
 
     def test_migration_recreates_container_before_verifying_env_removal(self) -> None:
         recreate = RUNTIME.index("--force-recreate")
-        verify = RUNTIME.index("Test-LongLivedScoutEnvAbsent")
+        verify = RUNTIME.index("if (-not (Test-LongLivedScoutEnvAbsent))")
         self.assertLess(recreate, verify)
 
 
