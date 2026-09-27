@@ -57,7 +57,7 @@ jobs:
 
       - name: Run mcp-edge hardening regression tests
         shell: pwsh
-        run: python -m unittest discover -s tests -p "test_mcp_edge_hardening.py" -v
+        run: python -m unittest discover -s tests -p "test_*_hardening.py" -v
 
       - name: Run maintenance runner regression self-test
         shell: pwsh

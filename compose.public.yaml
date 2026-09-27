@@ -13,6 +13,8 @@ services:
       DOCKER_HOST: tcp://dockerlocal-socket-proxy:2375
       DOCKER_SCOUT_CACHE_DIR: /tmp/docker-scout
       DOCKER_SCOUT_NEW_VERSION_WARN: "false"
+      DOCKER_SCOUT_HUB_USER_FILE: /run/dockerlocal-secrets/scout_hub_user
+      DOCKER_SCOUT_HUB_PASSWORD_FILE: /run/dockerlocal-secrets/scout_hub_password
       DOCKERLOCAL_EXPECTED_MCP_PROJECTS: "${DOCKERLOCAL_EXPECTED_MCP_PROJECTS:-dockerlocal-public,dockerlocal}"
     volumes:
       - type: bind
@@ -26,6 +28,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=3g,uid=65532,gid=65532,mode=1777
+      - /run/dockerlocal-secrets:rw,nosuid,nodev,noexec,size=64k,uid=65532,gid=65532,mode=0700
     cap_drop:
       - ALL
     security_opt:

@@ -36,7 +36,7 @@ class McpEdgeSecretHardeningTests(unittest.TestCase):
     def test_runtime_supervisor_rehydrates_missing_tmpfs_secret(self) -> None:
         self.assertIn('name = "mcp-edge"', SCRIPT)
         self.assertIn('required_files = @($RuntimeSecretPath)', SCRIPT)
-        self.assertIn('arguments = @("-Action", "Up")', SCRIPT)
+        self.assertIn('arguments = @("Up")', SCRIPT)
 
     def test_migration_keeps_rollback_compose_until_hardened_start_succeeds(self) -> None:
         self.assertIn("compose.pre-dpapi.yaml", SCRIPT)

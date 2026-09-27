@@ -6,13 +6,6 @@ description: >
   Restricted local Docker Desktop inspection, selected maintenance and
   Docker Scout analysis. DockerLocal itself has no raw Docker socket.
 longLived: true
-secrets:
-  - name: dockerlocal.scout_hub_user
-    env: DOCKER_SCOUT_HUB_USER
-    example: replace-with-docker-hub-username
-  - name: dockerlocal.scout_hub_password
-    env: DOCKER_SCOUT_HUB_PASSWORD
-    example: replace-with-docker-hub-token
 env:
   - name: DOCKER_API_URL
     value: http://host.docker.internal:23750
