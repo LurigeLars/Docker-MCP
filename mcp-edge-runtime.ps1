@@ -404,7 +404,7 @@ function Update-SupervisorConfig {
         }
         recovery = [pscustomobject]@{
             script = $StableScriptPath
-            arguments = @("-Action", "Up")
+            arguments = @("Up")
             working_directory = $EdgeRoot
         }
         cooldown_seconds = 30
