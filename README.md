@@ -226,7 +226,7 @@ The supervisor contains no credentials and is not exposed as an MCP tool. It onl
 %LOCALAPPDATA%\DockerLocalMCP\runtime-supervisor.local.json
 ```
 
-The configuration can check whether a named container is running, whether its Docker health status is `healthy`, and whether expected ephemeral files still exist inside the container.
+The configuration can define one or more container health checks per runtime: whether each named container is running, whether Docker reports it as `healthy`, and whether expected ephemeral files still exist inside it.
 
 Recovery is restricted to an absolute local `.ps1` file plus an argument array. There is no inline shell-command field.
 
