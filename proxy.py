@@ -65,7 +65,7 @@ def engine_json(method: str, target: str):
 
 
 SOURCE_FILE = re.compile(
-    r"(?<![A-Za-z0-9._-])(/[A-Za-z0-9_./-]+\\.(?:js|mjs|cjs|ts|mts|cts|py|pyw|ps1|sh|bash|rb|php|lua))(?![A-Za-z0-9._-])"
+    r"(?<![A-Za-z0-9._-])(/[A-Za-z0-9_./-]+\.(?:js|mjs|cjs|ts|mts|cts|py|pyw|ps1|sh|bash|rb|php|lua))(?![A-Za-z0-9._-])"
 )
 
 
@@ -75,7 +75,7 @@ def parse_docker_time(value: str) -> float | None:
         return None
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
-    match = re.match(r"^(.*?\\.)(\\d+)([+-]\\d{2}:\\d{2})$", text)
+    match = re.match(r"^(.*?\.)(\d+)([+-]\d{2}:\d{2})$", text)
     if match:
         text = match.group(1) + match.group(2)[:6] + match.group(3)
     try:
