@@ -43,10 +43,10 @@ class DockerLocalScoutHardeningTests(unittest.TestCase):
         self.assertIn('[string]$existingRuntime.name -eq "mcp-edge"', RUNTIME)
         self.assertIn('$existingRuntime.recovery.arguments = @("Up")', RUNTIME)
 
-    def test_migration_recreates_container_before_verifying_env_removal(self) -> None:
+    def test_migration_recreates_container_before_runtime_hydration(self) -> None:
         recreate = RUNTIME.index("--force-recreate")
-        verify = RUNTIME.index("if (-not (Test-LongLivedScoutEnvAbsent))")
-        self.assertLess(recreate, verify)
+        hydrate = RUNTIME.index("Invoke-RuntimeHydration", recreate)
+        self.assertLess(recreate, hydrate)
 
 
 if __name__ == "__main__":
