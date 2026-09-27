@@ -54,3 +54,8 @@ jobs:
           }
 
           Write-Host "Parsed $($Files.Count) PowerShell scripts successfully."
+
+      - name: Run maintenance runner regression self-test
+        shell: pwsh
+        run: |
+          ./maintenance-runner.ps1 -SelfTest
