@@ -226,7 +226,19 @@ def send_json_response(conn: socket.socket, status: str, payload: dict) -> None:
 
 
 def allowed(method: str, target: str) -> bool:
-    path = urllib.parse.urlsplit(target).path
+    parsed = urllib.parse.urlsplit(target)
+    path = parsed.path
+
+    # Docker Scout exports one local image through this alternate Engine API form:
+    # GET /images/get?names=sha256:<64-hex>. Keep it read-only and pinned to an
+    # immutable image ID rather than allowing arbitrary image names or bulk export.
+    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/get$", path):
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        if set(query) != {"names"}:
+            return False
+        names = query.get("names") or []
+        return len(names) == 1 and re.fullmatch(r"sha256:[0-9a-f]{64}", names[0]) is not None
+
     return any(method == m and rx.fullmatch(path) for m, rx in RULES)
 
 
