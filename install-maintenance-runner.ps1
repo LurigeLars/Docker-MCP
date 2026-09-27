@@ -42,14 +42,27 @@ Remove-Item -LiteralPath $Heartbeat -Force -ErrorAction SilentlyContinue
 $Command = "& '$($Runner.Replace("'","''"))'"
 $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command))
 
+$Wscript = "$env:SystemRoot\System32\wscript.exe"
+if (-not (Test-Path -LiteralPath $Wscript -PathType Leaf)) { throw "Windows Script Host was not found." }
+
+# Windows Terminal can surface a tab even when PowerShell is launched with
+# -WindowStyle Hidden. Use the same SW_HIDE=0 WScript launcher as the runtime
+# supervisor so both immediate start and logon autostart remain invisible.
+$Launcher = Join-Path $Root "maintenance-runner-launch.vbs"
+$CommandLine = ('"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {1}' -f $PowerShell, $Encoded)
+$VbsCommandLine = $CommandLine.Replace('"', '""')
+$LauncherBody = @"
+Set shell = CreateObject("WScript.Shell")
+shell.Run "$VbsCommandLine", 0, False
+"@
+[IO.File]::WriteAllText($Launcher, $LauncherBody, [Text.Encoding]::ASCII)
+
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$RunValue = ('"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {1}' -f $PowerShell, $Encoded)
+$RunValue = ('"{0}" "{1}"' -f $Wscript, $Launcher)
 New-Item -Path $RunKey -Force | Out-Null
 Set-ItemProperty -Path $RunKey -Name "DockerLocalMaintenanceRunner" -Value $RunValue
 
-Start-Process -FilePath $PowerShell -ArgumentList @(
-    "-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-EncodedCommand",$Encoded
-) -WindowStyle Hidden
+Start-Process -FilePath $Wscript -ArgumentList @('"' + $Launcher + '"') -WindowStyle Hidden
 
 $Deadline = (Get-Date).AddSeconds(10)
 while (-not (Test-Path -LiteralPath $Heartbeat) -and (Get-Date) -lt $Deadline) {
