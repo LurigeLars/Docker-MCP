@@ -38,9 +38,33 @@ if (-not (Test-Path -LiteralPath $WindowsPowerShell -PathType Leaf)) {
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
-$WindowStyleArgs = if ($Visible) { "" } else { "-WindowStyle Hidden " }
-$ActionArgs = $WindowStyleArgs + ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $Supervisor, $ConfigPath)
-$Action = New-ScheduledTaskAction -Execute $WindowsPowerShell -Argument $ActionArgs -WorkingDirectory $Root
+$ActionArgs = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $Supervisor, $ConfigPath
+
+if ($Visible) {
+    $Action = New-ScheduledTaskAction -Execute $WindowsPowerShell -Argument $ActionArgs -WorkingDirectory $Root
+}
+else {
+    $Wscript = "$env:SystemRoot\System32\wscript.exe"
+    if (-not (Test-Path -LiteralPath $Wscript -PathType Leaf)) {
+        throw "Windows Script Host was not found at the expected system path."
+    }
+
+    # PowerShell -WindowStyle Hidden can still surface a Windows Terminal tab when
+    # Windows Terminal is the system's default console host. A tiny WScript wrapper
+    # launches the long-running supervisor with SW_HIDE=0 and waits for it, so the
+    # scheduled task remains attached to the child process without showing a window.
+    $Launcher = Join-Path $Root "runtime-supervisor-launch.vbs"
+    $CommandLine = ('"{0}" {1}' -f $WindowsPowerShell, $ActionArgs)
+    $VbsCommandLine = $CommandLine.Replace('"', '""')
+    $LauncherBody = @"
+Set shell = CreateObject("WScript.Shell")
+exitCode = shell.Run("$VbsCommandLine", 0, True)
+WScript.Quit exitCode
+"@
+    [IO.File]::WriteAllText($Launcher, $LauncherBody, [Text.Encoding]::ASCII)
+
+    $Action = New-ScheduledTaskAction -Execute $Wscript -Argument ('"{0}"' -f $Launcher) -WorkingDirectory $Root
+}
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 $Principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited

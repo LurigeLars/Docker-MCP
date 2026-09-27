@@ -32,3 +32,5 @@ if (Test-Path (Join-Path $InstallDir "compose.proxy.yaml")) {
 docker image rm dockerlocal-mcp:local dockerlocal-socket-proxy:local
 Remove-Item $EntryPath -Force -ErrorAction SilentlyContinue
 Write-Host "DockerLocal removed."
+
+Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA "DockerLocalMCP\runtime-supervisor-launch.vbs") -Force -ErrorAction SilentlyContinue
