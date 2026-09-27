@@ -667,14 +667,31 @@ def maintenance_runner_status():
         return json.dumps({"status": "invalid"}, separators=(",", ":"))
     updated = int(data.get("updated_unix") or 0)
     age = max(0, int(time.time()) - updated) if updated else None
-    return json.dumps(
-        {
-            "status": "running" if age is not None and age <= 10 else "stale",
-            "age_seconds": age,
-            "pid": data.get("pid"),
-        },
-        separators=(",", ":"),
+    raw_status = str(data.get("status") or "")
+    job_id = str(data.get("job_id") or "")
+    processing = (
+        bool(job_id)
+        and JOB_ID.fullmatch(job_id) is not None
+        and (CONTROL_DIR / "processing" / f"{job_id}.json").exists()
     )
+
+    if raw_status == "busy" and processing and age is not None and age <= 3600:
+        status = "busy"
+    elif raw_status == "running" and age is not None and age <= 10:
+        status = "running"
+    else:
+        status = "stale"
+
+    payload = {
+        "status": status,
+        "age_seconds": age,
+        "pid": data.get("pid"),
+    }
+    if status == "busy":
+        payload["job_id"] = job_id
+        payload["project"] = data.get("project")
+
+    return json.dumps(payload, separators=(",", ":"))
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
