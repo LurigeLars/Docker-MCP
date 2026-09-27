@@ -1,0 +1,56 @@
+name: PowerShell syntax
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.ps1"
+      - ".github/workflows/powershell-syntax.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.ps1"
+      - ".github/workflows/powershell-syntax.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Failed = $false
+          $Files = Get-ChildItem -Path . -Recurse -Filter *.ps1 -File
+
+          foreach ($File in $Files) {
+            $Tokens = $null
+            $Errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $File.FullName,
+              [ref]$Tokens,
+              [ref]$Errors
+            )
+
+            if ($Errors.Count -gt 0) {
+              $Failed = $true
+              Write-Host "::error file=$($File.FullName)::PowerShell parse failure"
+              foreach ($ParseError in $Errors) {
+                Write-Host "$($ParseError.Extent.StartLineNumber):$($ParseError.Extent.StartColumnNumber) $($ParseError.Message)"
+              }
+            }
+          }
+
+          if ($Failed) {
+            exit 1
+          }
+
+          Write-Host "Parsed $($Files.Count) PowerShell scripts successfully."
