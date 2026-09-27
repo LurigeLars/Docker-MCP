@@ -242,7 +242,7 @@ Edit only the local copy to point at runtimes that genuinely need post-restart r
 .\install-runtime-supervisor.ps1
 ```
 
-The installer registers `DockerLocalRuntimeSupervisor` at Windows logon. By default it uses a tiny Windows Script Host wrapper so the long-running supervisor stays completely backgrounded even when Windows Terminal is the system's default console host. Pass `-Visible` only for foreground troubleshooting. The process remains attached to `docker events`; polling is used only while Docker Engine is unavailable so it can reconnect.
+The installer registers `DockerLocalRuntimeSupervisor` at Windows logon. By default it uses a tiny Windows Script Host wrapper so the long-running supervisor stays completely backgrounded even when Windows Terminal is the system's default console host. Pass `-Visible` only for foreground troubleshooting. The process remains attached to `docker events`; polling is used only while Docker Engine is unavailable so it can reconnect. Start/restart events use a short startup grace period for health-only runtimes, while tmpfs-file checks remain fast. Healthy healthcheck events are ignored so normal startup cannot create a recovery feedback loop.
 
 Do not add a runtime merely because it is Dockerized. Persistent `.env` configuration and ordinary Docker restart policies do not need this supervisor. It is intended for runtimes with a real host-side recovery step, especially ephemeral secret rehydration.
 

@@ -332,7 +332,24 @@ function Reconcile-Container {
 
         $Watched = @($Runtime.event_containers | ForEach-Object { [string]$_ })
         if ($Watched -contains $Container) {
-            Start-Sleep -Milliseconds 1200
+            # A container start is not itself a failure. Health-only runtimes get
+            # a short startup grace period so we do not recreate a service while
+            # its healthcheck is still "starting". Runtimes with required tmpfs
+            # files can be checked quickly because a missing file is decisive.
+            $HasRequiredFiles = @(
+                $Runtime.health.checks |
+                    ForEach-Object { @($_.required_files) } |
+                    Where-Object { $_ }
+            ).Count -gt 0
+
+            if ($Action -eq "start" -or $Action -eq "restart") {
+                $DelayMilliseconds = if ($HasRequiredFiles) { 1200 } else { 6000 }
+                Start-Sleep -Milliseconds $DelayMilliseconds
+            }
+            elseif ($Action -eq "health_status: unhealthy") {
+                Start-Sleep -Milliseconds 500
+            }
+
             $Reason = "docker-event:${Action}:${Container}"
             Invoke-RuntimeRecovery -Runtime $Runtime -Reason $Reason
         }
@@ -380,7 +397,7 @@ try {
                         if (
                             $Action -eq "start" -or
                             $Action -eq "restart" -or
-                            $Action -like "health_status:*"
+                            $Action -eq "health_status: unhealthy"
                         ) {
                             Reconcile-Container -Container $Container -Action $Action
                         }
