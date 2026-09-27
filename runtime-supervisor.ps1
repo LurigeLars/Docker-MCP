@@ -277,8 +277,6 @@ try {
                             if (
                                 $Action -eq "start" -or
                                 $Action -eq "restart" -or
-                                $Action -eq "die" -or
-                                $Action -eq "destroy" -or
                                 $Action -like "health_status:*"
                             ) {
                                 Reconcile-Container -Container $Container -Action $Action
