@@ -55,6 +55,10 @@ jobs:
 
           Write-Host "Parsed $($Files.Count) PowerShell scripts successfully."
 
+      - name: Run mcp-edge hardening regression tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_mcp_edge_hardening.py" -v
+
       - name: Run maintenance runner regression self-test
         shell: pwsh
         run: |
