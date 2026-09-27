@@ -5,6 +5,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+# Native commands populate this automatic variable, but StrictMode rejects reading it
+# before the first successful native-process assignment in a fresh PowerShell session.
+# Seed the global automatic variable once so subsequent exit-code checks fail closed
+# instead of crashing on an unbound variable.
+$global:LASTEXITCODE = 0
 
 if (-not $env:LOCALAPPDATA) {
     throw "LOCALAPPDATA is required."
