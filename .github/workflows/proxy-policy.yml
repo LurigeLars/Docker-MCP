@@ -26,5 +26,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Test proxy allowlist
+      - name: Compile Python entrypoints
+        run: python -m py_compile proxy.py server.py
+
+      - name: Test proxy allowlist and runtime drift policy
         run: python -m unittest tests.test_proxy_policy

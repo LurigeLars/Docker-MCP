@@ -393,9 +393,25 @@ def compose_status(project: str | None = None) -> list[dict[str, Any]]:
 
 @mcp.tool(annotations=READ_ONLY)
 def mcp_deployment_audit():
-    """Audit MCP-related Docker deployment health, unmanaged containers and local image drift."""
+    """Audit MCP deployment health, image drift and stale bind-mounted runtime source."""
     rows = _json("GET", "/containers/json", query={"all": "1"}) or []
     images = _json("GET", "/images/json", query={"all": "0"}) or []
+
+    try:
+        source_audit = _json("GET", "/dockerlocal/runtime-source-drift") or {}
+        if not isinstance(source_audit, dict):
+            source_audit = {}
+        source_audit.setdefault("status", "ok")
+        source_audit.setdefault("checked_files", 0)
+        source_audit.setdefault("drift", [])
+        source_audit.setdefault("errors", [])
+    except Exception as exc:
+        source_audit = {
+            "status": "unavailable",
+            "checked_files": 0,
+            "drift": [],
+            "errors": [{"error": type(exc).__name__}],
+        }
 
     image_ids_by_ref: dict[str, str] = {}
     for image in images:
@@ -498,11 +514,18 @@ def mcp_deployment_audit():
         "unmanaged_containers": unmanaged,
         "stopped_or_unhealthy": stopped_or_unhealthy,
         "local_image_drift": image_drift,
+        "runtime_source_audit": {
+            "status": source_audit.get("status"),
+            "checked_files": int(source_audit.get("checked_files") or 0),
+            "errors": source_audit.get("errors") or [],
+        },
+        "runtime_source_drift": source_audit.get("drift") or [],
         "summary": {
             "compose_projects": len(projects),
             "unmanaged_containers": len(unmanaged),
             "stopped_or_unhealthy": len(stopped_or_unhealthy),
             "local_image_drift": len(image_drift),
+            "runtime_source_drift": len(source_audit.get("drift") or []),
             "missing_expected_projects": len(missing_expected),
         },
     }
