@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import datetime
 import http.client
 import json
 import re
@@ -60,6 +62,134 @@ def engine_json(method: str, target: str):
     if status < 200 or status >= 300:
         raise RuntimeError(f"Docker Engine HTTP {status}")
     return None if not body else json.loads(body.decode("utf-8", "replace"))
+
+
+SOURCE_FILE = re.compile(
+    r"(?<![A-Za-z0-9._-])(/[A-Za-z0-9_./-]+\\.(?:js|mjs|cjs|ts|mts|cts|py|pyw|ps1|sh|bash|rb|php|lua))(?![A-Za-z0-9._-])"
+)
+
+
+def parse_docker_time(value: str) -> float | None:
+    text = str(value or "").strip()
+    if not text or text.startswith("0001-"):
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    match = re.match(r"^(.*?\\.)(\\d+)([+-]\\d{2}:\\d{2})$", text)
+    if match:
+        text = match.group(1) + match.group(2)[:6] + match.group(3)
+    try:
+        return datetime.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def command_source_paths(inspect: dict) -> list[str]:
+    mounts = []
+    for mount in inspect.get("Mounts") or []:
+        if mount.get("Type") != "bind" or bool(mount.get("RW")):
+            continue
+        destination = str(mount.get("Destination") or "").rstrip("/")
+        if destination.startswith("/"):
+            mounts.append(destination)
+
+    if not mounts:
+        return []
+
+    command_parts = []
+    for value in [inspect.get("Path"), *(inspect.get("Args") or [])]:
+        if value is not None:
+            command_parts.append(str(value))
+    config = inspect.get("Config") or {}
+    for field in ("Entrypoint", "Cmd"):
+        value = config.get(field)
+        if isinstance(value, list):
+            command_parts.extend(str(item) for item in value if item is not None)
+        elif value is not None:
+            command_parts.append(str(value))
+
+    candidates = set()
+    for part in command_parts:
+        if part.startswith("/") and SOURCE_FILE.fullmatch(part):
+            candidates.add(part)
+        candidates.update(match.group(1) for match in SOURCE_FILE.finditer(part))
+
+    return sorted(
+        path
+        for path in candidates
+        if any(path == mount or path.startswith(mount + "/") for mount in mounts)
+    )
+
+
+def container_path_stat(container_id: str, path: str) -> dict:
+    query = urllib.parse.urlencode({"path": path})
+    target = (
+        f"/containers/{urllib.parse.quote(container_id, safe='')}/archive?{query}"
+    )
+    status, headers, _body = engine_request("HEAD", target)
+    if status != 200:
+        raise RuntimeError(f"Docker Engine archive stat HTTP {status}")
+    encoded = headers.get("x-docker-container-path-stat")
+    if not encoded:
+        raise RuntimeError("Docker Engine archive stat header missing")
+    return json.loads(base64.b64decode(encoded).decode("utf-8", "replace"))
+
+
+def runtime_source_drift() -> dict:
+    rows = engine_json("GET", "/containers/json?all=1") or []
+    drift = []
+    checked_files = 0
+    errors = []
+
+    for row in rows:
+        if row.get("State") != "running":
+            continue
+        container_id = str(row.get("Id") or "")
+        if not container_id:
+            continue
+
+        try:
+            inspect = engine_json(
+                "GET",
+                f"/containers/{urllib.parse.quote(container_id, safe='')}/json",
+            ) or {}
+            started_text = str((inspect.get("State") or {}).get("StartedAt") or "")
+            started = parse_docker_time(started_text)
+            if started is None:
+                continue
+
+            labels = (inspect.get("Config") or {}).get("Labels") or row.get("Labels") or {}
+            name = str(inspect.get("Name") or ((row.get("Names") or [""])[0] or "")).lstrip("/")
+            for source_path in command_source_paths(inspect):
+                stat = container_path_stat(container_id, source_path)
+                modified_text = str(stat.get("mtime") or "")
+                modified = parse_docker_time(modified_text)
+                checked_files += 1
+                if modified is not None and modified > started + 1.0:
+                    drift.append(
+                        {
+                            "name": name,
+                            "project": labels.get("com.docker.compose.project"),
+                            "service": labels.get("com.docker.compose.service"),
+                            "container_path": source_path,
+                            "process_started_at": started_text,
+                            "source_modified_at": modified_text,
+                        }
+                    )
+        except Exception as exc:
+            errors.append(
+                {
+                    "container": ((row.get("Names") or [""])[0] or "").lstrip("/"),
+                    "error": type(exc).__name__,
+                }
+            )
+
+    return {
+        "status": "ok",
+        "checked_files": checked_files,
+        "drift": drift,
+        "errors": errors,
+    }
 
 
 def cleanup_stale_mcp_probes(min_age_seconds: int) -> dict:
@@ -276,6 +406,18 @@ class Handler(socketserver.BaseRequestHandler):
         method = method.upper()
         parsed_target = urllib.parse.urlsplit(target)
         path = parsed_target.path
+        if method == "GET" and path == "/dockerlocal/runtime-source-drift":
+            try:
+                send_json_response(self.request, "200 OK", runtime_source_drift())
+            except Exception as exc:
+                print(f"AUDIT ERROR {type(exc).__name__}", file=sys.stderr, flush=True)
+                send_json_response(
+                    self.request,
+                    "500 Internal Server Error",
+                    {"error": "runtime source drift audit failed"},
+                )
+            return
+
         if method == "POST" and path == "/dockerlocal/cleanup-stale-mcp-probes":
             try:
                 query = urllib.parse.parse_qs(parsed_target.query, keep_blank_values=False)
