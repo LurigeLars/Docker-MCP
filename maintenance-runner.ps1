@@ -180,18 +180,19 @@ function Invoke-ScriptHandler {
 
     # -EncodedCommand does not reliably turn every script-level terminating error
     # into a non-zero process exit code on its own. Make process semantics explicit.
-    $Invocation = @"
-\$ErrorActionPreference = 'Stop'
-try {
-    $Command
-    if (-not \$?) { exit 1 }
-    exit 0
-}
-catch {
-    [Console]::Error.WriteLine((\$_ | Out-String))
-    exit 1
-}
-"@
+    $InvocationLines = @(
+        '$ErrorActionPreference = ''Stop'''
+        'try {'
+        "    $Command"
+        '    if (-not $?) { exit 1 }'
+        '    exit 0'
+        '}'
+        'catch {'
+        '    [Console]::Error.WriteLine(($_ | Out-String))'
+        '    exit 1'
+        '}'
+    )
+    $Invocation = $InvocationLines -join [Environment]::NewLine
     $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Invocation))
 
     $StdOutPath = Join-Path $Control ("maintenance-{0}.out.log" -f $JobId)
