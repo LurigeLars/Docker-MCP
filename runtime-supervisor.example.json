@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "runtimes": [
+    {
+      "name": "example-runtime",
+      "enabled": true,
+      "event_containers": ["example-gateway"],
+      "health": {
+        "container": "example-gateway",
+        "require_healthy": true,
+        "required_files": []
+      },
+      "recovery": {
+        "script": "C:\\path\\to\\project\\recover.ps1",
+        "arguments": ["up"],
+        "working_directory": "C:\\path\\to\\project"
+      },
+      "cooldown_seconds": 30
+    },
+    {
+      "name": "example-runtime-with-ephemeral-secret",
+      "enabled": false,
+      "event_containers": ["example-service"],
+      "health": {
+        "container": "example-service",
+        "require_healthy": true,
+        "required_files": ["/run/example-secrets/api_key"]
+      },
+      "recovery": {
+        "script": "C:\\path\\to\\project\\runtime.ps1",
+        "arguments": ["-Action", "ImportRuntimeSecret"],
+        "working_directory": "C:\\path\\to\\project"
+      },
+      "cooldown_seconds": 30
+    }
+  ]
+}
