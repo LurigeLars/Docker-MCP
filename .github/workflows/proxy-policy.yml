@@ -1,0 +1,30 @@
+name: Docker proxy policy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "proxy.py"
+      - "tests/test_proxy_policy.py"
+      - ".github/workflows/proxy-policy.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "proxy.py"
+      - "tests/test_proxy_policy.py"
+      - ".github/workflows/proxy-policy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Test proxy allowlist
+        run: python -m unittest tests.test_proxy_policy
