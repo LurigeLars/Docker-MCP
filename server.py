@@ -619,6 +619,43 @@ def maintenance_job_status(job_id: str):
 
 
 @mcp.tool(annotations=READ_ONLY)
+def runtime_supervisor_status(log_tail: int = 40):
+    """Report host runtime-supervisor state and a bounded, redacted log tail."""
+    log_tail = max(1, min(int(log_tail), 200))
+    state_path = CONTROL_DIR / "runtime-supervisor-state.json"
+    log_path = CONTROL_DIR / "runtime-supervisor.log"
+
+    payload: dict[str, Any] = {"status": "missing", "state": None, "log_tail": []}
+
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            updated = int(state.get("updated_unix") or 0)
+            age = max(0, int(time.time()) - updated) if updated else None
+            payload["state"] = state
+            payload["age_seconds"] = age
+            payload["status"] = (
+                "running"
+                if age is not None
+                and age <= 30
+                and str(state.get("status") or "") not in {"stopped", "failed"}
+                else "stale"
+            )
+        except Exception as exc:
+            payload["status"] = "invalid"
+            payload["state_error"] = str(exc)
+
+    if log_path.exists():
+        try:
+            lines = log_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+            payload["log_tail"] = [_redact(line) for line in lines[-log_tail:]]
+        except Exception as exc:
+            payload["log_error"] = str(exc)
+
+    return json.dumps(payload, separators=(",", ":"))
+
+
+@mcp.tool(annotations=READ_ONLY)
 def maintenance_runner_status():
     """Report whether the host-side allowlisted Docker maintenance runner is alive."""
     heartbeat = CONTROL_DIR / "runner-heartbeat.json"
