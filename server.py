@@ -587,7 +587,7 @@ def compose_redeploy(
     services: list[str] | None = None,
     operation: Literal["redeploy_current", "rebuild_and_redeploy"] = "rebuild_and_redeploy",
 ):
-    """Queue an allowlisted Compose redeploy using one of two fixed maintenance operations."""
+    """Queue an allowlisted project redeploy using fixed Compose or local script-backed maintenance."""
     project = _project(project)
     clean_services: list[str] = []
     for service in services or []:
