@@ -356,6 +356,25 @@ function Reconcile-Container {
     }
 }
 
+function Start-DockerEventStream {
+    $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $StartInfo.FileName = $Docker
+    $StartInfo.Arguments = 'events --format "{{json .}}" --filter "type=container"'
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.CreateNoWindow = $true
+    $StartInfo.RedirectStandardOutput = $true
+
+    $Process = New-Object System.Diagnostics.Process
+    $Process.StartInfo = $StartInfo
+
+    if (-not $Process.Start()) {
+        $Process.Dispose()
+        throw "Failed to start Docker event stream."
+    }
+
+    return $Process
+}
+
 $Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalRuntimeSupervisor")
 if (-not $Mutex.WaitOne(0)) {
     exit 0
@@ -368,47 +387,81 @@ try {
     while ($true) {
         Wait-Docker
 
-        Write-State -Status "reconciling" -Detail "docker-connected"
-
+        $EventProcess = $null
         try {
-            Reconcile-All -Reason "docker-connected"
-        }
-        catch {
-            Write-SupervisorLog "initial reconcile failed: $($_.Exception.Message)"
-        }
+            # Subscribe before the initial reconcile. Any start/restart event that
+            # occurs while a recovery script is running remains buffered in the
+            # Docker events stream and is handled afterwards instead of being lost.
+            $EventProcess = Start-DockerEventStream
+            Write-SupervisorLog "Docker event stream connected."
 
-        Write-State -Status "watching"
-        Write-SupervisorLog "subscribing to Docker container events."
+            Write-State -Status "reconciling" -Detail "docker-connected"
 
-        try {
-            $EventArgs = @("events", "--format", "{{json .}}", "--filter", "type=container")
-            & $Docker @EventArgs 2>$null |
-                ForEach-Object {
-                    $Line = [string]$_
-                    if ([string]::IsNullOrWhiteSpace($Line)) {
-                        return
-                    }
+            try {
+                Reconcile-All -Reason "docker-connected"
+            }
+            catch {
+                Write-SupervisorLog "initial reconcile failed: $($_.Exception.Message)"
+            }
 
-                    try {
-                        $Event = $Line | ConvertFrom-Json
-                        $Action = [string]$Event.Action
-                        $Container = [string]$Event.Actor.Attributes.name
+            Write-State -Status "watching"
+            Write-SupervisorLog "runtime supervisor watching Docker container events."
 
-                        if (
-                            $Action -eq "start" -or
-                            $Action -eq "restart" -or
-                            $Action -eq "health_status: unhealthy"
-                        ) {
-                            Reconcile-Container -Container $Container -Action $Action
-                        }
-                    }
-                    catch {
-                        Write-SupervisorLog "ignored malformed Docker event."
+            while (-not $EventProcess.HasExited) {
+                $ReadTask = $EventProcess.StandardOutput.ReadLineAsync()
+
+                while (-not $ReadTask.Wait(5000)) {
+                    # Heartbeat only; this does not poll Docker.
+                    Write-State -Status "watching"
+                    if ($EventProcess.HasExited) {
+                        break
                     }
                 }
+
+                if (-not $ReadTask.IsCompleted) {
+                    continue
+                }
+
+                $Line = [string]$ReadTask.Result
+                if ([string]::IsNullOrWhiteSpace($Line)) {
+                    if ($EventProcess.HasExited) {
+                        break
+                    }
+                    continue
+                }
+
+                try {
+                    $Event = $Line | ConvertFrom-Json
+                    $Action = [string]$Event.Action
+                    $Container = [string]$Event.Actor.Attributes.name
+
+                    if (
+                        $Action -eq "start" -or
+                        $Action -eq "restart" -or
+                        $Action -eq "health_status: unhealthy"
+                    ) {
+                        Reconcile-Container -Container $Container -Action $Action
+                    }
+                }
+                catch {
+                    Write-SupervisorLog "ignored malformed Docker event."
+                }
+            }
+
+            if ($EventProcess.HasExited) {
+                Write-SupervisorLog "Docker event stream exited with code $($EventProcess.ExitCode)."
+            }
         }
         catch {
-            Write-SupervisorLog "Docker event stream ended: $($_.Exception.Message)"
+            Write-SupervisorLog "Docker event stream failed: $($_.Exception.Message)"
+        }
+        finally {
+            if ($null -ne $EventProcess) {
+                if (-not $EventProcess.HasExited) {
+                    try { $EventProcess.Kill() } catch {}
+                }
+                $EventProcess.Dispose()
+            }
         }
 
         Write-State -Status "waiting_for_docker"

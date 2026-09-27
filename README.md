@@ -218,7 +218,7 @@ Windows logon
   -> allowlisted local recovery script
 ```
 
-When Docker Engine itself disappears, the supervisor waits. When Docker becomes available again it performs one reconciliation pass and then reconnects to the Docker event stream. It does not query healthy containers every few minutes.
+When Docker Engine itself disappears, the supervisor waits. When Docker becomes available again it subscribes to the Docker event stream **before** the initial reconciliation pass, so container events that occur during a longer recovery are buffered rather than lost. While idle it refreshes only its local heartbeat state; it does not query healthy containers every few minutes.
 
 The supervisor contains no credentials and is not exposed as an MCP tool. It only invokes PowerShell scripts explicitly listed in the trusted local configuration file:
 
