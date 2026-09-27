@@ -1,5 +1,6 @@
 param(
-    [string]$ConfigPath = (Join-Path $env:LOCALAPPDATA "DockerLocalMCP\runtime-supervisor.local.json")
+    [string]$ConfigPath = (Join-Path $env:LOCALAPPDATA "DockerLocalMCP\runtime-supervisor.local.json"),
+    [switch]$Visible
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,7 +38,8 @@ if (-not (Test-Path -LiteralPath $WindowsPowerShell -PathType Leaf)) {
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
-$ActionArgs = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $Supervisor, $ConfigPath
+$WindowStyleArgs = if ($Visible) { "" } else { "-WindowStyle Hidden " }
+$ActionArgs = $WindowStyleArgs + ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $Supervisor, $ConfigPath)
 $Action = New-ScheduledTaskAction -Execute $WindowsPowerShell -Argument $ActionArgs -WorkingDirectory $Root
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
