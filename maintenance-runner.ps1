@@ -1,3 +1,5 @@
+param([switch]$SelfTest)
+
 $ErrorActionPreference = "Stop"
 
 $Root = Join-Path $env:LOCALAPPDATA "DockerLocalMCP"
@@ -164,10 +166,32 @@ function Invoke-ScriptHandler {
         throw "PowerShell 7 (pwsh.exe) is required for script-backed maintenance projects."
     }
 
-    $Invocation = "& '" + $Script.Replace("'", "''") + "'"
+    $Command = "& '" + $Script.Replace("'", "''") + "'"
     foreach ($Argument in $Arguments) {
-        $Invocation += " '" + ([string]$Argument).Replace("'", "''") + "'"
+        $ArgumentText = [string]$Argument
+        if ($ArgumentText -match '^-[A-Za-z][A-Za-z0-9-]*$') {
+            # Preserve allowlisted PowerShell parameter tokens such as -Action.
+            $Command += " " + $ArgumentText
+        }
+        else {
+            $Command += " '" + $ArgumentText.Replace("'", "''") + "'"
+        }
     }
+
+    # -EncodedCommand does not reliably turn every script-level terminating error
+    # into a non-zero process exit code on its own. Make process semantics explicit.
+    $Invocation = @"
+\$ErrorActionPreference = 'Stop'
+try {
+    $Command
+    if (-not \$?) { exit 1 }
+    exit 0
+}
+catch {
+    [Console]::Error.WriteLine((\$_ | Out-String))
+    exit 1
+}
+"@
     $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Invocation))
 
     $StdOutPath = Join-Path $Control ("maintenance-{0}.out.log" -f $JobId)
@@ -315,6 +339,65 @@ function Run-ProjectRedeploy {
         operation = $Operation
         execution_mode = "compose"
     }
+}
+
+function Invoke-RunnerSelfTest {
+    $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("dockerlocal-runner-selftest-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
+    $TestScript = Join-Path $TestRoot "handler.ps1"
+
+    try {
+        @'
+param(
+    [ValidateSet("Up", "Redeploy")]
+    [string]$Action
+)
+Write-Output "ACTION=$Action"
+'@ | Set-Content -LiteralPath $TestScript -Encoding utf8
+
+        $Named = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Named.exit_code -ne 0 -or [string]$Named.output -notmatch 'ACTION=Redeploy') {
+            throw "Named-parameter script invocation regression."
+        }
+
+        $Positional = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Positional.exit_code -ne 0 -or [string]$Positional.output -notmatch 'ACTION=Redeploy') {
+            throw "Positional script invocation regression."
+        }
+
+        $Invalid = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "DefinitelyInvalid") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Invalid.exit_code -eq 0) {
+            throw "Script failure was incorrectly reported as exit code 0."
+        }
+
+        Write-Host "maintenance runner self-test: PASS"
+    }
+    finally {
+        Remove-Item -LiteralPath $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if ($SelfTest) {
+    Invoke-RunnerSelfTest
+    exit 0
 }
 
 $Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenanceRunner")
