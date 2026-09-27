@@ -7,6 +7,11 @@ SCRIPT = (ROOT / "mcp-edge-runtime.ps1").read_text(encoding="utf-8")
 
 
 class McpEdgeSecretHardeningTests(unittest.TestCase):
+    def test_lastexitcode_is_seeded_before_native_exit_checks(self) -> None:
+        seed = SCRIPT.index("$global:LASTEXITCODE = 0")
+        first_check = SCRIPT.index("$LASTEXITCODE")
+        self.assertLessEqual(seed, first_check)
+
     def test_tunnel_token_is_dpapi_backed(self) -> None:
         self.assertIn("tunnel_token.dpapi", SCRIPT)
         self.assertIn("ConvertFrom-SecureString", SCRIPT)
