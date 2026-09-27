@@ -208,8 +208,37 @@ def _read_job(job_id: str) -> dict[str, Any]:
     return {"job_id": job_id, "status": "unknown"}
 
 
+def _read_runtime_secret(path: str) -> str | None:
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    return value or None
+
+
 def _scout(args: list[str], timeout: int = 180) -> str:
     env = os.environ.copy()
+    # Never inherit Docker Hub credentials from the long-lived MCP container.
+    # The host supervisor materializes them into tmpfs files; only the short-lived
+    # docker-scout subprocess receives the decrypted values.
+    env.pop("DOCKER_SCOUT_HUB_USER", None)
+    env.pop("DOCKER_SCOUT_HUB_PASSWORD", None)
+
+    user_file = os.environ.get(
+        "DOCKER_SCOUT_HUB_USER_FILE",
+        "/run/dockerlocal-secrets/scout_hub_user",
+    )
+    password_file = os.environ.get(
+        "DOCKER_SCOUT_HUB_PASSWORD_FILE",
+        "/run/dockerlocal-secrets/scout_hub_password",
+    )
+    scout_user = _read_runtime_secret(user_file)
+    scout_password = _read_runtime_secret(password_file)
+    if scout_user:
+        env["DOCKER_SCOUT_HUB_USER"] = scout_user
+    if scout_password:
+        env["DOCKER_SCOUT_HUB_PASSWORD"] = scout_password
+
     env.setdefault("DOCKER_HOST", "tcp://host.docker.internal:23750")
     env.setdefault("DOCKER_SCOUT_CACHE_DIR", "/tmp/docker-scout")
     env.setdefault("DOCKER_SCOUT_NEW_VERSION_WARN", "false")
