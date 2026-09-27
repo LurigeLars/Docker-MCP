@@ -1,0 +1,78 @@
+name: dockerlocal-public
+
+services:
+  mcp:
+    image: dockerlocal-mcp:local
+    container_name: dockerlocal-mcp-http
+    environment:
+      DOCKERLOCAL_MCP_TRANSPORT: http
+      DOCKERLOCAL_MCP_HOST: 0.0.0.0
+      DOCKERLOCAL_MCP_PORT: "8811"
+      DOCKERLOCAL_CONTROL_DIR: /control
+      DOCKER_API_URL: http://dockerlocal-socket-proxy:2375
+      DOCKER_HOST: tcp://dockerlocal-socket-proxy:2375
+      DOCKER_SCOUT_CACHE_DIR: /tmp/docker-scout
+      DOCKER_SCOUT_NEW_VERSION_WARN: "false"
+      DOCKERLOCAL_EXPECTED_MCP_PROJECTS: "${DOCKERLOCAL_EXPECTED_MCP_PROJECTS:-dockerlocal-public,dockerlocal}"
+    volumes:
+      - type: bind
+        source: ${LOCALAPPDATA}/DockerLocalMCP/control
+        target: /control
+    expose:
+      - "8811"
+    networks:
+      - docker_backend
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=3g,uid=65532,gid=65532,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 4g
+    cpus: 1.0
+    restart: unless-stopped
+
+  gateway:
+    image: node:26.9.0-alpine
+    container_name: dockerlocal-gateway
+    command: ["node", "/app/gateway.mjs"]
+    user: node
+    env_file:
+      - ./public/gateway.env
+    environment:
+      UPSTREAM_HOST: mcp
+      UPSTREAM_PORT: "8811"
+      UPSTREAM_PATH: /mcp
+      PORT: "8080"
+      RATE_PER_MIN: "180"
+      ALLOWED_TOOLS: containers_list,container_inspect,container_logs,container_stats,compose_status,mcp_deployment_audit,image_usage_audit,cleanup_stale_mcp_containers,cleanup_superseded_images,compose_redeploy,maintenance_job_status,maintenance_runner_status,images_list,image_inspect,image_pull,container_restart,image_prune_dangling,scout_quickview,scout_cves,scout_recommendations,scout_sbom,scout_compare
+    volumes:
+      - ./public/gateway:/app:ro
+    depends_on:
+      - mcp
+    networks:
+      edge:
+        aliases:
+          - dockerlocal-gateway
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 96m
+    cpus: 0.25
+    restart: unless-stopped
+
+networks:
+  docker_backend:
+    external: true
+    name: dockerlocal_default
+  edge:
+    name: dockerlocal-public_edge
+    driver: bridge

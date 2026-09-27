@@ -1,0 +1,24 @@
+name: dockerlocal
+
+services:
+  socket-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    image: dockerlocal-socket-proxy:local
+    container_name: dockerlocal-socket-proxy
+    ports:
+      - "127.0.0.1:23750:2375"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 64
+    restart: unless-stopped

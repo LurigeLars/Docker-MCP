@@ -1,0 +1,7 @@
+{
+  "example-project": {
+    "working_dir": "<absolute-project-directory>",
+    "files": ["compose.yaml"],
+    "services": ["app", "gateway"]
+  }
+}

@@ -1,0 +1,28 @@
+# Runtime secrets
+.env
+.env.*
+!.env.example
+public/gateway.env
+**/*.secret
+**/*.secrets
+
+# Local machine configuration
+maintenance-projects.local.json
+*.local.json
+
+# Runtime state
+control/
+*.log
+*.pid
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
