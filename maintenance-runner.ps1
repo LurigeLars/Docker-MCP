@@ -264,6 +264,13 @@ try {
                 if ([string]$Job.action -ne "compose_redeploy") { throw "Action is not allowlisted." }
 
                 $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "busy"
+                    pid = $PID
+                    job_id = $JobId
+                    project = [string]$Job.project
+                    updated_unix = $Started
+                }
                 $Run = Run-ProjectRedeploy -Job $Job
                 $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
 
@@ -285,6 +292,11 @@ try {
             }
             finally {
                 Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "running"
+                    pid = $PID
+                    updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                }
             }
         }
 
