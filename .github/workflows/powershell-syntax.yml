@@ -59,3 +59,11 @@ jobs:
         shell: pwsh
         run: |
           ./maintenance-runner.ps1 -SelfTest
+
+      - name: Verify maintenance runner stays hidden
+        shell: pwsh
+        run: |
+          $Installer = Get-Content ./install-maintenance-runner.ps1 -Raw
+          if ($Installer -notmatch 'wscript\.exe') { throw "Hidden WScript launcher missing." }
+          if ($Installer -notmatch 'shell\.Run.+, 0, False') { throw "Runner launcher is not configured with SW_HIDE." }
+          if ($Installer -notmatch 'Set-ItemProperty.+DockerLocalMaintenanceRunner') { throw "Logon autostart registration missing." }
