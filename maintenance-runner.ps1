@@ -203,7 +203,7 @@ function Invoke-ScriptHandler {
     try {
         $Process = Start-Process `
             -FilePath $PwshCommand.Source `
-            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $EncodedCommand) `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-EncodedCommand", $EncodedCommand) `
             -WorkingDirectory $WorkingDirectory `
             -WindowStyle Hidden `
             -RedirectStandardOutput $StdOutPath `
@@ -354,6 +354,7 @@ param(
     [string]$Action
 )
 Write-Output "ACTION=$Action"
+Write-Host "HOST=$Action"
 '@ | Set-Content -LiteralPath $TestScript -Encoding utf8
 
         $Named = Invoke-ScriptHandler `
@@ -363,8 +364,13 @@ Write-Output "ACTION=$Action"
             -Arguments @("-Action", "Redeploy") `
             -WorkingDirectory $TestRoot
 
-        if ([int]$Named.exit_code -ne 0 -or [string]$Named.output -notmatch 'ACTION=Redeploy') {
-            throw "Named-parameter script invocation regression."
+        if (
+            [int]$Named.exit_code -ne 0 -or
+            [string]$Named.output -notmatch 'ACTION=Redeploy' -or
+            [string]$Named.output -notmatch 'HOST=Redeploy' -or
+            [string]$Named.output -match '#< CLIXML'
+        ) {
+            throw "Named-parameter/text-output script invocation regression."
         }
 
         $Positional = Invoke-ScriptHandler `
