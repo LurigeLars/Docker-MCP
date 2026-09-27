@@ -2,12 +2,12 @@ FROM docker/scout-cli:1.25 AS scout
 
 FROM python:3.12-slim
 
-ARG FASTMCP_VERSION=4.0.5
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && python -m pip install --no-cache-dir "fastmcp==${FASTMCP_VERSION}"
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY --from=scout /docker-scout /usr/local/bin/docker-scout
 COPY server.py /app/server.py
