@@ -232,7 +232,7 @@ def allowed(method: str, target: str) -> bool:
     # Docker Scout exports one local image through this alternate Engine API form:
     # GET /images/get?names=sha256:<64-hex>. Keep it read-only and pinned to an
     # immutable image ID rather than allowing arbitrary image names or bulk export.
-    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/get$", path):
+    if method == "GET" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/get$", path):
         query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         if set(query) != {"names"}:
             return False
