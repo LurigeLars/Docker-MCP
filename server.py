@@ -5,6 +5,7 @@ import os
 import re
 import struct
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -28,6 +29,7 @@ IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
 COMPOSE_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 HOST_MAINTENANCE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 SEVERITIES = {"critical", "high", "medium", "low", "unspecified"}
+_SCOUT_LOCK = threading.Lock()
 EXPECTED_MCP_PROJECTS = tuple(
     p.strip()
     for p in os.environ.get(
@@ -281,16 +283,20 @@ def _scout(args: list[str], timeout: int = 180) -> str:
     env.setdefault("DOCKER_SCOUT_NEW_VERSION_WARN", "false")
     env.setdefault("NO_COLOR", "1")
 
-    result = subprocess.run(
-        ["/usr/local/bin/docker-scout", *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        env=env,
-    )
+    # Docker Scout uses a shared cache directory and does not tolerate concurrent
+    # writers reliably. Serialize Scout subprocesses within this long-lived MCP
+    # process so parallel tool calls cannot contend for the same cache lock.
+    with _SCOUT_LOCK:
+        result = subprocess.run(
+            ["/usr/local/bin/docker-scout", *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=env,
+        )
     output = result.stdout or ""
     if len(output) > MAX_OUTPUT:
         output = output[:MAX_OUTPUT] + "\n...[output truncated]"
