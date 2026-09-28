@@ -134,6 +134,9 @@ if (Test-Path -LiteralPath $HostMaintenanceConfig -PathType Leaf) {
             if ([string]::IsNullOrWhiteSpace($OriginUrl)) {
                 throw "Repository $Alias must define origin_url."
             }
+            if ($OriginUrl -notmatch '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
+                throw "Repository $Alias origin_url must be an HTTPS github.com repository URL."
+            }
             if (-not [string]::IsNullOrWhiteSpace($ConfiguredBranch) -and $ConfiguredBranch -ne "main") {
                 throw "Repository $Alias may only use branch main."
             }
@@ -447,7 +450,7 @@ function Invoke-RepositoryPull {
     if ([bool]$Before.conflicts) { throw "Repository has unresolved conflicts." }
     if (-not [bool]$Before.origin_ok) { throw "Repository origin does not match the allowlist." }
 
-    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "origin", "main")
+    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "--no-rebase", "origin", "main")
     if ([int]$Pull.exit_code -ne 0) {
         throw "git pull --ff-only failed with exit code $([int]$Pull.exit_code)."
     }
