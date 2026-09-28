@@ -84,6 +84,7 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
             $Projects[$Name] = @{
                 Mode = "script"
                 WorkingDir = $WorkingDir
+                Files = $Files
                 Services = $Services
                 Script = $Script
                 Operations = $Operations
@@ -378,7 +379,8 @@ function Get-ComposeDesiredState {
 
     foreach ($Project in @($Projects.Keys | Sort-Object)) {
         $Cfg = $Projects[$Project]
-        if ([string]$Cfg.Mode -ne "compose") {
+        $ConfiguredFiles = @($Cfg.Files)
+        if ($ConfiguredFiles.Count -eq 0) {
             continue
         }
 
