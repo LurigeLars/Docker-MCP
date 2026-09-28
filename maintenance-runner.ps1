@@ -646,6 +646,68 @@ Write-Host "HOST=$Action"
             throw "Script failure was incorrectly reported as exit code 0."
         }
 
+        $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
+        $OriginRepo = Join-Path $TestRoot "origin.git"
+        $SeedRepo = Join-Path $TestRoot "seed"
+        $TargetRepo = Join-Path $TestRoot "target"
+
+        & $GitExe init --bare $OriginRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test bare init failed." }
+        & $GitExe init -b main $SeedRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test seed init failed." }
+        & $GitExe -C $SeedRepo config user.name "DockerLocal SelfTest"
+        & $GitExe -C $SeedRepo config user.email "selftest@example.invalid"
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "one" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "initial" *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial commit failed." }
+        & $GitExe -C $SeedRepo remote add origin $OriginRepo
+        & $GitExe -C $SeedRepo push -u origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial push failed." }
+        & $GitExe clone --branch main $OriginRepo $TargetRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test clone failed." }
+
+        $SelfTestOrigin = (& $GitExe -C $TargetRepo remote get-url origin | Out-String).Trim()
+        $HostRepositories["selftest-repo"] = @{
+            Path = [IO.Path]::GetFullPath($TargetRepo).TrimEnd('\')
+            OriginUrl = $SelfTestOrigin
+            Branch = "main"
+        }
+
+        $BeforeState = Get-RepositoryState -Alias "selftest-repo"
+        if (-not [bool]$BeforeState.eligible_for_pull) {
+            throw "Clean main repository was not eligible for pull."
+        }
+
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "two" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "update" *> $null
+        & $GitExe -C $SeedRepo push origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test update push failed." }
+
+        $PullState = Invoke-RepositoryPull -Alias "selftest-repo"
+        if (
+            -not [bool]$PullState.changed -or
+            [string]$PullState.before_head -eq [string]$PullState.after_head -or
+            -not [bool]$PullState.clean
+        ) {
+            throw "Fast-forward repository maintenance regression."
+        }
+
+        Set-Content -LiteralPath (Join-Path $TargetRepo "dirty.txt") -Value "dirty" -Encoding ascii
+        $DirtyBlocked = $false
+        try {
+            [void](Invoke-RepositoryPull -Alias "selftest-repo")
+        }
+        catch {
+            if ($_.Exception.Message -eq "Repository has local changes.") {
+                $DirtyBlocked = $true
+            }
+        }
+        if (-not $DirtyBlocked) { throw "Dirty repository pull was not blocked." }
+
+        $HostRepositories.Remove("selftest-repo")
+
         Write-Host "maintenance runner self-test: PASS"
     }
     finally {
