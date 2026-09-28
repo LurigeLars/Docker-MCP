@@ -538,16 +538,22 @@ function Invoke-AllowlistedScheduledTaskControl {
     $Task = $Resolved.Task
 
     if ($Operation -eq "start") {
-        $Task | Start-ScheduledTask
-        Start-Sleep -Milliseconds 300
+        if ([string]$Before.state -ne "Running") {
+            $Task | Start-ScheduledTask
+            Start-Sleep -Milliseconds 300
+        }
     }
     elseif ($Operation -eq "stop") {
-        $Task | Stop-ScheduledTask
-        [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
     }
     else {
-        $Task | Stop-ScheduledTask
-        [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
         $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
         $Resolved.Task | Start-ScheduledTask
         Start-Sleep -Milliseconds 300
