@@ -1,6 +1,26 @@
 import json
+import sys
+import types
 import unittest
 from unittest import mock
+
+
+class _DummyMCP:
+    def tool(self, **_kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+
+fastmcp = types.ModuleType("fastmcp")
+fastmcp.FastMCP = lambda _name: _DummyMCP()
+mcp_pkg = types.ModuleType("mcp")
+mcp_types = types.ModuleType("mcp.types")
+mcp_types.ToolAnnotations = lambda **_kwargs: object()
+mcp_pkg.types = mcp_types
+sys.modules.setdefault("fastmcp", fastmcp)
+sys.modules.setdefault("mcp", mcp_pkg)
+sys.modules.setdefault("mcp.types", mcp_types)
 
 import server
 
