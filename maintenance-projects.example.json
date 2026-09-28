@@ -1,18 +1,41 @@
 {
   "example-compose-project": {
     "working_dir": "<absolute-project-directory>",
-    "files": ["compose.yaml"],
-    "services": ["app", "gateway"]
+    "files": [
+      "compose.yaml"
+    ],
+    "services": [
+      "app",
+      "gateway"
+    ]
   },
   "example-script-project": {
     "working_dir": "<absolute-project-directory>",
-    "services": ["app", "worker"],
+    "services": [
+      "app",
+      "worker"
+    ],
     "handler": {
       "script": "<absolute-path-to-project-wrapper.ps1>",
       "operations": {
-        "redeploy_current": ["-Action", "Up"],
-        "rebuild_and_redeploy": ["-Action", "Up"]
+        "redeploy_current": [
+          "-Action",
+          "Up"
+        ],
+        "rebuild_and_redeploy": [
+          "-Action",
+          "Up"
+        ]
       }
     }
+  },
+  "avanza-mcp-public": {
+    "working_dir": "<absolute-path-to-avanza-mcp>",
+    "files": [
+      "compose.public.yaml"
+    ],
+    "services": [
+      "gateway"
+    ]
   }
 }
