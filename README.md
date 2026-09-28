@@ -263,6 +263,16 @@ Scheduled Task lookup is exact after local alias resolution. The remote MCP call
 
 The four host-maintenance tools return compact structured JSON. If a bounded synchronous call times out, it returns a `job_id` that can be inspected with `maintenance_job_status`.
 
+For the initial activation on an already-installed DockerLocal stack, `enable-host-maintenance.ps1` validates one repository and one Scheduled Task, merges them into the local allowlist, preserves the existing Cloudflare gateway configuration, rebuilds the MCP image and restarts the Maintenance Runner. Re-run it with another pair of aliases to extend the local allowlist later.
+
+```powershell
+.\enable-host-maintenance.ps1 `
+  -RepositoryAlias example-repo `
+  -RepositoryPath C:\path\to\example-repo `
+  -ScheduledTaskAlias example-service `
+  -ScheduledTaskName ExampleScheduledTask
+```
+
 ## Event-driven local runtime supervisor
 
 Some local MCP runtimes intentionally keep credentials only in ephemeral container storage such as `tmpfs`. Those credentials disappear when Docker Desktop or the container is restarted. Requiring a user to rerun a bootstrap script after every Docker restart defeats the purpose of a resilient local runtime.
