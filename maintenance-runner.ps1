@@ -240,6 +240,105 @@ function Invoke-ScriptHandler {
     }
 }
 
+function Invoke-DockerText {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    Push-Location $WorkingDirectory
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $Output = (& $Docker @Arguments 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+        Pop-Location
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Get-ComposeDesiredState {
+    $Desired = @{}
+    $Errors = @()
+
+    foreach ($Project in @($Projects.Keys | Sort-Object)) {
+        $Cfg = $Projects[$Project]
+        if ([string]$Cfg.Mode -ne "compose") {
+            continue
+        }
+
+        $WorkingDir = [string]$Cfg.WorkingDir
+        if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+            $Errors += @{ project = $Project; error = "working_directory_missing" }
+            continue
+        }
+
+        $BaseArgs = @("compose")
+        $MissingFile = $false
+        foreach ($File in @($Cfg.Files)) {
+            $FullPath = Join-Path $WorkingDir ([string]$File)
+            if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+                $Errors += @{ project = $Project; file = [string]$File; error = "compose_file_missing" }
+                $MissingFile = $true
+                break
+            }
+            $BaseArgs += @("-f", $FullPath)
+        }
+        if ($MissingFile) { continue }
+
+        $ConfigRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--format", "json")) -WorkingDirectory $WorkingDir
+        if ([int]$ConfigRun.exit_code -ne 0) {
+            $Errors += @{ project = $Project; error = "compose_config_failed"; detail = ([string]$ConfigRun.output).Trim() }
+            continue
+        }
+
+        try {
+            $Config = ([string]$ConfigRun.output) | ConvertFrom-Json
+        }
+        catch {
+            $Errors += @{ project = $Project; error = "compose_config_invalid_json" }
+            continue
+        }
+
+        $Services = @{}
+        $ServiceProperties = @()
+        if ($null -ne $Config.services) {
+            $ServiceProperties = @($Config.services.PSObject.Properties)
+        }
+
+        foreach ($ServiceProperty in $ServiceProperties) {
+            $Service = [string]$ServiceProperty.Name
+            $ServiceConfig = $ServiceProperty.Value
+            $Image = [string]$ServiceConfig.image
+
+            $HashRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            $DesiredHash = $null
+            if ([int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                if ($Tokens.Count -gt 0) {
+                    $DesiredHash = [string]$Tokens[-1]
+                }
+            }
+            else {
+                $Errors += @{ project = $Project; service = $Service; error = "compose_hash_failed"; detail = ([string]$HashRun.output).Trim() }
+            }
+
+            $Services[$Service] = @{
+                image = if ([string]::IsNullOrWhiteSpace($Image)) { $null } else { $Image }
+                config_hash = $DesiredHash
+            }
+        }
+
+        $Desired[$Project] = @{ services = $Services }
+    }
+
+    return @{ projects = $Desired; errors = $Errors }
+}
+
 function Run-ProjectRedeploy {
     param($Job)
 
@@ -314,26 +413,14 @@ function Run-ProjectRedeploy {
     $Args += "--force-recreate"
     $Args += $Requested
 
-    Push-Location $WorkingDir
-    $PreviousErrorActionPreference = $ErrorActionPreference
-    try {
-        # Windows PowerShell 5.1 can promote native stderr records to terminating
-        # errors when ErrorActionPreference is Stop. Docker Compose writes normal
-        # progress such as "Container ... Recreate" to stderr, so the runner must
-        # treat the process exit code as authoritative instead of stderr presence.
-        $ErrorActionPreference = "Continue"
-        $Output = (& $Docker @Args 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
-        $ExitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $PreviousErrorActionPreference
-        Pop-Location
-    }
-
+    # Docker Compose writes normal progress to stderr. Treat the native
+    # process exit code as authoritative instead of stderr presence.
+    $DockerRun = Invoke-DockerText -Arguments $Args -WorkingDirectory $WorkingDir
+    $Output = [string]$DockerRun.output
     if ($Output.Length -gt 16000) { $Output = $Output.Substring($Output.Length - 16000) }
 
     return @{
-        exit_code = $ExitCode
+        exit_code = [int]$DockerRun.exit_code
         output = $Output
         project = $Project
         services = $Requested
@@ -433,9 +520,10 @@ try {
                 Move-Item -LiteralPath $RequestFile.FullName -Destination $ProcessingPath -Force
                 $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
                 if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
-                if ([string]$Job.action -ne "compose_redeploy") { throw "Action is not allowlisted." }
+                $Action = [string]$Job.action
+                if ($Action -notin @("compose_redeploy", "compose_desired_state")) { throw "Action is not allowlisted." }
 
-                Write-RunnerLog "job $JobId action=$([string]$Job.action) project=$([string]$Job.project)"
+                Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
                 $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                 Write-JsonAtomic -Path $Heartbeat -Value @{
                     status = "busy"
@@ -444,15 +532,26 @@ try {
                     project = [string]$Job.project
                     updated_unix = $Started
                 }
-                $Run = Run-ProjectRedeploy -Job $Job
-                $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
 
-                Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
-                    job_id=$JobId; status=$Status; started_unix=$Started
-                    finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-                    exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
-                    services=$Run.services; operation=$Run.operation
-                    execution_mode=$Run.execution_mode
+                if ($Action -eq "compose_desired_state") {
+                    $Desired = Get-ComposeDesiredState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        projects=$Desired.projects; errors=$Desired.errors
+                    }
+                }
+                else {
+                    $Run = Run-ProjectRedeploy -Job $Job
+                    $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status=$Status; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                        services=$Run.services; operation=$Run.operation
+                        execution_mode=$Run.execution_mode
+                    }
                 }
             }
             catch {
