@@ -77,7 +77,14 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         }
 
         with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with mock.patch.object(server, "_runner_request", return_value=desired):
+            with mock.patch.object(
+                server,
+                "_runner_request",
+                side_effect=[
+                    desired,
+                    {"status": "succeeded", "drift": [], "errors": []},
+                ],
+            ):
                 payload = json.loads(server.mcp_deployment_audit())
 
         self.assertEqual(payload["summary"]["compose_config_drift"], 1)
@@ -106,12 +113,47 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         }
 
         with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with mock.patch.object(server, "_runner_request", return_value=desired):
+            with mock.patch.object(
+                server,
+                "_runner_request",
+                side_effect=[
+                    desired,
+                    {"status": "succeeded", "drift": [], "errors": []},
+                ],
+            ):
                 payload = json.loads(server.mcp_deployment_audit())
 
         self.assertEqual(payload["compose_config_drift"], [])
         self.assertEqual(payload["summary"]["compose_config_drift"], 0)
 
+
+    def test_reports_compose_file_drift_from_any_project(self):
+        desired = {"status": "succeeded", "projects": {}, "errors": []}
+        file_state = {
+            "status": "succeeded",
+            "drift": [
+                {
+                    "project": "firecrawl",
+                    "service": "gateway",
+                    "container": "firecrawl-gateway-1",
+                    "compose_file": r"C:\\ClaudeCode\\firecrawl-local\\compose.public.yaml",
+                    "status": "newer_than_container",
+                }
+            ],
+            "errors": [],
+        }
+
+        with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+            with mock.patch.object(
+                server,
+                "_runner_request",
+                side_effect=[desired, file_state],
+            ):
+                payload = json.loads(server.mcp_deployment_audit())
+
+        self.assertEqual(payload["summary"]["compose_file_drift"], 1)
+        self.assertEqual(payload["compose_file_drift"][0]["project"], "firecrawl")
+        self.assertEqual(payload["compose_file_state"]["status"], "succeeded")
 
 if __name__ == "__main__":
     unittest.main()
