@@ -515,7 +515,7 @@ function Get-AllowlistedScheduledTaskState {
         task = $Alias
         state = [string]$Task.State
         last_run_time = $LastRunTime
-        last_task_result = [int]$Info.LastTaskResult
+        last_task_result = [uint32]$Info.LastTaskResult
     }
 }
 
@@ -569,7 +569,7 @@ function Invoke-AllowlistedScheduledTaskControl {
         operation = $Operation
         before_state = [string]$Before.state
         after_state = [string]$After.state
-        last_task_result = [int]$After.last_task_result
+        last_task_result = [uint32]$After.last_task_result
     }
 }
 
