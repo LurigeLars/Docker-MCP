@@ -208,6 +208,18 @@ def _read_job(job_id: str) -> dict[str, Any]:
     return {"job_id": job_id, "status": "unknown"}
 
 
+def _runner_request(payload: dict[str, Any], timeout_seconds: float = 8.0) -> dict[str, Any]:
+    """Send one internal maintenance-runner request and wait for its bounded result."""
+    job_id = _write_job(payload)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = _read_job(job_id)
+        if result.get("status") in {"succeeded", "failed"}:
+            return result
+        time.sleep(0.1)
+    return {"job_id": job_id, "status": "timeout"}
+
+
 def _read_runtime_secret(path: str) -> str | None:
     try:
         value = Path(path).read_text(encoding="utf-8").strip()
@@ -422,9 +434,27 @@ def compose_status(project: str | None = None) -> list[dict[str, Any]]:
 
 @mcp.tool(annotations=READ_ONLY)
 def mcp_deployment_audit():
-    """Audit MCP deployment health, image drift and stale bind-mounted runtime source."""
+    """Audit MCP deployment health, desired Compose config, image drift and runtime source."""
     rows = _json("GET", "/containers/json", query={"all": "1"}) or []
     images = _json("GET", "/images/json", query={"all": "0"}) or []
+
+    try:
+        desired_state = _runner_request({"action": "compose_desired_state"})
+        if desired_state.get("status") != "succeeded":
+            desired_state = {
+                "status": desired_state.get("status", "unavailable"),
+                "projects": {},
+                "errors": [{"error": "maintenance_runner_unavailable"}],
+            }
+        else:
+            desired_state.setdefault("projects", {})
+            desired_state.setdefault("errors", [])
+    except Exception as exc:
+        desired_state = {
+            "status": "unavailable",
+            "projects": {},
+            "errors": [{"error": type(exc).__name__}],
+        }
 
     try:
         source_audit = _json("GET", "/dockerlocal/runtime-source-drift") or {}
@@ -456,6 +486,7 @@ def mcp_deployment_audit():
     unmanaged: list[dict[str, Any]] = []
     stopped_or_unhealthy: list[dict[str, Any]] = []
     image_drift: list[dict[str, Any]] = []
+    compose_config_drift: list[dict[str, Any]] = []
 
     for row in rows:
         labels = row.get("Labels") or {}
@@ -473,8 +504,42 @@ def mcp_deployment_audit():
             except Exception:
                 inspect = {}
 
-        configured_image = str(((inspect.get("Config") or {}).get("Image")) or row.get("Image") or "")
+        config = inspect.get("Config") or {}
+        inspect_labels = config.get("Labels") or labels
+        configured_image = str(config.get("Image") or row.get("Image") or "")
         running_image_id = str(inspect.get("Image") or row.get("ImageID") or "")
+        running_config_hash = str(inspect_labels.get("com.docker.compose.config-hash") or "")
+
+        desired_project = (desired_state.get("projects") or {}).get(str(project or ""), {})
+        desired_service = (desired_project.get("services") or {}).get(str(service or ""), {})
+        desired_image = str(desired_service.get("image") or "")
+        desired_config_hash = str(desired_service.get("config_hash") or "")
+
+        if project and service and desired_service:
+            image_mismatch = bool(
+                desired_image
+                and _normalize_image_ref(desired_image)
+                != _normalize_image_ref(configured_image)
+            )
+            hash_mismatch = bool(
+                desired_config_hash
+                and running_config_hash
+                and desired_config_hash != running_config_hash
+            )
+            if image_mismatch or hash_mismatch:
+                compose_config_drift.append(
+                    {
+                        "name": name,
+                        "project": project,
+                        "service": service,
+                        "desired_image": desired_image or None,
+                        "running_configured_image": configured_image or None,
+                        "desired_config_hash": desired_config_hash or None,
+                        "running_config_hash": running_config_hash or None,
+                        "image_mismatch": image_mismatch,
+                        "config_hash_mismatch": hash_mismatch,
+                    }
+                )
 
         if project:
             item = projects.setdefault(
@@ -543,6 +608,11 @@ def mcp_deployment_audit():
         "unmanaged_containers": unmanaged,
         "stopped_or_unhealthy": stopped_or_unhealthy,
         "local_image_drift": image_drift,
+        "compose_desired_state": {
+            "status": desired_state.get("status"),
+            "errors": desired_state.get("errors") or [],
+        },
+        "compose_config_drift": compose_config_drift,
         "runtime_source_audit": {
             "status": source_audit.get("status"),
             "checked_files": int(source_audit.get("checked_files") or 0),
@@ -554,6 +624,7 @@ def mcp_deployment_audit():
             "unmanaged_containers": len(unmanaged),
             "stopped_or_unhealthy": len(stopped_or_unhealthy),
             "local_image_drift": len(image_drift),
+            "compose_config_drift": len(compose_config_drift),
             "runtime_source_drift": len(source_audit.get("drift") or []),
             "missing_expected_projects": len(missing_expected),
         },
