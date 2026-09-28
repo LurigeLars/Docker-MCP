@@ -514,6 +514,8 @@ function Get-AllowlistedScheduledTaskState {
     return @{
         task = $Alias
         state = [string]$Task.State
+        principal = [string]$Task.Principal.UserId
+        run_level = [string]$Task.Principal.RunLevel
         last_run_time = $LastRunTime
         last_task_result = [uint32]$Info.LastTaskResult
     }
@@ -1069,6 +1071,7 @@ try {
                         job_id=$JobId; status="succeeded"; started_unix=$Started
                         finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                         task=$State.task; state=$State.state
+                        principal=$State.principal; run_level=$State.run_level
                         last_run_time=$State.last_run_time; last_task_result=$State.last_task_result
                     }
                 }

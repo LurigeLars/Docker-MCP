@@ -56,6 +56,26 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertNotIn("started_unix", result)
         self.assertNotIn("job_id", result)
 
+    def test_scheduled_task_status_includes_security_context_and_uses_longer_timeout(self):
+        raw = {
+            "status": "succeeded",
+            "task": "avanza-mcp-http",
+            "state": "Running",
+            "principal": "SYSTEM",
+            "run_level": "Highest",
+            "last_run_time": "2026-09-28T18:36:09+02:00",
+            "last_task_result": 267009,
+        }
+        with unittest.mock.patch.object(server, "_runner_request", return_value=raw) as runner:
+            result = json.loads(server.scheduled_task_status("avanza-mcp-http"))
+
+        runner.assert_called_once_with(
+            {"action": "scheduled_task_status", "task": "avanza-mcp-http"},
+            timeout_seconds=12.0,
+        )
+        self.assertEqual(result["principal"], "SYSTEM")
+        self.assertEqual(result["run_level"], "Highest")
+
     def test_repo_pull_payload_has_no_path_branch_remote_or_arguments(self):
         raw = {
             "status": "succeeded",

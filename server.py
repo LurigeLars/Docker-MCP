@@ -820,11 +820,12 @@ def repo_pull_ff(repo: str):
 
 @mcp.tool(annotations=READ_ONLY)
 def scheduled_task_status(task: str):
-    """Read state for one allowlisted Windows Scheduled Task alias."""
+    """Read state and execution principal for one allowlisted Windows Scheduled Task alias."""
     task = _maintenance_alias(task)
     return _compact_runner_request(
         {"action": "scheduled_task_status", "task": task},
-        ("task", "state", "last_run_time", "last_task_result"),
+        ("task", "state", "principal", "run_level", "last_run_time", "last_task_result"),
+        timeout_seconds=12.0,
     )
 
 
