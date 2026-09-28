@@ -26,6 +26,7 @@ JOB_ID = re.compile(r"^[a-f0-9]{32}$")
 CONTAINER_REF = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|[a-fA-F0-9]{12,64})$")
 IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
 COMPOSE_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+HOST_MAINTENANCE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 SEVERITIES = {"critical", "high", "medium", "low", "unspecified"}
 EXPECTED_MCP_PROJECTS = tuple(
     p.strip()
@@ -77,6 +78,12 @@ def _image(value: str) -> str:
 def _project(value: str) -> str:
     if not COMPOSE_PROJECT.fullmatch(value):
         raise ValueError("Invalid Compose project name")
+    return value
+
+
+def _maintenance_alias(value: str) -> str:
+    if not HOST_MAINTENANCE_ALIAS.fullmatch(value):
+        raise ValueError("Invalid maintenance alias")
     return value
 
 
@@ -218,6 +225,24 @@ def _runner_request(payload: dict[str, Any], timeout_seconds: float = 8.0) -> di
             return result
         time.sleep(0.1)
     return {"job_id": job_id, "status": "timeout"}
+
+
+def _compact_runner_request(
+    payload: dict[str, Any],
+    fields: tuple[str, ...],
+    *,
+    timeout_seconds: float = 8.0,
+) -> str:
+    raw = _runner_request(payload, timeout_seconds=timeout_seconds)
+    result: dict[str, Any] = {"status": raw.get("status", "unknown")}
+    for field in fields:
+        if field in raw:
+            result[field] = raw[field]
+    if raw.get("error"):
+        result["error"] = str(raw["error"])
+    if result["status"] == "timeout" and raw.get("job_id"):
+        result["job_id"] = raw["job_id"]
+    return json.dumps(result, separators=(",", ":"))
 
 
 def _read_runtime_secret(path: str) -> str | None:
@@ -763,6 +788,53 @@ def compose_redeploy(
     return json.dumps(
         {"job_id": job_id, "status": "queued", "operation": operation},
         separators=(",", ":"),
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+def repo_status(repo: str):
+    """Read HEAD and pull eligibility for one allowlisted local repository alias."""
+    repo = _maintenance_alias(repo)
+    return _compact_runner_request(
+        {"action": "repo_status", "repo": repo},
+        ("repo", "branch", "head", "clean", "conflicts", "origin_ok", "eligible_for_pull"),
+    )
+
+
+@mcp.tool(annotations=WRITE_SAFE)
+def repo_pull_ff(repo: str):
+    """Fast-forward one allowlisted clean main checkout from its exact allowlisted origin."""
+    repo = _maintenance_alias(repo)
+    return _compact_runner_request(
+        {"action": "repo_pull_ff", "repo": repo},
+        ("action", "repo", "branch", "before_head", "after_head", "changed", "clean"),
+        timeout_seconds=30.0,
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+def scheduled_task_status(task: str):
+    """Read state for one allowlisted Windows Scheduled Task alias."""
+    task = _maintenance_alias(task)
+    return _compact_runner_request(
+        {"action": "scheduled_task_status", "task": task},
+        ("task", "state", "last_run_time", "last_task_result"),
+    )
+
+
+@mcp.tool(annotations=WRITE_SAFE)
+def scheduled_task_control(
+    task: str,
+    operation: Literal["start", "stop", "restart"],
+):
+    """Start, stop, or restart one allowlisted Windows Scheduled Task alias."""
+    task = _maintenance_alias(task)
+    if operation not in {"start", "stop", "restart"}:
+        raise ValueError("Unsupported Scheduled Task operation")
+    return _compact_runner_request(
+        {"action": "scheduled_task_control", "task": task, "operation": operation},
+        ("action", "task", "operation", "before_state", "after_state", "last_task_result"),
+        timeout_seconds=20.0,
     )
 
 

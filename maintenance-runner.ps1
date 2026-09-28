@@ -10,6 +10,7 @@ $Results = Join-Path $Control "results"
 $Heartbeat = Join-Path $Control "runner-heartbeat.json"
 $Log = Join-Path $Control "runner.log"
 $LocalProjectConfig = Join-Path $Root "maintenance-projects.local.json"
+$HostMaintenanceConfig = Join-Path $Root "host-maintenance.local.json"
 
 foreach ($Dir in @($Control, $Requests, $Processing, $Results)) {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
@@ -103,6 +104,81 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
                 WorkingDir = $WorkingDir
                 Files = $Files
                 Services = $Services
+            }
+        }
+    }
+}
+
+$HostRepositories = @{}
+$HostScheduledTasks = @{}
+
+if (Test-Path -LiteralPath $HostMaintenanceConfig -PathType Leaf) {
+    $HostConfig = Get-Content -LiteralPath $HostMaintenanceConfig -Raw | ConvertFrom-Json
+
+    $RepositoriesProperty = $HostConfig.PSObject.Properties["repositories"]
+    if ($null -ne $RepositoriesProperty -and $null -ne $RepositoriesProperty.Value) {
+        foreach ($Property in $RepositoriesProperty.Value.PSObject.Properties) {
+            $Alias = [string]$Property.Name
+            if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+                throw "Invalid repository alias in host maintenance config."
+            }
+
+            $Cfg = $Property.Value
+            $RepoPath = [string]$Cfg.path
+            $OriginUrl = [string]$Cfg.origin_url
+            $ConfiguredBranch = [string]$Cfg.branch
+
+            if ([string]::IsNullOrWhiteSpace($RepoPath) -or -not [IO.Path]::IsPathRooted($RepoPath)) {
+                throw "Repository $Alias must define an absolute path."
+            }
+            if ([string]::IsNullOrWhiteSpace($OriginUrl)) {
+                throw "Repository $Alias must define origin_url."
+            }
+            if ($OriginUrl -notmatch '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
+                throw "Repository $Alias origin_url must be an HTTPS github.com repository URL."
+            }
+            if (-not [string]::IsNullOrWhiteSpace($ConfiguredBranch) -and $ConfiguredBranch -ne "main") {
+                throw "Repository $Alias may only use branch main."
+            }
+
+            $HostRepositories[$Alias] = @{
+                Path = [IO.Path]::GetFullPath($RepoPath).TrimEnd('\')
+                OriginUrl = $OriginUrl
+                Branch = "main"
+            }
+        }
+    }
+
+    $TasksProperty = $HostConfig.PSObject.Properties["scheduled_tasks"]
+    if ($null -ne $TasksProperty -and $null -ne $TasksProperty.Value) {
+        foreach ($Property in $TasksProperty.Value.PSObject.Properties) {
+            $Alias = [string]$Property.Name
+            if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+                throw "Invalid Scheduled Task alias in host maintenance config."
+            }
+
+            $Cfg = $Property.Value
+            $TaskName = [string]$Cfg.task_name
+            $TaskPath = [string]$Cfg.task_path
+            if ([string]::IsNullOrWhiteSpace($TaskPath)) { $TaskPath = "\" }
+
+            if (
+                [string]::IsNullOrWhiteSpace($TaskName) -or
+                $TaskName.IndexOfAny([char[]]'*?[]') -ge 0
+            ) {
+                throw "Scheduled Task $Alias has an invalid task_name."
+            }
+            if (
+                -not $TaskPath.StartsWith("\") -or
+                -not $TaskPath.EndsWith("\") -or
+                $TaskPath.IndexOfAny([char[]]'*?[]') -ge 0
+            ) {
+                throw "Scheduled Task $Alias has an invalid task_path."
+            }
+
+            $HostScheduledTasks[$Alias] = @{
+                TaskName = $TaskName
+                TaskPath = $TaskPath
             }
         }
     }
@@ -264,6 +340,237 @@ function Invoke-DockerText {
     }
 
     return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Invoke-GitText {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $Git = (Get-Command git.exe -ErrorAction Stop).Source
+    $EmptyHooks = Join-Path $Root "empty-git-hooks"
+    New-Item -ItemType Directory -Force -Path $EmptyHooks | Out-Null
+
+    $PreviousTerminalPrompt = $env:GIT_TERMINAL_PROMPT
+    $PreviousGcmInteractive = $env:GCM_INTERACTIVE
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $env:GIT_TERMINAL_PROMPT = "0"
+        $env:GCM_INTERACTIVE = "Never"
+        $ErrorActionPreference = "Continue"
+        $FixedArgs = @(
+            "-c", "core.hooksPath=$EmptyHooks",
+            "-c", "submodule.recurse=false",
+            "-C", $RepositoryPath
+        ) + $Arguments
+        $Output = (& $Git @FixedArgs 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:GIT_TERMINAL_PROMPT = $PreviousTerminalPrompt
+        $env:GCM_INTERACTIVE = $PreviousGcmInteractive
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Get-AllowlistedRepository {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid repository alias."
+    }
+    if (-not $HostRepositories.ContainsKey($Alias)) {
+        throw "Repository alias is not allowlisted."
+    }
+    return $HostRepositories[$Alias]
+}
+
+function Get-RepositoryState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $RepoPath = [string]$Cfg.Path
+    if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
+        throw "Allowlisted repository path is missing."
+    }
+
+    $TopLevel = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "--show-toplevel")
+    if ([int]$TopLevel.exit_code -ne 0) { throw "Allowlisted path is not a Git repository." }
+
+    $ExpectedRoot = [IO.Path]::GetFullPath($RepoPath).TrimEnd('\')
+    $ActualRoot = [IO.Path]::GetFullPath(([string]$TopLevel.output).Trim()).TrimEnd('\')
+    if (-not [string]::Equals($ExpectedRoot, $ActualRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Allowlisted path is not the repository root."
+    }
+
+    $Head = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "HEAD")
+    if ([int]$Head.exit_code -ne 0) { throw "Unable to read repository HEAD." }
+
+    $Branch = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("symbolic-ref", "--quiet", "--short", "HEAD")
+    $BranchName = if ([int]$Branch.exit_code -eq 0) { ([string]$Branch.output).Trim() } else { "" }
+
+    $Status = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("status", "--porcelain=v1", "--untracked-files=normal")
+    if ([int]$Status.exit_code -ne 0) { throw "Unable to read repository status." }
+
+    $Conflicts = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("ls-files", "-u")
+    if ([int]$Conflicts.exit_code -ne 0) { throw "Unable to inspect repository conflicts." }
+
+    $Origin = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("remote", "get-url", "origin")
+    if ([int]$Origin.exit_code -ne 0) { throw "Unable to read origin URL." }
+
+    $Clean = [string]::IsNullOrWhiteSpace([string]$Status.output)
+    $HasConflicts = -not [string]::IsNullOrWhiteSpace([string]$Conflicts.output)
+    $OriginOk = [string]::Equals(
+        ([string]$Origin.output).Trim(),
+        [string]$Cfg.OriginUrl,
+        [StringComparison]::Ordinal
+    )
+    $BranchOk = $BranchName -eq "main"
+
+    return @{
+        repo = $Alias
+        branch = $BranchName
+        head = ([string]$Head.output).Trim()
+        clean = $Clean
+        conflicts = $HasConflicts
+        origin_ok = $OriginOk
+        eligible_for_pull = ($BranchOk -and $Clean -and -not $HasConflicts -and $OriginOk)
+    }
+}
+
+function Invoke-RepositoryPull {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $Before = Get-RepositoryState -Alias $Alias
+    if ($Before.branch -ne "main") { throw "Repository is not on main." }
+    if (-not [bool]$Before.clean) { throw "Repository has local changes." }
+    if ([bool]$Before.conflicts) { throw "Repository has unresolved conflicts." }
+    if (-not [bool]$Before.origin_ok) { throw "Repository origin does not match the allowlist." }
+
+    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "--no-rebase", "origin", "main")
+    if ([int]$Pull.exit_code -ne 0) {
+        throw "git pull --ff-only failed with exit code $([int]$Pull.exit_code)."
+    }
+
+    $After = Get-RepositoryState -Alias $Alias
+    if (
+        $After.branch -ne "main" -or
+        -not [bool]$After.clean -or
+        [bool]$After.conflicts -or
+        -not [bool]$After.origin_ok
+    ) {
+        throw "Repository verification failed after pull."
+    }
+
+    return @{
+        action = "repo_pull_ff"
+        repo = $Alias
+        branch = "main"
+        before_head = [string]$Before.head
+        after_head = [string]$After.head
+        changed = ([string]$Before.head -ne [string]$After.head)
+        clean = [bool]$After.clean
+    }
+}
+
+function Get-AllowlistedScheduledTask {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid Scheduled Task alias."
+    }
+    if (-not $HostScheduledTasks.ContainsKey($Alias)) {
+        throw "Scheduled Task alias is not allowlisted."
+    }
+
+    $Cfg = $HostScheduledTasks[$Alias]
+    $Matches = @(
+        Get-ScheduledTask -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop |
+            Where-Object {
+                [string]::Equals($_.TaskName, [string]$Cfg.TaskName, [StringComparison]::Ordinal) -and
+                [string]::Equals($_.TaskPath, [string]$Cfg.TaskPath, [StringComparison]::Ordinal)
+            }
+    )
+    if ($Matches.Count -ne 1) { throw "Allowlisted Scheduled Task was not resolved exactly once." }
+
+    return @{ Config = $Cfg; Task = $Matches[0] }
+}
+
+function Get-AllowlistedScheduledTaskState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Cfg = $Resolved.Config
+    $Task = $Resolved.Task
+    $Info = Get-ScheduledTaskInfo -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop
+
+    $LastRunTime = $null
+    if ($Info.LastRunTime -and $Info.LastRunTime -gt [DateTime]::MinValue) {
+        $LastRunTime = $Info.LastRunTime.ToString("o")
+    }
+
+    return @{
+        task = $Alias
+        state = [string]$Task.State
+        last_run_time = $LastRunTime
+        last_task_result = [int]$Info.LastTaskResult
+    }
+}
+
+function Wait-ScheduledTaskNotRunning {
+    param([Parameter(Mandatory)][string]$Alias,[int]$TimeoutSeconds = 10)
+    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $State = Get-AllowlistedScheduledTaskState -Alias $Alias
+        if ([string]$State.state -ne "Running") { return $State }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $Deadline)
+    throw "Scheduled Task did not stop within the bounded wait."
+}
+
+function Invoke-AllowlistedScheduledTaskControl {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][ValidateSet("start", "stop", "restart")][string]$Operation
+    )
+
+    $Before = Get-AllowlistedScheduledTaskState -Alias $Alias
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Task = $Resolved.Task
+
+    if ($Operation -eq "start") {
+        if ([string]$Before.state -ne "Running") {
+            $Task | Start-ScheduledTask
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    elseif ($Operation -eq "stop") {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+    }
+    else {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+        $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+        $Resolved.Task | Start-ScheduledTask
+        Start-Sleep -Milliseconds 300
+    }
+
+    $After = Get-AllowlistedScheduledTaskState -Alias $Alias
+    return @{
+        action = "scheduled_task_control"
+        task = $Alias
+        operation = $Operation
+        before_state = [string]$Before.state
+        after_state = [string]$After.state
+        last_task_result = [int]$After.last_task_result
+    }
 }
 
 function Get-ComposeFileState {
@@ -599,6 +906,68 @@ Write-Host "HOST=$Action"
             throw "Script failure was incorrectly reported as exit code 0."
         }
 
+        $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
+        $OriginRepo = Join-Path $TestRoot "origin.git"
+        $SeedRepo = Join-Path $TestRoot "seed"
+        $TargetRepo = Join-Path $TestRoot "target"
+
+        & $GitExe init --bare $OriginRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test bare init failed." }
+        & $GitExe init -b main $SeedRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test seed init failed." }
+        & $GitExe -C $SeedRepo config user.name "DockerLocal SelfTest"
+        & $GitExe -C $SeedRepo config user.email "selftest@example.invalid"
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "one" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "initial" *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial commit failed." }
+        & $GitExe -C $SeedRepo remote add origin $OriginRepo
+        & $GitExe -C $SeedRepo push -u origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial push failed." }
+        & $GitExe clone --branch main $OriginRepo $TargetRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test clone failed." }
+
+        $SelfTestOrigin = (& $GitExe -C $TargetRepo remote get-url origin | Out-String).Trim()
+        $HostRepositories["selftest-repo"] = @{
+            Path = [IO.Path]::GetFullPath($TargetRepo).TrimEnd('\')
+            OriginUrl = $SelfTestOrigin
+            Branch = "main"
+        }
+
+        $BeforeState = Get-RepositoryState -Alias "selftest-repo"
+        if (-not [bool]$BeforeState.eligible_for_pull) {
+            throw "Clean main repository was not eligible for pull."
+        }
+
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "two" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "update" *> $null
+        & $GitExe -C $SeedRepo push origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test update push failed." }
+
+        $PullState = Invoke-RepositoryPull -Alias "selftest-repo"
+        if (
+            -not [bool]$PullState.changed -or
+            [string]$PullState.before_head -eq [string]$PullState.after_head -or
+            -not [bool]$PullState.clean
+        ) {
+            throw "Fast-forward repository maintenance regression."
+        }
+
+        Set-Content -LiteralPath (Join-Path $TargetRepo "dirty.txt") -Value "dirty" -Encoding ascii
+        $DirtyBlocked = $false
+        try {
+            [void](Invoke-RepositoryPull -Alias "selftest-repo")
+        }
+        catch {
+            if ($_.Exception.Message -eq "Repository has local changes.") {
+                $DirtyBlocked = $true
+            }
+        }
+        if (-not $DirtyBlocked) { throw "Dirty repository pull was not blocked." }
+
+        $HostRepositories.Remove("selftest-repo")
+
         Write-Host "maintenance runner self-test: PASS"
     }
     finally {
@@ -638,7 +1007,15 @@ try {
                 $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
                 if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
                 $Action = [string]$Job.action
-                if ($Action -notin @("compose_redeploy", "compose_desired_state", "compose_file_state")) { throw "Action is not allowlisted." }
+                if ($Action -notin @(
+                    "compose_redeploy",
+                    "compose_desired_state",
+                    "compose_file_state",
+                    "repo_status",
+                    "repo_pull_ff",
+                    "scheduled_task_status",
+                    "scheduled_task_control"
+                )) { throw "Action is not allowlisted." }
 
                 Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
                 $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -664,6 +1041,45 @@ try {
                         job_id=$JobId; status="succeeded"; started_unix=$Started
                         finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                         containers=$FileState.containers; drift=$FileState.drift; errors=$FileState.errors
+                    }
+                }
+                elseif ($Action -eq "repo_status") {
+                    $State = Get-RepositoryState -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        repo=$State.repo; branch=$State.branch; head=$State.head
+                        clean=$State.clean; conflicts=$State.conflicts
+                        origin_ok=$State.origin_ok; eligible_for_pull=$State.eligible_for_pull
+                    }
+                }
+                elseif ($Action -eq "repo_pull_ff") {
+                    $Run = Invoke-RepositoryPull -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; repo=$Run.repo; branch=$Run.branch
+                        before_head=$Run.before_head; after_head=$Run.after_head
+                        changed=$Run.changed; clean=$Run.clean
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_status") {
+                    $State = Get-AllowlistedScheduledTaskState -Alias ([string]$Job.task)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        task=$State.task; state=$State.state
+                        last_run_time=$State.last_run_time; last_task_result=$State.last_task_result
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_control") {
+                    $Run = Invoke-AllowlistedScheduledTaskControl -Alias ([string]$Job.task) -Operation ([string]$Job.operation)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; task=$Run.task; operation=$Run.operation
+                        before_state=$Run.before_state; after_state=$Run.after_state
+                        last_task_result=$Run.last_task_result
                     }
                 }
                 else {

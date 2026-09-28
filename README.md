@@ -46,6 +46,10 @@ Read-only inspection:
 
 Narrow maintenance:
 
+- `repo_status` — HEAD/branch/clean/conflict/origin eligibility for one local allowlisted repository alias
+- `repo_pull_ff` — exact `git pull --ff-only origin main` semantics for a clean allowlisted main checkout
+- `scheduled_task_status` — state for one allowlisted Windows Scheduled Task alias
+- `scheduled_task_control` — start/stop/restart one allowlisted Windows Scheduled Task alias
 - `image_pull`
 - `container_restart`
 - `image_prune_dangling`
@@ -211,6 +215,63 @@ Two execution modes are supported:
 - **Script-backed mode**: the runner invokes one absolute, allowlisted PowerShell `.ps1` wrapper with a fixed argument array for the requested operation. This is intended for projects whose wrapper owns required runtime setup such as DPAPI-backed or tmpfs secret injection.
 
 Script-backed projects are whole-project operations: callers must omit the `services` argument. The local config contains the script path and fixed arguments only; credentials and secret values must remain in the project-specific secret store and must not be copied into the maintenance config.
+
+## Allowlisted Windows host maintenance
+
+The same host-side Maintenance Runner can expose a small Windows maintenance surface without exposing PowerShell or a generic process runner.
+
+The MCP client supplies only an alias. Repository paths, the exact `origin` URL, the fixed `main` branch, Scheduled Task names and Task Scheduler paths are resolved from the local-only file:
+
+```text
+%LOCALAPPDATA%\DockerLocalMCP\host-maintenance.local.json
+```
+
+Start from `host-maintenance.example.json`. The real file is covered by `*.local.json` in `.gitignore` and must not be committed.
+
+Example shape:
+
+```json
+{
+  "repositories": {
+    "example-repo": {
+      "path": "<absolute-path-to-repository>",
+      "origin_url": "https://github.com/example/example-repo.git",
+      "branch": "main"
+    }
+  },
+  "scheduled_tasks": {
+    "example-service": {
+      "task_name": "ExampleScheduledTask",
+      "task_path": "\\"
+    }
+  }
+}
+```
+
+Repository pulls fail closed unless all of these are true:
+
+- the configured path is the exact Git repository root;
+- the current branch is `main`;
+- tracked and untracked status is clean;
+- there are no unresolved index conflicts;
+- the current `origin` URL exactly matches the local allowlist;
+- the update can complete with `--ff-only`.
+
+The runner also disables Git hooks and recursive submodule updates for maintenance Git calls, and disables interactive credential prompts. The MCP schema has no path, remote, branch, argument or command-string field.
+
+Scheduled Task lookup is exact after local alias resolution. The remote MCP caller cannot choose a Task Scheduler name/path or PowerShell argument.
+
+The four host-maintenance tools return compact structured JSON. If a bounded synchronous call times out, it returns a `job_id` that can be inspected with `maintenance_job_status`.
+
+For the initial activation on an already-installed DockerLocal stack, `enable-host-maintenance.ps1` validates one repository and one Scheduled Task, merges them into the local allowlist, preserves the existing Cloudflare gateway configuration, rebuilds the MCP image and restarts the Maintenance Runner. Re-run it with another pair of aliases to extend the local allowlist later.
+
+```powershell
+.\enable-host-maintenance.ps1 `
+  -RepositoryAlias example-repo `
+  -RepositoryPath C:\path\to\example-repo `
+  -ScheduledTaskAlias example-service `
+  -ScheduledTaskName ExampleScheduledTask
+```
 
 ## Event-driven local runtime supervisor
 

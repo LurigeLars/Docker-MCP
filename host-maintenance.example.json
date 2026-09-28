@@ -1,0 +1,15 @@
+{
+  "repositories": {
+    "example-repo": {
+      "path": "<absolute-path-to-repository>",
+      "origin_url": "https://github.com/example/example-repo.git",
+      "branch": "main"
+    }
+  },
+  "scheduled_tasks": {
+    "example-service": {
+      "task_name": "ExampleScheduledTask",
+      "task_path": "\\"
+    }
+  }
+}
