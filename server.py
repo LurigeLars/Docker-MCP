@@ -362,6 +362,7 @@ def container_inspect(container: str) -> dict[str, Any]:
         "image_id": raw.get("Image"),
         "created": raw.get("Created"),
         "platform": raw.get("Platform"),
+        "configured_user": config.get("User") or "",
         "restart_count": raw.get("RestartCount"),
         "state": {
             "status": state.get("Status"),
