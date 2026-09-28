@@ -44,6 +44,10 @@ tools:
   - name: compose_redeploy
   - name: maintenance_job_status
   - name: maintenance_runner_status
+  - name: repo_status
+  - name: repo_pull_ff
+  - name: scheduled_task_status
+  - name: scheduled_task_control
   - name: images_list
   - name: image_inspect
   - name: image_pull
