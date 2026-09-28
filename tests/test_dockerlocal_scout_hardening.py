@@ -27,6 +27,11 @@ class DockerLocalScoutHardeningTests(unittest.TestCase):
         self.assertIn('env["DOCKER_SCOUT_HUB_USER"] = scout_user', SERVER)
         self.assertIn('env["DOCKER_SCOUT_HUB_PASSWORD"] = scout_password', SERVER)
 
+    def test_scout_subprocesses_are_serialized_around_shared_cache(self) -> None:
+        self.assertIn("import threading", SERVER)
+        self.assertIn("_SCOUT_LOCK = threading.Lock()", SERVER)
+        self.assertIn("with _SCOUT_LOCK:", SERVER)
+
     def test_catalog_no_longer_requests_scout_env_credentials(self) -> None:
         self.assertNotIn("DOCKER_SCOUT_HUB_USER", CATALOG)
         self.assertNotIn("DOCKER_SCOUT_HUB_PASSWORD", CATALOG)
