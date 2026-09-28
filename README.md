@@ -1,5 +1,17 @@
 # Docker MCP
 
+## Current deployment and security posture
+
+Docker MCP is intentionally a narrow maintenance boundary rather than a general Docker or host shell interface.
+
+- The MCP server runs as non-root UID 65532; the public gateway runs as non-root `node`.
+- The MCP and gateway use read-only filesystems where applicable, drop Linux capabilities, and use `no-new-privileges`.
+- The raw Docker socket is mounted only into the restricted socket proxy, never into the model-facing MCP container.
+- `container_inspect` exposes the configured container user for security auditing without returning container environment variables or command lines.
+- Host Git maintenance is alias-only and limited to clean `main` checkouts with an exact HTTPS GitHub `origin` and `git pull --ff-only origin main`.
+- Repository-only allowlisting is supported without inventing a Scheduled Task mapping; no arbitrary path, branch, remote, command, argument, or shell input is exposed to the MCP caller.
+- Machine-specific paths, identities, Cloudflare values, local allowlists, tokens, and credentials must remain outside Git.
+
 A restricted Model Context Protocol server for inspecting and maintaining a local Docker Desktop environment without exposing the raw Docker socket to the MCP client.
 
 > **Independent project.** This repository is not a fork of `docker/hub-mcp` or `docker/mcp-gateway`. It serves a different purpose: local Docker Engine inspection and narrowly scoped maintenance. It can integrate with Docker MCP Gateway as a client/runtime layer, but it does not derive from that gateway's source code.
@@ -33,7 +45,7 @@ Only the socket proxy receives `/var/run/docker.sock`.
 Read-only inspection:
 
 - `containers_list`
-- `container_inspect`
+- `container_inspect` — includes the configured container user for privilege audits without exposing environment variables or command lines
 - `container_logs`
 - `container_stats`
 - `compose_status`
@@ -272,6 +284,16 @@ For the initial activation on an already-installed DockerLocal stack, `enable-ho
   -ScheduledTaskAlias example-service `
   -ScheduledTaskName ExampleScheduledTask
 ```
+
+To allowlist an additional repository without creating a Scheduled Task mapping, use the repo-only helper:
+
+```powershell
+.\add-host-maintenance-repository.ps1 `
+  -RepositoryAlias another-repo `
+  -RepositoryPath C:\path\to\another-repo
+```
+
+The helper performs the same exact-root, `main`, and HTTPS GitHub-origin validation, preserves the existing task allowlist, and restarts only the local Maintenance Runner so it reloads the updated configuration.
 
 ## Event-driven local runtime supervisor
 
