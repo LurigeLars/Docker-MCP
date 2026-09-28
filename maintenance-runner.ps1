@@ -261,6 +261,117 @@ function Invoke-DockerText {
     return @{ exit_code = [int]$ExitCode; output = [string]$Output }
 }
 
+function Get-ComposeFileState {
+    $Containers = @()
+    $Drift = @()
+    $Errors = @()
+
+    $Ids = @(& $Docker ps -aq)
+    if ($LASTEXITCODE -ne 0) {
+        return @{
+            containers = @()
+            drift = @()
+            errors = @(@{ error = "docker_ps_failed" })
+        }
+    }
+
+    foreach ($Id in $Ids) {
+        if ([string]::IsNullOrWhiteSpace([string]$Id)) { continue }
+
+        $InspectText = (& $Docker inspect ([string]$Id) 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($InspectText)) {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_failed" }
+            continue
+        }
+
+        try {
+            $Inspect = @($InspectText | ConvertFrom-Json)[0]
+        }
+        catch {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_invalid_json" }
+            continue
+        }
+
+        $Labels = $Inspect.Config.Labels
+        if ($null -eq $Labels) { continue }
+
+        $ProjectProp = $Labels.PSObject.Properties["com.docker.compose.project"]
+        $ServiceProp = $Labels.PSObject.Properties["com.docker.compose.service"]
+        $FilesProp = $Labels.PSObject.Properties["com.docker.compose.project.config_files"]
+        if ($null -eq $ProjectProp -or $null -eq $ServiceProp -or $null -eq $FilesProp) {
+            continue
+        }
+
+        $Project = [string]$ProjectProp.Value
+        $Service = [string]$ServiceProp.Value
+        $FilesText = [string]$FilesProp.Value
+        if ([string]::IsNullOrWhiteSpace($Project) -or [string]::IsNullOrWhiteSpace($FilesText)) {
+            continue
+        }
+
+        $CreatedUtc = $null
+        try {
+            $CreatedUtc = ([DateTimeOffset]::Parse([string]$Inspect.Created)).UtcDateTime
+        }
+        catch {
+            $Errors += @{ project = $Project; service = $Service; error = "container_created_time_invalid" }
+        }
+
+        $ContainerFiles = @()
+        foreach ($PathText in @($FilesText -split ",")) {
+            $Path = ([string]$PathText).Trim()
+            if ([string]::IsNullOrWhiteSpace($Path)) { continue }
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                $Entry = @{
+                    project = $Project
+                    service = $Service
+                    container = ([string]$Inspect.Name).TrimStart("/")
+                    compose_file = $Path
+                    status = "missing"
+                    container_created_at = [string]$Inspect.Created
+                    compose_file_modified_at = $null
+                }
+                $ContainerFiles += $Entry
+                $Drift += $Entry
+                continue
+            }
+
+            $File = Get-Item -LiteralPath $Path
+            $ModifiedUtc = $File.LastWriteTimeUtc
+            $IsNewer = $false
+            if ($null -ne $CreatedUtc) {
+                $IsNewer = $ModifiedUtc -gt $CreatedUtc.AddSeconds(1)
+            }
+
+            $Entry = @{
+                project = $Project
+                service = $Service
+                container = ([string]$Inspect.Name).TrimStart("/")
+                compose_file = $File.FullName
+                status = if ($IsNewer) { "newer_than_container" } else { "ok" }
+                container_created_at = [string]$Inspect.Created
+                compose_file_modified_at = $ModifiedUtc.ToString("o")
+            }
+            $ContainerFiles += $Entry
+            if ($IsNewer) { $Drift += $Entry }
+        }
+
+        $Containers += @{
+            project = $Project
+            service = $Service
+            container = ([string]$Inspect.Name).TrimStart("/")
+            files = $ContainerFiles
+        }
+    }
+
+    return @{
+        containers = $Containers
+        drift = $Drift
+        errors = $Errors
+    }
+}
+
 function Get-ComposeDesiredState {
     $Desired = @{}
     $Errors = @()
@@ -521,7 +632,7 @@ try {
                 $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
                 if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
                 $Action = [string]$Job.action
-                if ($Action -notin @("compose_redeploy", "compose_desired_state")) { throw "Action is not allowlisted." }
+                if ($Action -notin @("compose_redeploy", "compose_desired_state", "compose_file_state")) { throw "Action is not allowlisted." }
 
                 Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
                 $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -539,6 +650,14 @@ try {
                         job_id=$JobId; status="succeeded"; started_unix=$Started
                         finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                         projects=$Desired.projects; errors=$Desired.errors
+                    }
+                }
+                elseif ($Action -eq "compose_file_state") {
+                    $FileState = Get-ComposeFileState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        containers=$FileState.containers; drift=$FileState.drift; errors=$FileState.errors
                     }
                 }
                 else {
