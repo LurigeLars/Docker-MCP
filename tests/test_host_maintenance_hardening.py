@@ -2,7 +2,7 @@ import json
 import sys
 import types
 import unittest
-from unittest import mock
+import unittest.mock
 
 
 class _DummyMCP:
@@ -41,7 +41,7 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
             "eligible_for_pull": True,
             "output": "must-not-leak",
         }
-        with mock.patch.object(server, "_runner_request", return_value=raw) as runner:
+        with unittest.mock.patch.object(server, "_runner_request", return_value=raw) as runner:
             result = json.loads(server.repo_status("avanza-mcp"))
 
         runner.assert_called_once_with(
@@ -67,7 +67,7 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
             "changed": True,
             "clean": True,
         }
-        with mock.patch.object(server, "_runner_request", return_value=raw) as runner:
+        with unittest.mock.patch.object(server, "_runner_request", return_value=raw) as runner:
             result = json.loads(server.repo_pull_ff("avanza-mcp"))
 
         payload = runner.call_args.args[0]
@@ -78,7 +78,7 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
             self.assertNotIn(forbidden, payload)
 
     def test_repository_alias_rejects_path_like_input_before_runner(self):
-        with mock.patch.object(server, "_runner_request") as runner:
+        with unittest.mock.patch.object(server, "_runner_request") as runner:
             with self.assertRaises(ValueError):
                 server.repo_status("../avanza-mcp")
         runner.assert_not_called()
@@ -93,7 +93,7 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
             "after_state": "Running",
             "last_task_result": 0,
         }
-        with mock.patch.object(server, "_runner_request", return_value=raw) as runner:
+        with unittest.mock.patch.object(server, "_runner_request", return_value=raw) as runner:
             result = json.loads(server.scheduled_task_control("avanza-mcp-http", "restart"))
 
         runner.assert_called_once_with(
@@ -107,13 +107,13 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertEqual(result["operation"], "restart")
 
     def test_scheduled_task_rejects_arbitrary_operation(self):
-        with mock.patch.object(server, "_runner_request") as runner:
+        with unittest.mock.patch.object(server, "_runner_request") as runner:
             with self.assertRaises(ValueError):
                 server.scheduled_task_control("avanza-mcp-http", "powershell -c whoami")
         runner.assert_not_called()
 
     def test_timeout_keeps_only_job_id_for_followup(self):
-        with mock.patch.object(
+        with unittest.mock.patch.object(
             server,
             "_runner_request",
             return_value={"status": "timeout", "job_id": "b" * 32, "output": "hidden"},
