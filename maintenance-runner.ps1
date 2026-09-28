@@ -40,7 +40,11 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
 
         $Cfg = $Property.Value
         $WorkingDir = [string]$Cfg.working_dir
-        $Files = @($Cfg.files | ForEach-Object { [string]$_ })
+        $Files = @(
+            $Cfg.files |
+                ForEach-Object { [string]$_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
         $Services = @($Cfg.services | ForEach-Object { [string]$_ })
 
         if ([string]::IsNullOrWhiteSpace($WorkingDir)) { throw "Missing working_dir for project $Name." }
