@@ -457,6 +457,24 @@ def mcp_deployment_audit():
         }
 
     try:
+        compose_file_state = _runner_request({"action": "compose_file_state"})
+        if compose_file_state.get("status") != "succeeded":
+            compose_file_state = {
+                "status": compose_file_state.get("status", "unavailable"),
+                "drift": [],
+                "errors": [{"error": "maintenance_runner_unavailable"}],
+            }
+        else:
+            compose_file_state.setdefault("drift", [])
+            compose_file_state.setdefault("errors", [])
+    except Exception as exc:
+        compose_file_state = {
+            "status": "unavailable",
+            "drift": [],
+            "errors": [{"error": type(exc).__name__}],
+        }
+
+    try:
         source_audit = _json("GET", "/dockerlocal/runtime-source-drift") or {}
         if not isinstance(source_audit, dict):
             source_audit = {}
@@ -613,6 +631,11 @@ def mcp_deployment_audit():
             "errors": desired_state.get("errors") or [],
         },
         "compose_config_drift": compose_config_drift,
+        "compose_file_state": {
+            "status": compose_file_state.get("status"),
+            "errors": compose_file_state.get("errors") or [],
+        },
+        "compose_file_drift": compose_file_state.get("drift") or [],
         "runtime_source_audit": {
             "status": source_audit.get("status"),
             "checked_files": int(source_audit.get("checked_files") or 0),
@@ -625,6 +648,7 @@ def mcp_deployment_audit():
             "stopped_or_unhealthy": len(stopped_or_unhealthy),
             "local_image_drift": len(image_drift),
             "compose_config_drift": len(compose_config_drift),
+            "compose_file_drift": len(compose_file_state.get("drift") or []),
             "runtime_source_drift": len(source_audit.get("drift") or []),
             "missing_expected_projects": len(missing_expected),
         },
