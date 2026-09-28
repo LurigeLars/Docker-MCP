@@ -127,6 +127,47 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["compose_config_drift"], 0)
 
 
+    def test_suppresses_file_age_drift_when_exact_desired_state_exists(self):
+        desired = {
+            "status": "succeeded",
+            "projects": {
+                "avanza-mcp-public": {
+                    "services": {
+                        "gateway": {
+                            "image": "node:26.9.0-alpine",
+                            "config_hash": "oldhash",
+                        }
+                    }
+                }
+            },
+            "errors": [],
+        }
+        file_state = {
+            "status": "succeeded",
+            "drift": [
+                {
+                    "project": "avanza-mcp-public",
+                    "service": "gateway",
+                    "container": "avanza-mcp-gateway",
+                    "compose_file": r"C:\\ClaudeCode\\avanza-mcp\\compose.public.yaml",
+                    "status": "newer_than_container",
+                }
+            ],
+            "errors": [],
+        }
+
+        with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+            with mock.patch.object(
+                server,
+                "_runner_request",
+                side_effect=[desired, file_state],
+            ):
+                payload = json.loads(server.mcp_deployment_audit())
+
+        self.assertEqual(payload["compose_config_drift"], [])
+        self.assertEqual(payload["compose_file_drift"], [])
+        self.assertEqual(payload["summary"]["compose_file_drift"], 0)
+
     def test_reports_compose_file_drift_from_any_project(self):
         desired = {"status": "succeeded", "projects": {}, "errors": []}
         file_state = {
