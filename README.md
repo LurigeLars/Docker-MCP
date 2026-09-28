@@ -45,7 +45,7 @@ Only the socket proxy receives `/var/run/docker.sock`.
 Read-only inspection:
 
 - `containers_list`
-- `container_inspect`
+- `container_inspect` — includes the configured container user for privilege audits without exposing environment variables or command lines
 - `container_logs`
 - `container_stats`
 - `compose_status`
@@ -284,6 +284,16 @@ For the initial activation on an already-installed DockerLocal stack, `enable-ho
   -ScheduledTaskAlias example-service `
   -ScheduledTaskName ExampleScheduledTask
 ```
+
+To allowlist an additional repository without creating a Scheduled Task mapping, use the repo-only helper:
+
+```powershell
+.\add-host-maintenance-repository.ps1 `
+  -RepositoryAlias another-repo `
+  -RepositoryPath C:\path\to\another-repo
+```
+
+The helper performs the same exact-root, `main`, and HTTPS GitHub-origin validation, preserves the existing task allowlist, and restarts only the local Maintenance Runner so it reloads the updated configuration.
 
 ## Event-driven local runtime supervisor
 
