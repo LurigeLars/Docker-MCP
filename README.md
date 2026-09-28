@@ -39,7 +39,7 @@ Read-only inspection:
 - `compose_status`
 - `images_list`
 - `image_inspect`
-- `mcp_deployment_audit`
+- `mcp_deployment_audit` — also compares each allowlisted Compose service's current `docker compose config --hash` and desired image against the running container, so a pulled/edited Compose file that still needs recreate is reported explicitly
 - `image_usage_audit`
 - `maintenance_job_status`
 - `maintenance_runner_status`
@@ -201,7 +201,9 @@ Additional host projects can be configured locally in:
 %LOCALAPPDATA%\DockerLocalMCP\maintenance-projects.local.json
 ```
 
-Start from `maintenance-projects.example.json`. The local file is ignored by Git and should not contain secrets.
+Start from `maintenance-projects.example.json`. The local file is ignored by Git and should not contain secrets. The example includes an `avanza-mcp-public` entry; replace its placeholder with the local Avanza checkout path to allow safe gateway-only redeploys.
+
+The same allowlist is also the source of truth for desired-Compose drift checks. `mcp_deployment_audit` asks the host runner for the live canonical Compose model and service config hashes only when the audit is called; there is no background reconciliation loop.
 
 Two execution modes are supported:
 
