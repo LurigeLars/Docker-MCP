@@ -618,6 +618,13 @@ def mcp_deployment_audit():
     expected = set(EXPECTED_MCP_PROJECTS)
     missing_expected = sorted(expected - seen_projects)
 
+    exact_desired_projects = set((desired_state.get("projects") or {}).keys())
+    compose_file_drift = [
+        item
+        for item in (compose_file_state.get("drift") or [])
+        if str(item.get("project") or "") not in exact_desired_projects
+    ]
+
     payload = {
         "timestamp_unix": int(time.time()),
         "expected_projects": list(EXPECTED_MCP_PROJECTS),
@@ -635,7 +642,7 @@ def mcp_deployment_audit():
             "status": compose_file_state.get("status"),
             "errors": compose_file_state.get("errors") or [],
         },
-        "compose_file_drift": compose_file_state.get("drift") or [],
+        "compose_file_drift": compose_file_drift,
         "runtime_source_audit": {
             "status": source_audit.get("status"),
             "checked_files": int(source_audit.get("checked_files") or 0),
@@ -648,7 +655,7 @@ def mcp_deployment_audit():
             "stopped_or_unhealthy": len(stopped_or_unhealthy),
             "local_image_drift": len(image_drift),
             "compose_config_drift": len(compose_config_drift),
-            "compose_file_drift": len(compose_file_state.get("drift") or []),
+            "compose_file_drift": len(compose_file_drift),
             "runtime_source_drift": len(source_audit.get("drift") or []),
             "missing_expected_projects": len(missing_expected),
         },
