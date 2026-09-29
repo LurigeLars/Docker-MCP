@@ -292,7 +292,15 @@ function Get-BoundedScoutOutput {
     }
 
     if ($Value.Length -gt $ScoutOutputLimit) {
-        return $Value.Substring($Value.Length - $ScoutOutputLimit)
+        $HeadLength = [int]($ScoutOutputLimit / 2)
+        $TailLength = $ScoutOutputLimit - $HeadLength
+        return (
+            $Value.Substring(0, $HeadLength) +
+            [Environment]::NewLine +
+            "...[TRUNCATED]..." +
+            [Environment]::NewLine +
+            $Value.Substring($Value.Length - $TailLength)
+        )
     }
     return $Value
 }
@@ -302,19 +310,45 @@ function Get-ScoutVulnerabilityCounts {
 
     $Counts = [ordered]@{}
     foreach ($Severity in $ScoutSeverities) {
+        $Counts[$Severity] = 0
+    }
+
+    $SummaryRow = [regex]::Match(
+        [string]$Output,
+        '<tr><td>vulnerabilities</td><td>(?<badges>.*?)</td></tr>',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+            [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if (-not $SummaryRow.Success) {
+        return $Counts
+    }
+
+    $Badges = $SummaryRow.Groups["badges"].Value
+    foreach ($Severity in $ScoutSeverities) {
         $Match = [regex]::Match(
-            [string]$Output,
+            $Badges,
             ('alt="{0}: (?<count>\d+)"' -f [regex]::Escape($Severity)),
             [Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
-        $Counts[$Severity] = if ($Match.Success) {
-            [int]$Match.Groups["count"].Value
-        }
-        else {
-            0
+        if ($Match.Success) {
+            $Counts[$Severity] = [int]$Match.Groups["count"].Value
         }
     }
     return $Counts
+}
+
+function Get-ScoutDetectedVulnerabilityTotal {
+    param([AllowEmptyString()][string]$Output)
+
+    $Match = [regex]::Match(
+        [string]$Output,
+        'Detected\s+\d+\s+vulnerable\s+packages?\s+with\s+(?:a\s+total\s+of\s+)?(?<count>\d+)\s+vulnerabilit(?:y|ies)',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if ($Match.Success) {
+        return [int]$Match.Groups["count"].Value
+    }
+    return $null
 }
 
 function New-ScoutFullScanResult {
@@ -595,6 +629,7 @@ function Invoke-ScoutFullScan {
         $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
         $Counts = Get-ScoutVulnerabilityCounts -Output $Combined
         $Result.vulnerability_counts = $Counts
+        $Result.detected_vulnerabilities_total = Get-ScoutDetectedVulnerabilityTotal -Output $Combined
         if ([bool]$Job.only_fixed) {
             $Result.fixable_vulnerability_counts = $Counts
         }
