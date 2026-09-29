@@ -168,6 +168,46 @@ class ProxyPolicyTests(unittest.TestCase):
         self.assertFalse(proxy.allowed("GET", "/version?x=1"))
         self.assertFalse(proxy.allowed("GET", "/info#fragment"))
 
+    def test_encoded_container_path_smuggling_is_rejected(self):
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/containers/example%2F..%2Fother/json",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "POST",
+                "/v1.54/containers/example%2F..%2Fother/restart?t=10",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/containers/example%2F..%2Fother/stats?stream=false",
+            )
+        )
+
+    def test_image_refs_allow_registry_paths_but_reject_traversal_segments(self):
+        self.assertTrue(
+            proxy.allowed(
+                "GET",
+                "/v1.54/images/ghcr.io%2Fowner%2Fimage:tag/json",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/images/ghcr.io%2Fowner%2F..%2Fimage:tag/json",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/distribution/ghcr.io%2Fowner%2F..%2Fimage:tag/json",
+            )
+        )
+
     def test_custom_routes_have_exact_request_shapes(self):
         self.assertTrue(
             proxy.allowed_custom("GET", "/dockerlocal/runtime-source-drift")
