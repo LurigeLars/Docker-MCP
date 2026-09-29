@@ -132,7 +132,8 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
             RUNNER.index("function Get-ScoutVulnerabilityCounts {")
         ]
         self.assertIn('Replace([string]$RedactValue, "[REDACTED]")', bounded)
-        self.assertIn("Substring($Value.Length - $ScoutOutputLimit)", bounded)
+        self.assertIn('$Value.Substring(0, $HeadLength)', bounded)
+        self.assertIn('$Value.Substring($Value.Length - $TailLength)', bounded)
 
     # 10
     def test_job_directory_is_removed_after_success(self):
