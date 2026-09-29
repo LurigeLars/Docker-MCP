@@ -4,9 +4,6 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{32}$')]
     [string]$AccountId,
 
-    [ValidatePattern('^[a-zA-Z0-9_]+$')]
-    [string]$ListName = "openai_chatgpt_egress",
-
     [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')]
     [string]$At = "08:00",
 
@@ -40,9 +37,7 @@ $Protected = ConvertFrom-SecureString -SecureString $ApiToken
 
 $Config = [ordered]@{
     accountId  = $AccountId.ToLowerInvariant()
-    listName   = $ListName
     secretPath = $SecretPath
-    feedUrl    = "https://openai.com/chatgpt-connectors.json"
 }
 $Config | ConvertTo-Json | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
 

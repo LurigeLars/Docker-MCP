@@ -6,6 +6,9 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$FeedUrl = "https://openai.com/chatgpt-connectors.json"
+$ListName = "openai_chatgpt_egress"
+
 function Write-State {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -154,13 +157,14 @@ try {
     }
 
     $Config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-    foreach ($Required in @("accountId", "listName", "secretPath", "feedUrl")) {
+    foreach ($Required in @("accountId", "secretPath")) {
         if (-not $Config.$Required) { throw "Sync config is missing '$Required'." }
     }
 
     $Token = Get-PlaintextSecret -Path ([string]$Config.secretPath)
 
-    $Feed = Invoke-RestMethod -Method GET -Uri ([string]$Config.feedUrl) -ErrorAction Stop
+    $Feed = Invoke-RestMethod -Method GET -Uri $FeedUrl -ErrorAction Stop
+    if (-not $Feed.creationTime) { throw "OpenAI feed is missing creationTime. Refusing to change Cloudflare." }
     if (-not $Feed.prefixes -or @($Feed.prefixes).Count -eq 0) {
         throw "OpenAI feed returned no prefixes. Refusing to change Cloudflare."
     }
@@ -181,13 +185,13 @@ try {
     }
 
     $Lists = Invoke-Cloudflare -Method GET -Path "/accounts/$($Config.accountId)/rules/lists" -Token $Token
-    $Matches = @($Lists.result | Where-Object { $_.name -eq [string]$Config.listName })
+    $Matches = @($Lists.result | Where-Object { $_.name -eq $ListName })
     if ($Matches.Count -ne 1) {
-        throw "Expected exactly one Cloudflare list named '$($Config.listName)'; found $($Matches.Count). Refusing to create or guess."
+        throw "Expected exactly one Cloudflare list named '$ListName'; found $($Matches.Count). Refusing to create or guess."
     }
 
     $List = $Matches[0]
-    if ($List.kind -ne "ip") { throw "Cloudflare list '$($Config.listName)' is not an IP list." }
+    if ($List.kind -ne "ip") { throw "Cloudflare list '$ListName' is not an IP list." }
 
     $Current = @(Get-CloudflareListItems -AccountId ([string]$Config.accountId) -ListId ([string]$List.id) -Token $Token)
     if (Test-ExactSet -Expected $DesiredSet -Actual $Current) {
