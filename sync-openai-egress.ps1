@@ -117,7 +117,7 @@ function Get-CloudflareListItems {
         $Path = "/accounts/$AccountId/rules/lists/$ListId/items"
         if ($Cursor) {
             $Encoded = [Uri]::EscapeDataString($Cursor)
-            $Path = "$Path?cursor=$Encoded"
+            $Path = "{0}?cursor={1}" -f $Path, $Encoded
         }
 
         $Response = Invoke-Cloudflare -Method GET -Path $Path -Token $Token
