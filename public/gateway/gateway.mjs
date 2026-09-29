@@ -157,7 +157,51 @@ function validateMcpBody(body) {
   return { ok: true };
 }
 
-function forward(req, res, body) {
+function rewriteResponseMessage(message) {
+  if (!message || typeof message !== 'object') return message;
+  if (Array.isArray(message.result?.tools)) {
+    message.result.tools = message.result.tools.filter(tool =>
+      ALLOWED_TOOLS.has(String(tool?.name ?? '')),
+    );
+  }
+  if (message.result?.serverInfo) {
+    message.result.instructions =
+      'DockerLocal exposes only the tools returned by tools/list. Calls outside that allowlist are rejected by the gateway.';
+  }
+  return message;
+}
+
+function rewriteJsonText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    const rewritten = Array.isArray(parsed)
+      ? parsed.map(rewriteResponseMessage)
+      : rewriteResponseMessage(parsed);
+    return JSON.stringify(rewritten);
+  } catch {
+    return text;
+  }
+}
+
+function rewriteSseLine(line) {
+  if (!line.startsWith('data:')) return line;
+  const original = line.slice(5).trimStart();
+  const rewritten = rewriteJsonText(original);
+  return rewritten === original ? line : 'data: ' + rewritten;
+}
+
+function needsResponseRewrite(body) {
+  try {
+    const parsed = JSON.parse(body.toString('utf8'));
+    return (Array.isArray(parsed) ? parsed : [parsed]).some(message =>
+      message?.method === 'tools/list' || message?.method === 'initialize'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function forward(req, res, body, rewriteResponse = false) {
   const headers = { ...req.headers, host: `${UPSTREAM_HOST}:${UPSTREAM_PORT}` };
   for (const name of [
     'authorization',
@@ -183,8 +227,40 @@ function forward(req, res, body) {
   }, upstreamResponse => {
     const responseHeaders = { ...upstreamResponse.headers };
     responseHeaders['cache-control'] = 'no-store';
-    res.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
-    upstreamResponse.pipe(res);
+
+    if (!rewriteResponse) {
+      res.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
+      upstreamResponse.pipe(res);
+      return;
+    }
+
+    delete responseHeaders['content-length'];
+
+    if (String(upstreamResponse.headers['content-type'] ?? '').includes('text/event-stream')) {
+      res.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
+      let pending = '';
+      upstreamResponse.setEncoding('utf8');
+      upstreamResponse.on('data', chunk => {
+        pending += chunk;
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        if (lines.length) res.write(lines.map(rewriteSseLine).join('\n') + '\n');
+      });
+      upstreamResponse.on('end', () => {
+        res.end(pending ? rewriteSseLine(pending) : undefined);
+      });
+      return;
+    }
+
+    const chunks = [];
+    upstreamResponse.on('data', chunk => chunks.push(chunk));
+    upstreamResponse.on('end', () => {
+      const out = Buffer.from(rewriteJsonText(Buffer.concat(chunks).toString('utf8')));
+      delete responseHeaders['transfer-encoding'];
+      responseHeaders['content-length'] = String(out.length);
+      res.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
+      res.end(out);
+    });
   });
 
   upstream.on('error', () => {
@@ -231,7 +307,7 @@ http.createServer(async (req, res) => {
     const verdict = validateMcpBody(body);
     if (verdict.httpError) return send(res, verdict.httpError[0], verdict.httpError[1]);
     if (verdict.rpcError) return sendJson(res, ...verdict.rpcError);
-    forward(req, res, body);
+    forward(req, res, body, needsResponseRewrite(body));
   });
 }).listen(PORT, '0.0.0.0', () => {
   console.log(`dockerlocal gateway listening on ${PORT}; Cloudflare Access required`);

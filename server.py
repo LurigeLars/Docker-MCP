@@ -5,6 +5,7 @@ import os
 import re
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -29,6 +30,8 @@ IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
 COMPOSE_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 HOST_MAINTENANCE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 SEVERITIES = {"critical", "high", "medium", "low", "unspecified"}
+SCOUT_MAX_IMAGE_BYTES = max(0, int(os.environ.get("DOCKER_SCOUT_MAX_IMAGE_BYTES", "0") or 0))
+SCOUT_EPHEMERAL_CACHE = os.environ.get("DOCKER_SCOUT_EPHEMERAL_CACHE", "").strip().lower() in {"1", "true", "yes"}
 _SCOUT_LOCK = threading.Lock()
 EXPECTED_MCP_PROJECTS = tuple(
     p.strip()
@@ -255,6 +258,20 @@ def _read_runtime_secret(path: str) -> str | None:
     return value or None
 
 
+def _assert_scout_image_size(image: str) -> None:
+    if SCOUT_MAX_IMAGE_BYTES <= 0:
+        return
+    raw = _json("GET", f"/images/{_quote(image)}/json") or {}
+    size = int(raw.get("Size") or 0)
+    if size > SCOUT_MAX_IMAGE_BYTES:
+        raise ValueError(
+            "Docker Scout remote scan refused: "
+            f"{image} is {_bytes_human(size)}, above the configured "
+            f"{_bytes_human(SCOUT_MAX_IMAGE_BYTES)} limit. "
+            "Run large scans through the local/admin path instead."
+        )
+
+
 def _scout(args: list[str], timeout: int = 180) -> str:
     env = os.environ.copy()
     # Never inherit Docker Hub credentials from the long-lived MCP container.
@@ -279,24 +296,38 @@ def _scout(args: list[str], timeout: int = 180) -> str:
         env["DOCKER_SCOUT_HUB_PASSWORD"] = scout_password
 
     env.setdefault("DOCKER_HOST", "tcp://host.docker.internal:23750")
-    env.setdefault("DOCKER_SCOUT_CACHE_DIR", "/tmp/docker-scout")
     env.setdefault("DOCKER_SCOUT_NEW_VERSION_WARN", "false")
     env.setdefault("NO_COLOR", "1")
 
-    # Docker Scout uses a shared cache directory and does not tolerate concurrent
-    # writers reliably. Serialize Scout subprocesses within this long-lived MCP
-    # process so parallel tool calls cannot contend for the same cache lock.
+    # Public MCP calls may use an ephemeral per-job cache so a scan cannot leave
+    # persistent scratch data in the container tmpfs. The process lock also keeps
+    # peak scratch usage bounded to one Scout job at a time.
     with _SCOUT_LOCK:
-        result = subprocess.run(
-            ["/usr/local/bin/docker-scout", *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=env,
-        )
+        if SCOUT_EPHEMERAL_CACHE:
+            with tempfile.TemporaryDirectory(prefix="docker-scout-", dir="/tmp") as cache_dir:
+                env["DOCKER_SCOUT_CACHE_DIR"] = cache_dir
+                result = subprocess.run(
+                    ["/usr/local/bin/docker-scout", *args],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    env=env,
+                )
+        else:
+            env.setdefault("DOCKER_SCOUT_CACHE_DIR", "/tmp/docker-scout")
+            result = subprocess.run(
+                ["/usr/local/bin/docker-scout", *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                env=env,
+            )
     output = result.stdout or ""
     if len(output) > MAX_OUTPUT:
         output = output[:MAX_OUTPUT] + "\n...[output truncated]"
@@ -1017,7 +1048,9 @@ def image_prune_dangling() -> dict[str, Any]:
 @mcp.tool(annotations=SCOUT_READ)
 def scout_quickview(image: str) -> str:
     """Run Docker Scout quickview for a local image."""
-    return _scout(["quickview", f"local://{_image(image)}"])
+    image = _image(image)
+    _assert_scout_image_size(image)
+    return _scout(["quickview", f"local://{image}"])
 
 
 @mcp.tool(annotations=SCOUT_READ)
@@ -1029,6 +1062,7 @@ def scout_cves(
 ) -> str:
     """Scan a local image for CVEs with optional severity, fixability and CISA KEV filters."""
     image = _image(image)
+    _assert_scout_image_size(image)
     args = ["cves", "--format", "markdown"]
     if severity:
         normalized = [s.lower() for s in severity]
@@ -1047,13 +1081,16 @@ def scout_cves(
 @mcp.tool(annotations=SCOUT_READ)
 def scout_recommendations(image: str) -> str:
     """Show Docker Scout remediation recommendations for a local image."""
-    return _scout(["recommendations", f"local://{_image(image)}"])
+    image = _image(image)
+    _assert_scout_image_size(image)
+    return _scout(["recommendations", f"local://{image}"])
 
 
 @mcp.tool(annotations=SCOUT_READ)
 def scout_sbom(image: str, package_type: str | None = None) -> str:
     """Return a package-list SBOM for a local image."""
     image = _image(image)
+    _assert_scout_image_size(image)
     args = ["sbom", "--format", "list"]
     if package_type:
         if not re.fullmatch(r"[A-Za-z0-9_.+-]{1,40}", package_type):
@@ -1068,6 +1105,8 @@ def scout_compare(image: str, baseline: str, only_fixed: bool = False) -> str:
     """Compare two local images with Docker Scout."""
     image = _image(image)
     baseline = _image(baseline)
+    _assert_scout_image_size(image)
+    _assert_scout_image_size(baseline)
     args = ["compare", "--format", "json"]
     if only_fixed:
         args.append("--only-fixed")

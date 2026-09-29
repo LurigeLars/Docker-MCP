@@ -13,6 +13,10 @@ services:
       DOCKER_HOST: tcp://dockerlocal-socket-proxy:2375
       DOCKER_SCOUT_CACHE_DIR: /tmp/docker-scout
       DOCKER_SCOUT_NEW_VERSION_WARN: "false"
+      # Public MCP guardrails: scans >= 1 GiB must use the local/admin path, and
+      # remote jobs receive an ephemeral cache that is deleted after each run.
+      DOCKER_SCOUT_MAX_IMAGE_BYTES: "1073741824"
+      DOCKER_SCOUT_EPHEMERAL_CACHE: "1"
       DOCKER_SCOUT_HUB_USER_FILE: /run/dockerlocal-secrets/scout_hub_user
       DOCKER_SCOUT_HUB_PASSWORD_FILE: /run/dockerlocal-secrets/scout_hub_password
       DOCKERLOCAL_EXPECTED_MCP_PROJECTS: "${DOCKERLOCAL_EXPECTED_MCP_PROJECTS:-dockerlocal-public,dockerlocal}"
