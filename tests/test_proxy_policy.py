@@ -37,6 +37,216 @@ class ProxyPolicyTests(unittest.TestCase):
         )
 
 
+    def test_exact_public_read_shapes(self):
+        self.assertTrue(proxy.allowed("GET", "/v1.54/containers/json?all=1"))
+        self.assertTrue(proxy.allowed("GET", "/v1.54/containers/json?all=0"))
+        self.assertTrue(
+            proxy.allowed(
+                "GET",
+                "/v1.54/containers/example/logs?stdout=1&stderr=1&timestamps=1&tail=200",
+            )
+        )
+        self.assertTrue(
+            proxy.allowed("GET", "/v1.54/containers/example/stats?stream=false")
+        )
+        self.assertTrue(proxy.allowed("GET", "/v1.54/images/json?all=0"))
+        self.assertTrue(proxy.allowed("GET", "/v1.54/containers/example/json"))
+        self.assertTrue(proxy.allowed("GET", "/v1.54/images/example/json"))
+
+    def test_streaming_and_unbounded_queries_are_rejected(self):
+        self.assertFalse(proxy.allowed("GET", "/v1.54/containers/json"))
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/containers/example/logs?stdout=1&stderr=1&timestamps=1&tail=all",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/containers/example/logs?stdout=1&stderr=1&timestamps=1&tail=200&follow=1",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed("GET", "/v1.54/containers/example/stats?stream=true")
+        )
+        self.assertFalse(proxy.allowed("GET", "/v1.54/containers/example/stats"))
+        self.assertFalse(proxy.allowed("GET", "/v1.54/images/json?all=1"))
+
+    def test_restart_is_limited_to_timeout_only(self):
+        self.assertTrue(
+            proxy.allowed("POST", "/v1.54/containers/example/restart?t=10")
+        )
+        self.assertTrue(
+            proxy.allowed("POST", "/v1.54/containers/example/restart?t=0")
+        )
+        self.assertFalse(
+            proxy.allowed("POST", "/v1.54/containers/example/restart")
+        )
+        self.assertFalse(
+            proxy.allowed("POST", "/v1.54/containers/example/restart?t=61")
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "POST",
+                "/v1.54/containers/example/restart?t=0&signal=SIGKILL",
+            )
+        )
+
+    def test_image_pull_rejects_import_and_extra_parameters(self):
+        self.assertTrue(
+            proxy.allowed("POST", "/v1.54/images/create?fromImage=node:26-alpine")
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "POST",
+                "/v1.54/images/create?fromSrc=http://169.254.169.254/latest/meta-data/&repo=x",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed("POST", "/v1.54/images/create?fromSrc=-&repo=x")
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "POST",
+                "/v1.54/images/create?fromImage=node:26-alpine&platform=linux/amd64",
+            )
+        )
+
+    def test_prune_is_dangling_only(self):
+        dangling = "%7B%22dangling%22%3A%5B%22true%22%5D%7D"
+        not_dangling = "%7B%22dangling%22%3A%5B%22false%22%5D%7D"
+        self.assertTrue(
+            proxy.allowed("POST", f"/v1.54/images/prune?filters={dangling}")
+        )
+        self.assertFalse(proxy.allowed("POST", "/v1.54/images/prune"))
+        self.assertFalse(
+            proxy.allowed("POST", f"/v1.54/images/prune?filters={not_dangling}")
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "POST",
+                f"/v1.54/images/prune?filters={dangling}&extra=1",
+            )
+        )
+
+    def test_dangerous_engine_operations_are_denied(self):
+        denied = [
+            ("POST", "/v1.54/containers/create"),
+            ("POST", "/v1.54/containers/example/start"),
+            ("POST", "/v1.54/containers/example/stop"),
+            ("POST", "/v1.54/containers/example/kill"),
+            ("POST", "/v1.54/containers/example/exec"),
+            ("POST", "/v1.54/exec/example/start"),
+            ("DELETE", "/v1.54/containers/example?force=1"),
+            ("POST", "/v1.54/volumes/create"),
+            ("DELETE", "/v1.54/volumes/example"),
+            ("POST", "/v1.54/networks/create"),
+            ("DELETE", "/v1.54/networks/example"),
+            ("POST", "/v1.54/build"),
+            ("POST", "/v1.54/commit"),
+            ("POST", "/v1.54/images/load"),
+            ("DELETE", "/v1.54/images/example"),
+        ]
+        for method, target in denied:
+            with self.subTest(method=method, target=target):
+                self.assertFalse(proxy.allowed(method, target))
+
+    def test_only_immutable_image_exports_are_allowed(self):
+        self.assertTrue(
+            proxy.allowed("GET", f"/v1.54/images/{IMAGE_ID}/get")
+        )
+        self.assertFalse(
+            proxy.allowed("GET", "/v1.54/images/node:26.10.0-alpine/get")
+        )
+        self.assertFalse(
+            proxy.allowed("GET", f"/v1.54/images/{IMAGE_ID}/get?extra=1")
+        )
+
+    def test_absolute_form_and_queries_on_no_query_routes_are_rejected(self):
+        self.assertFalse(proxy.allowed("GET", "http://docker/version"))
+        self.assertFalse(proxy.allowed("GET", "/version?x=1"))
+        self.assertFalse(proxy.allowed("GET", "/info#fragment"))
+
+    def test_encoded_container_path_smuggling_is_rejected(self):
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/containers/example%2F..%2Fother/json",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "POST",
+                "/v1.54/containers/example%2F..%2Fother/restart?t=10",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/containers/example%2F..%2Fother/stats?stream=false",
+            )
+        )
+
+    def test_image_refs_allow_registry_paths_but_reject_traversal_segments(self):
+        self.assertTrue(
+            proxy.allowed(
+                "GET",
+                "/v1.54/images/ghcr.io%2Fowner%2Fimage:tag/json",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/images/ghcr.io%2Fowner%2F..%2Fimage:tag/json",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed(
+                "GET",
+                "/v1.54/distribution/ghcr.io%2Fowner%2F..%2Fimage:tag/json",
+            )
+        )
+
+    def test_custom_routes_have_exact_request_shapes(self):
+        self.assertTrue(
+            proxy.allowed_custom("GET", "/dockerlocal/runtime-source-drift")
+        )
+        self.assertFalse(
+            proxy.allowed_custom(
+                "GET", "/dockerlocal/runtime-source-drift?extra=1"
+            )
+        )
+        self.assertTrue(
+            proxy.allowed_custom(
+                "POST",
+                "/dockerlocal/cleanup-stale-mcp-probes?min_age_seconds=900",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed_custom(
+                "POST",
+                "/dockerlocal/cleanup-stale-mcp-probes?min_age_seconds=299",
+            )
+        )
+        self.assertFalse(
+            proxy.allowed_custom(
+                "POST",
+                "/dockerlocal/cleanup-stale-mcp-probes?min_age_seconds=900&extra=1",
+            )
+        )
+        self.assertTrue(
+            proxy.allowed_custom(
+                "POST", "/dockerlocal/cleanup-superseded-images"
+            )
+        )
+        self.assertFalse(
+            proxy.allowed_custom(
+                "POST", "/dockerlocal/cleanup-superseded-images?extra=1"
+            )
+        )
+
+
 class RuntimeSourceDriftTests(unittest.TestCase):
     def test_detects_newer_read_only_bind_mounted_command_source(self):
         rows = [
