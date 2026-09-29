@@ -19,10 +19,10 @@ STALE_PROBE_IMAGE_PREFIX = "ghcr.io/github/github-mcp-server"
 # This tiny process is the only component with the Docker socket mounted.
 # It exposes a deliberately small subset of Docker Engine HTTP.
 RULES = [
-    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?_ping$")),
-    ("HEAD", re.compile(r"^/(?:v\\d+\\.\\d+/)?_ping$")),
-    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?version$")),
-    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?info$")),
+    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?_ping$")),
+    ("HEAD", re.compile(r"^/(?:v\d+\.\d+/)?_ping$")),
+    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?version$")),
+    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?info$")),
 ]
 
 IMMUTABLE_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -384,28 +384,28 @@ def allowed(method: str, target: str) -> bool:
     query = _query(parsed)
 
     container_inspect = re.fullmatch(
-        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/json$", path
+        r"^/(?:v\d+\.\d+/)?containers/([^/]+)/json$", path
     )
     if method == "GET" and container_inspect:
         return _no_query(parsed) and _container_ref(container_inspect.group(1))
 
     image_inspect = re.fullmatch(
-        r"^/(?:v\\d+\\.\\d+/)?images/([^/]+)/json$", path
+        r"^/(?:v\d+\.\d+/)?images/([^/]+)/json$", path
     )
     if method == "GET" and image_inspect:
         return _no_query(parsed) and _image_ref(image_inspect.group(1))
 
     distribution_inspect = re.fullmatch(
-        r"^/(?:v\\d+\\.\\d+/)?distribution/([^/]+)/json$", path
+        r"^/(?:v\d+\.\d+/)?distribution/([^/]+)/json$", path
     )
     if method == "GET" and distribution_inspect:
         return _no_query(parsed) and _image_ref(distribution_inspect.group(1))
 
-    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/json$", path):
+    if method == "GET" and re.fullmatch(r"^/(?:v\d+\.\d+/)?containers/json$", path):
         return set(query) == {"all"} and _single(query, "all") in {"0", "1"}
 
     container_logs = re.fullmatch(
-        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/logs$", path
+        r"^/(?:v\d+\.\d+/)?containers/([^/]+)/logs$", path
     )
     if method == "GET" and container_logs:
         if not _container_ref(container_logs.group(1)):
@@ -423,7 +423,7 @@ def allowed(method: str, target: str) -> bool:
         )
 
     container_stats = re.fullmatch(
-        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/stats$", path
+        r"^/(?:v\d+\.\d+/)?containers/([^/]+)/stats$", path
     )
     if method == "GET" and container_stats:
         return (
@@ -432,28 +432,28 @@ def allowed(method: str, target: str) -> bool:
             and _single(query, "stream") == "false"
         )
 
-    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/json$", path):
+    if method == "GET" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/json$", path):
         return set(query) == {"all"} and _single(query, "all") == "0"
 
-    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/get$", path):
+    if method == "GET" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/get$", path):
         return set(query) == {"names"} and IMMUTABLE_IMAGE_ID.fullmatch(
             _single(query, "names") or ""
         ) is not None
 
     image_export = re.fullmatch(
-        r"^/(?:v\\d+\\.\\d+/)?images/(sha256:[0-9a-f]{64})/get$",
+        r"^/(?:v\d+\.\d+/)?images/(sha256:[0-9a-f]{64})/get$",
         path,
     )
     if method == "GET" and image_export:
         return _no_query(parsed)
 
-    if method == "POST" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/create$", path):
+    if method == "POST" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/create$", path):
         return set(query) == {"fromImage"} and _image_ref(
             _single(query, "fromImage") or ""
         )
 
     container_restart = re.fullmatch(
-        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/restart$", path
+        r"^/(?:v\d+\.\d+/)?containers/([^/]+)/restart$", path
     )
     if method == "POST" and container_restart:
         timeout = _single(query, "t")
@@ -465,7 +465,7 @@ def allowed(method: str, target: str) -> bool:
             and 0 <= int(timeout) <= 60
         )
 
-    if method == "POST" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/prune$", path):
+    if method == "POST" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/prune$", path):
         if set(query) != {"filters"}:
             return False
         raw_filters = _single(query, "filters")
