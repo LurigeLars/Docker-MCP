@@ -23,6 +23,7 @@ $PasswordDpapi = Join-Path $SecretDir "scout_hub_password.dpapi"
 $StableScript = Join-Path $Root "dockerlocal-scout-runtime.ps1"
 $SupervisorConfig = Join-Path $Root "runtime-supervisor.local.json"
 $ComposePath = Join-Path $ContainerizedRoot "compose.public.yaml"
+$ProxyComposePath = Join-Path $ContainerizedRoot "compose.proxy.yaml"
 $Container = "dockerlocal-mcp-http"
 $UserSecretPath = "/run/dockerlocal-secrets/scout_hub_user"
 $PasswordSecretPath = "/run/dockerlocal-secrets/scout_hub_password"
@@ -241,8 +242,11 @@ function Download-DeploymentFiles {
 
     foreach ($name in @(
         "server.py",
+        "proxy.py",
         "Dockerfile",
+        "Dockerfile.proxy",
         "requirements.txt",
+        "compose.proxy.yaml",
         "compose.public.yaml",
         "public/gateway/gateway.mjs"
     )) {
@@ -395,6 +399,11 @@ switch ($Action) {
 
         Push-Location $ContainerizedRoot
         try {
+            & docker compose -f $ProxyComposePath up -d --build --force-recreate socket-proxy
+            if ($LASTEXITCODE -ne 0) {
+                throw "DockerLocal socket proxy rebuild/recreation failed."
+            }
+
             & docker build -t dockerlocal-mcp:local .
             if ($LASTEXITCODE -ne 0) {
                 throw "DockerLocal MCP image build failed."

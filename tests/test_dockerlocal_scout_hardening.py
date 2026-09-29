@@ -61,6 +61,25 @@ class DockerLocalScoutHardeningTests(unittest.TestCase):
         self.assertIn("New-Item -ItemType Directory -Force -Path $parent", RUNTIME)
         self.assertIn("up -d --force-recreate mcp gateway", RUNTIME)
 
+    def test_pinned_install_syncs_and_rebuilds_socket_proxy(self) -> None:
+        self.assertIn('"proxy.py"', RUNTIME)
+        self.assertIn('"Dockerfile.proxy"', RUNTIME)
+        self.assertIn('"compose.proxy.yaml"', RUNTIME)
+        self.assertIn('$ProxyComposePath = Join-Path $ContainerizedRoot "compose.proxy.yaml"', RUNTIME)
+        self.assertIn(
+            "compose -f $ProxyComposePath up -d --build --force-recreate socket-proxy",
+            RUNTIME,
+        )
+
+    def test_socket_proxy_is_rebuilt_before_public_mcp_recreation(self) -> None:
+        proxy_rebuild = RUNTIME.index(
+            "compose -f $ProxyComposePath up -d --build --force-recreate socket-proxy"
+        )
+        public_recreate = RUNTIME.index(
+            "compose -f $ComposePath up -d --force-recreate mcp gateway"
+        )
+        self.assertLess(proxy_rebuild, public_recreate)
+
     def test_migration_recreates_container_before_runtime_hydration(self) -> None:
         recreate = RUNTIME.index("--force-recreate")
         hydrate = RUNTIME.index("Invoke-RuntimeHydration", recreate)
