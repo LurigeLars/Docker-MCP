@@ -19,22 +19,30 @@ STALE_PROBE_IMAGE_PREFIX = "ghcr.io/github/github-mcp-server"
 # This tiny process is the only component with the Docker socket mounted.
 # It exposes a deliberately small subset of Docker Engine HTTP.
 RULES = [
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?_ping$")),
-    ("HEAD", re.compile(r"^/(?:v\d+\.\d+/)?_ping$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?version$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?info$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?containers/json$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?containers/[^/]+/json$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?containers/[^/]+/logs$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?containers/[^/]+/stats$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?images/json$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?images/[^/]+/json$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?images/[^/]+/get$")),
-    ("GET", re.compile(r"^/(?:v\d+\.\d+/)?distribution/[^/]+/json$")),
-    ("POST", re.compile(r"^/(?:v\d+\.\d+/)?images/create$")),
-    ("POST", re.compile(r"^/(?:v\d+\.\d+/)?containers/[^/]+/restart$")),
-    ("POST", re.compile(r"^/(?:v\d+\.\d+/)?images/prune$")),
+    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?_ping$")),
+    ("HEAD", re.compile(r"^/(?:v\\d+\\.\\d+/)?_ping$")),
+    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?version$")),
+    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?info$")),
+    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/json$")),
+    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?images/[^/]+/json$")),
+    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?distribution/[^/]+/json$")),
 ]
+
+IMMUTABLE_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
+
+
+def _query(parsed: urllib.parse.SplitResult) -> dict[str, list[str]]:
+    return urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+
+
+def _single(query: dict[str, list[str]], key: str) -> str | None:
+    values = query.get(key) or []
+    return values[0] if len(values) == 1 else None
+
+
+def _no_query(parsed: urllib.parse.SplitResult) -> bool:
+    return parsed.query == ""
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -357,19 +365,99 @@ def send_json_response(conn: socket.socket, status: str, payload: dict) -> None:
 
 def allowed(method: str, target: str) -> bool:
     parsed = urllib.parse.urlsplit(target)
+    if not target.startswith("/") or parsed.scheme or parsed.netloc or parsed.fragment:
+        return False
+
     path = parsed.path
+    query = _query(parsed)
 
-    # Docker Scout exports one local image through this alternate Engine API form:
-    # GET /images/get?names=sha256:<64-hex>. Keep it read-only and pinned to an
-    # immutable image ID rather than allowing arbitrary image names or bulk export.
-    if method == "GET" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/get$", path):
-        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        if set(query) != {"names"}:
+    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/json$", path):
+        return set(query) == {"all"} and _single(query, "all") in {"0", "1"}
+
+    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/logs$", path):
+        if set(query) != {"stdout", "stderr", "timestamps", "tail"}:
             return False
-        names = query.get("names") or []
-        return len(names) == 1 and re.fullmatch(r"sha256:[0-9a-f]{64}", names[0]) is not None
+        tail = _single(query, "tail")
+        return (
+            _single(query, "stdout") == "1"
+            and _single(query, "stderr") == "1"
+            and _single(query, "timestamps") == "1"
+            and tail is not None
+            and tail.isdigit()
+            and 1 <= int(tail) <= 1000
+        )
 
+    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/stats$", path):
+        return set(query) == {"stream"} and _single(query, "stream") == "false"
+
+    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/json$", path):
+        return set(query) == {"all"} and _single(query, "all") == "0"
+
+    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/get$", path):
+        return set(query) == {"names"} and IMMUTABLE_IMAGE_ID.fullmatch(
+            _single(query, "names") or ""
+        ) is not None
+
+    image_export = re.fullmatch(
+        r"^/(?:v\\d+\\.\\d+/)?images/(sha256:[0-9a-f]{64})/get$",
+        path,
+    )
+    if method == "GET" and image_export:
+        return _no_query(parsed)
+
+    if method == "POST" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/create$", path):
+        return (
+            set(query) == {"fromImage"}
+            and IMAGE_REF.fullmatch(_single(query, "fromImage") or "") is not None
+        )
+
+    if method == "POST" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/restart$", path):
+        timeout = _single(query, "t")
+        return (
+            set(query) == {"t"}
+            and timeout is not None
+            and timeout.isdigit()
+            and 0 <= int(timeout) <= 60
+        )
+
+    if method == "POST" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/prune$", path):
+        if set(query) != {"filters"}:
+            return False
+        raw_filters = _single(query, "filters")
+        if raw_filters is None:
+            return False
+        try:
+            filters = json.loads(raw_filters)
+        except json.JSONDecodeError:
+            return False
+        return filters == {"dangling": ["true"]}
+
+    if not _no_query(parsed):
+        return False
     return any(method == m and rx.fullmatch(path) for m, rx in RULES)
+
+
+def allowed_custom(method: str, target: str) -> bool:
+    parsed = urllib.parse.urlsplit(target)
+    if not target.startswith("/") or parsed.scheme or parsed.netloc or parsed.fragment:
+        return False
+
+    path = parsed.path
+    query = _query(parsed)
+
+    if method == "GET" and path == "/dockerlocal/runtime-source-drift":
+        return _no_query(parsed)
+
+    if method == "POST" and path == "/dockerlocal/cleanup-superseded-images":
+        return _no_query(parsed)
+
+    if method == "POST" and path == "/dockerlocal/cleanup-stale-mcp-probes":
+        if set(query) != {"min_age_seconds"}:
+            return False
+        age = _single(query, "min_age_seconds")
+        return age is not None and age.isdigit() and 300 <= int(age) <= 24 * 60 * 60
+
+    return False
 
 
 def deny(conn: socket.socket, status: str, message: str) -> None:
@@ -407,6 +495,9 @@ class Handler(socketserver.BaseRequestHandler):
         parsed_target = urllib.parse.urlsplit(target)
         path = parsed_target.path
         if method == "GET" and path == "/dockerlocal/runtime-source-drift":
+            if not allowed_custom(method, target):
+                deny(self.request, "403 Forbidden", "Docker API operation blocked")
+                return
             try:
                 send_json_response(self.request, "200 OK", runtime_source_drift())
             except Exception as exc:
@@ -419,10 +510,13 @@ class Handler(socketserver.BaseRequestHandler):
             return
 
         if method == "POST" and path == "/dockerlocal/cleanup-stale-mcp-probes":
+            if not allowed_custom(method, target):
+                deny(self.request, "403 Forbidden", "Docker API operation blocked")
+                return
             try:
-                query = urllib.parse.parse_qs(parsed_target.query, keep_blank_values=False)
-                raw_age = (query.get("min_age_seconds") or ["900"])[0]
-                min_age_seconds = max(300, min(int(raw_age), 24 * 60 * 60))
+                query = _query(parsed_target)
+                raw_age = _single(query, "min_age_seconds") or ""
+                min_age_seconds = int(raw_age)
                 result = cleanup_stale_mcp_probes(min_age_seconds)
                 send_json_response(self.request, "200 OK", result)
             except Exception as exc:
@@ -435,6 +529,9 @@ class Handler(socketserver.BaseRequestHandler):
             return
 
         if method == "POST" and path == "/dockerlocal/cleanup-superseded-images":
+            if not allowed_custom(method, target):
+                deny(self.request, "403 Forbidden", "Docker API operation blocked")
+                return
             try:
                 result = cleanup_superseded_images()
                 send_json_response(self.request, "200 OK", result)
@@ -454,6 +551,7 @@ class Handler(socketserver.BaseRequestHandler):
 
         headers: list[tuple[str, str]] = []
         content_length = 0
+        content_length_seen = False
 
         for line in lines[1:]:
             if ":" not in line:
@@ -464,11 +562,16 @@ class Handler(socketserver.BaseRequestHandler):
             lname = name.lower()
 
             if lname == "content-length":
+                if content_length_seen:
+                    deny(self.request, "400 Bad Request", "duplicate content length")
+                    return
+                content_length_seen = True
                 try:
                     content_length = int(value)
                 except ValueError:
                     deny(self.request, "400 Bad Request", "bad content length")
                     return
+                continue
 
             if lname in {"host", "connection", "proxy-connection", "keep-alive"}:
                 continue
@@ -481,6 +584,10 @@ class Handler(socketserver.BaseRequestHandler):
 
         if content_length > MAX_BODY:
             deny(self.request, "413 Payload Too Large", "request body too large")
+            return
+
+        if content_length != 0:
+            deny(self.request, "403 Forbidden", "request body not allowed")
             return
 
         while len(body) < content_length:
