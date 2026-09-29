@@ -32,6 +32,14 @@ class DockerLocalScoutHardeningTests(unittest.TestCase):
         self.assertIn("_SCOUT_LOCK = threading.Lock()", SERVER)
         self.assertIn("with _SCOUT_LOCK:", SERVER)
 
+    def test_public_scout_has_image_size_limit_and_ephemeral_cache(self) -> None:
+        self.assertIn('DOCKER_SCOUT_MAX_IMAGE_BYTES: "1073741824"', COMPOSE)
+        self.assertIn('DOCKER_SCOUT_EPHEMERAL_CACHE: "1"', COMPOSE)
+        self.assertIn("def _assert_scout_image_size", SERVER)
+        self.assertIn("SCOUT_MAX_IMAGE_BYTES", SERVER)
+        self.assertIn("tempfile.TemporaryDirectory", SERVER)
+        self.assertIn("_assert_scout_image_size(image)", SERVER)
+
     def test_catalog_no_longer_requests_scout_env_credentials(self) -> None:
         self.assertNotIn("DOCKER_SCOUT_HUB_USER", CATALOG)
         self.assertNotIn("DOCKER_SCOUT_HUB_PASSWORD", CATALOG)
