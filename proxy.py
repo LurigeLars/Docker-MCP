@@ -23,12 +23,10 @@ RULES = [
     ("HEAD", re.compile(r"^/(?:v\\d+\\.\\d+/)?_ping$")),
     ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?version$")),
     ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?info$")),
-    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/json$")),
-    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?images/[^/]+/json$")),
-    ("GET", re.compile(r"^/(?:v\\d+\\.\\d+/)?distribution/[^/]+/json$")),
 ]
 
 IMMUTABLE_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+CONTAINER_REF = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}|[a-fA-F0-9]{12,64})$")
 IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$")
 
 
@@ -43,6 +41,20 @@ def _single(query: dict[str, list[str]], key: str) -> str | None:
 
 def _no_query(parsed: urllib.parse.SplitResult) -> bool:
     return parsed.query == ""
+
+
+def _container_ref(raw: str) -> bool:
+    decoded = urllib.parse.unquote(raw)
+    return CONTAINER_REF.fullmatch(decoded) is not None
+
+
+def _image_ref(raw: str) -> bool:
+    decoded = urllib.parse.unquote(raw)
+    if IMAGE_REF.fullmatch(decoded) is None:
+        return False
+    # Reject path-normalization tokens while still allowing normal registry/repo
+    # slashes such as ghcr.io/owner/image.
+    return all(part not in {"", ".", ".."} for part in decoded.split("/"))
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -371,10 +383,33 @@ def allowed(method: str, target: str) -> bool:
     path = parsed.path
     query = _query(parsed)
 
+    container_inspect = re.fullmatch(
+        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/json$", path
+    )
+    if method == "GET" and container_inspect:
+        return _no_query(parsed) and _container_ref(container_inspect.group(1))
+
+    image_inspect = re.fullmatch(
+        r"^/(?:v\\d+\\.\\d+/)?images/([^/]+)/json$", path
+    )
+    if method == "GET" and image_inspect:
+        return _no_query(parsed) and _image_ref(image_inspect.group(1))
+
+    distribution_inspect = re.fullmatch(
+        r"^/(?:v\\d+\\.\\d+/)?distribution/([^/]+)/json$", path
+    )
+    if method == "GET" and distribution_inspect:
+        return _no_query(parsed) and _image_ref(distribution_inspect.group(1))
+
     if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/json$", path):
         return set(query) == {"all"} and _single(query, "all") in {"0", "1"}
 
-    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/logs$", path):
+    container_logs = re.fullmatch(
+        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/logs$", path
+    )
+    if method == "GET" and container_logs:
+        if not _container_ref(container_logs.group(1)):
+            return False
         if set(query) != {"stdout", "stderr", "timestamps", "tail"}:
             return False
         tail = _single(query, "tail")
@@ -387,8 +422,15 @@ def allowed(method: str, target: str) -> bool:
             and 1 <= int(tail) <= 1000
         )
 
-    if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/stats$", path):
-        return set(query) == {"stream"} and _single(query, "stream") == "false"
+    container_stats = re.fullmatch(
+        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/stats$", path
+    )
+    if method == "GET" and container_stats:
+        return (
+            _container_ref(container_stats.group(1))
+            and set(query) == {"stream"}
+            and _single(query, "stream") == "false"
+        )
 
     if method == "GET" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/json$", path):
         return set(query) == {"all"} and _single(query, "all") == "0"
@@ -406,15 +448,18 @@ def allowed(method: str, target: str) -> bool:
         return _no_query(parsed)
 
     if method == "POST" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?images/create$", path):
-        return (
-            set(query) == {"fromImage"}
-            and IMAGE_REF.fullmatch(_single(query, "fromImage") or "") is not None
+        return set(query) == {"fromImage"} and _image_ref(
+            _single(query, "fromImage") or ""
         )
 
-    if method == "POST" and re.fullmatch(r"^/(?:v\\d+\\.\\d+/)?containers/[^/]+/restart$", path):
+    container_restart = re.fullmatch(
+        r"^/(?:v\\d+\\.\\d+/)?containers/([^/]+)/restart$", path
+    )
+    if method == "POST" and container_restart:
         timeout = _single(query, "t")
         return (
-            set(query) == {"t"}
+            _container_ref(container_restart.group(1))
+            and set(query) == {"t"}
             and timeout is not None
             and timeout.isdigit()
             and 0 <= int(timeout) <= 60
