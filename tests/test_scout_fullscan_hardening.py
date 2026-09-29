@@ -131,7 +131,7 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
             RUNNER.index("function Get-BoundedScoutOutput {"):
             RUNNER.index("function Get-ScoutVulnerabilityCounts {")
         ]
-        self.assertIn('Replace([string]$Secret, "[REDACTED]")', bounded)
+        self.assertIn('Replace([string]$RedactValue, "[REDACTED]")', bounded)
         self.assertIn("Substring($Value.Length - $ScoutOutputLimit)", bounded)
 
     # 10
