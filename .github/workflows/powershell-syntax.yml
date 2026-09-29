@@ -5,11 +5,19 @@ on:
     branches: [main]
     paths:
       - "**/*.ps1"
+      - "server.py"
+      - "compose.public.yaml"
+      - "public/gateway/**"
+      - "tests/test_*_hardening.py"
       - ".github/workflows/powershell-syntax.yml"
   pull_request:
     branches: [main]
     paths:
       - "**/*.ps1"
+      - "server.py"
+      - "compose.public.yaml"
+      - "public/gateway/**"
+      - "tests/test_*_hardening.py"
       - ".github/workflows/powershell-syntax.yml"
   workflow_dispatch:
 
