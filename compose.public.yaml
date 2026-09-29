@@ -13,7 +13,7 @@ services:
       DOCKER_HOST: tcp://dockerlocal-socket-proxy:2375
       DOCKER_SCOUT_CACHE_DIR: /tmp/docker-scout
       DOCKER_SCOUT_NEW_VERSION_WARN: "false"
-      # Public MCP guardrails: scans >= 1 GiB must use the local/admin path, and
+      # Public MCP guardrails: scans >= 1 GiB must use scout_full_scan, and
       # remote jobs receive an ephemeral cache that is deleted after each run.
       DOCKER_SCOUT_MAX_IMAGE_BYTES: "1073741824"
       DOCKER_SCOUT_EPHEMERAL_CACHE: "1"
@@ -55,7 +55,7 @@ services:
       UPSTREAM_PATH: /mcp
       PORT: "8080"
       RATE_PER_MIN: "180"
-      ALLOWED_TOOLS: containers_list,container_inspect,container_logs,container_stats,compose_status,mcp_deployment_audit,image_usage_audit,cleanup_stale_mcp_containers,cleanup_superseded_images,compose_redeploy,maintenance_job_status,maintenance_runner_status,repo_status,repo_pull_ff,scheduled_task_status,scheduled_task_control,images_list,image_inspect,image_pull,container_restart,image_prune_dangling,scout_quickview,scout_cves,scout_recommendations,scout_sbom,scout_compare
+      ALLOWED_TOOLS: containers_list,container_inspect,container_logs,container_stats,compose_status,mcp_deployment_audit,image_usage_audit,cleanup_stale_mcp_containers,cleanup_superseded_images,compose_redeploy,maintenance_job_status,maintenance_runner_status,repo_status,repo_pull_ff,scheduled_task_status,scheduled_task_control,images_list,image_inspect,image_pull,container_restart,image_prune_dangling,scout_quickview,scout_cves,scout_full_scan,scout_recommendations,scout_sbom,scout_compare
     volumes:
       - ./public/gateway:/app:ro
     depends_on:

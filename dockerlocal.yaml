@@ -55,6 +55,7 @@ tools:
   - name: image_prune_dangling
   - name: scout_quickview
   - name: scout_cves
+  - name: scout_full_scan
   - name: scout_recommendations
   - name: scout_sbom
   - name: scout_compare

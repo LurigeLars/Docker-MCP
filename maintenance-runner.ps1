@@ -11,8 +11,15 @@ $Heartbeat = Join-Path $Control "runner-heartbeat.json"
 $Log = Join-Path $Control "runner.log"
 $LocalProjectConfig = Join-Path $Root "maintenance-projects.local.json"
 $HostMaintenanceConfig = Join-Path $Root "host-maintenance.local.json"
+$ScoutJobsRoot = Join-Path $Root "scout-jobs"
+$ScoutUserDpapi = Join-Path $Root "secrets\scout_hub_user.dpapi"
+$ScoutPasswordDpapi = Join-Path $Root "secrets\scout_hub_password.dpapi"
+$ScoutTimeoutSeconds = 600
+$ScoutOutputLimit = 16000
+$ScoutImageRefPattern = '^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$'
+$ScoutSeverities = @("critical", "high", "medium", "low", "unspecified")
 
-foreach ($Dir in @($Control, $Requests, $Processing, $Results)) {
+foreach ($Dir in @($Control, $Requests, $Processing, $Results, $ScoutJobsRoot)) {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 }
 
@@ -214,22 +221,421 @@ function Recover-OrphanedJobs {
         }
 
         $Project = $null
+        $OrphanedJob = $null
         try {
             $OrphanedJob = Get-Content -LiteralPath $ProcessingFile.FullName -Raw | ConvertFrom-Json
             $Project = [string]$OrphanedJob.project
         }
         catch {}
 
-        Write-JsonAtomic -Path $ResultPath -Value @{
-            job_id = $JobId
-            status = "failed"
-            outcome_unknown = $true
-            project = $Project
-            finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-            error = "Maintenance runner restarted while this job was in progress; outcome is unknown. Inspect deployment state before retrying."
+        if ($null -ne $OrphanedJob -and [string]$OrphanedJob.action -eq "scout_full_scan") {
+            $Recovered = New-ScoutFullScanResult -JobId $JobId -Image ([string]$OrphanedJob.image) -Severity @($OrphanedJob.severity) -OnlyFixed ([bool]$OrphanedJob.only_fixed) -CisaKev ([bool]$OrphanedJob.cisa_kev)
+            $Recovered.status = "failed"
+            $Recovered.scan_complete = $false
+            $Recovered.error_code = "SCAN_FAILED_RUNNER_RESTART"
+            $Recovered.output = "Maintenance runner restarted while this Scout scan was in progress; scan completeness is unknown."
+            $Recovered.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Recovered
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id = $JobId
+                status = "failed"
+                outcome_unknown = $true
+                project = $Project
+                finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error = "Maintenance runner restarted while this job was in progress; outcome is unknown. Inspect deployment state before retrying."
+            }
         }
         Write-RunnerLog "recovered orphaned job $JobId as failed/outcome_unknown"
         Remove-Item -LiteralPath $ProcessingFile.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-DpapiSecretValue {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    $Encrypted = Get-Content -LiteralPath $Path -Raw
+    $Secure = ConvertTo-SecureString -String $Encrypted
+    $Ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
+    try {
+        $Plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Ptr)
+        if ([string]::IsNullOrWhiteSpace($Plain)) {
+            throw "$Label DPAPI secret decrypted to an empty value."
+        }
+        return $Plain
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Ptr)
+        $Secure = $null
+    }
+}
+
+function Get-BoundedScoutOutput {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [object[]]$RedactValues = @()
+    )
+
+    $Value = [string]$Text
+    foreach ($RedactValue in @($RedactValues)) {
+        if (-not [string]::IsNullOrEmpty([string]$RedactValue)) {
+            $Value = $Value.Replace([string]$RedactValue, "[REDACTED]")
+        }
+    }
+
+    if ($Value.Length -gt $ScoutOutputLimit) {
+        return $Value.Substring($Value.Length - $ScoutOutputLimit)
+    }
+    return $Value
+}
+
+function Get-ScoutVulnerabilityCounts {
+    param([AllowEmptyString()][string]$Output)
+
+    $Counts = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Match = [regex]::Match(
+            [string]$Output,
+            ('alt="{0}: (?<count>\d+)"' -f [regex]::Escape($Severity)),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        $Counts[$Severity] = if ($Match.Success) {
+            [int]$Match.Groups["count"].Value
+        }
+        else {
+            0
+        }
+    }
+    return $Counts
+}
+
+function New-ScoutFullScanResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [AllowEmptyString()][string]$Image,
+        [object[]]$Severity = @(),
+        [bool]$OnlyFixed = $false,
+        [bool]$CisaKev = $false
+    )
+
+    return [ordered]@{
+        job_id = $JobId
+        status = "failed"
+        scan_complete = $false
+        image = $Image
+        image_id = $null
+        image_digest = $null
+        image_size_bytes = $null
+        severity = @($Severity)
+        only_fixed = $OnlyFixed
+        cisa_kev = $CisaKev
+        output = ""
+        error_code = $null
+    }
+}
+
+function Remove-StaleScoutJobDirectories {
+    $Cutoff = (Get-Date).ToUniversalTime().AddHours(-24)
+    foreach ($Directory in @(Get-ChildItem -LiteralPath $ScoutJobsRoot -Directory -ErrorAction SilentlyContinue)) {
+        if (
+            $Directory.Name -match '^[a-f0-9]{32}$' -and
+            $Directory.LastWriteTimeUtc -lt $Cutoff
+        ) {
+            Remove-Item -LiteralPath $Directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Write-RunnerLog "removed stale scout job directory: $($Directory.Name)"
+        }
+    }
+}
+
+function Get-LocalScoutImageMetadata {
+    param([Parameter(Mandatory)][string]$Image)
+
+    $Inspect = Invoke-DockerText -Arguments @(
+        "image", "inspect", "--format", "{{json .}}", $Image
+    ) -WorkingDirectory $Root
+
+    if ([int]$Inspect.exit_code -ne 0) {
+        $Code = if ([string]$Inspect.output -match '(?i)(no such image|not found)') {
+            "IMAGE_NOT_FOUND"
+        }
+        else {
+            "SCAN_FAILED_DOCKER"
+        }
+        return @{
+            ok = $false
+            error_code = $Code
+            output = [string]$Inspect.output
+        }
+    }
+
+    try {
+        $Metadata = ([string]$Inspect.output).Trim() | ConvertFrom-Json
+        $ImageId = [string]$Metadata.Id
+        $ImageSize = [int64]$Metadata.Size
+        $Digest = $null
+        if ($null -ne $Metadata.RepoDigests) {
+            $Digest = @($Metadata.RepoDigests | ForEach-Object { [string]$_ } | Where-Object { $_ }) |
+                Select-Object -First 1
+        }
+
+        if (
+            $ImageId -notmatch '^sha256:[a-fA-F0-9]{64}$' -or
+            $ImageSize -lt 0
+        ) {
+            throw "Docker image inspect returned invalid metadata."
+        }
+
+        return @{
+            ok = $true
+            image_id = $ImageId
+            image_digest = $Digest
+            image_size_bytes = $ImageSize
+        }
+    }
+    catch {
+        return @{
+            ok = $false
+            error_code = "SCAN_FAILED_DOCKER"
+            output = "Unable to parse local image metadata."
+        }
+    }
+}
+
+function Invoke-ScoutFullScan {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)]$Job
+    )
+
+    $RawImage = [string]$Job.image
+    $RawSeverity = @($Job.severity)
+    $OnlyFixed = if ($Job.only_fixed -is [bool]) { [bool]$Job.only_fixed } else { $false }
+    $CisaKev = if ($Job.cisa_kev -is [bool]) { [bool]$Job.cisa_kev } else { $false }
+    $Result = New-ScoutFullScanResult -JobId $JobId -Image $RawImage -Severity $RawSeverity -OnlyFixed $OnlyFixed -CisaKev $CisaKev
+
+    $AllowedProperties = @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )
+    foreach ($Property in $Job.PSObject.Properties.Name) {
+        if ($Property -notin $AllowedProperties) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unexpected scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    foreach ($RequiredProperty in @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )) {
+        if ($null -eq $Job.PSObject.Properties[$RequiredProperty]) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Missing scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    if (
+        $RawImage -notmatch $ScoutImageRefPattern -or
+        $Job.severity -is [string] -or
+        -not ($Job.only_fixed -is [bool]) -or
+        -not ($Job.cisa_kev -is [bool])
+    ) {
+        $Result.error_code = "INVALID_REQUEST"
+        $Result.output = "Invalid scout_full_scan request."
+        return $Result
+    }
+
+    $Severity = @()
+    foreach ($Item in $RawSeverity) {
+        $Value = ([string]$Item).ToLowerInvariant()
+        if ($Value -notin $ScoutSeverities) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unsupported Scout severity."
+            return $Result
+        }
+        if ($Value -notin $Severity) {
+            $Severity += $Value
+        }
+    }
+    $Result.severity = @($Severity)
+
+    $Metadata = Get-LocalScoutImageMetadata -Image $RawImage
+    if (-not [bool]$Metadata.ok) {
+        $Result.error_code = [string]$Metadata.error_code
+        $Result.output = Get-BoundedScoutOutput -Text ([string]$Metadata.output)
+        return $Result
+    }
+
+    $Result.image_id = [string]$Metadata.image_id
+    $Result.image_digest = $Metadata.image_digest
+    $Result.image_size_bytes = [int64]$Metadata.image_size_bytes
+
+    $DriveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($ScoutJobsRoot))
+    $AvailableBytes = [int64]([IO.DriveInfo]::new($DriveRoot)).AvailableFreeSpace
+    $RequiredBytes = [Math]::Max(
+        [int64](4GB + (2 * [int64]$Result.image_size_bytes)),
+        [int64]8GB
+    )
+    $Result.available_disk_bytes = $AvailableBytes
+    $Result.required_disk_bytes = $RequiredBytes
+
+    if ($AvailableBytes -lt $RequiredBytes) {
+        $Result.error_code = "INSUFFICIENT_DISK"
+        $Result.output = "Insufficient free disk for Docker Scout full scan."
+        return $Result
+    }
+
+    $ScanMutex = [Threading.Mutex]::new($false, "Local\DockerLocalScoutFullScan")
+    $LockTaken = $false
+    $JobDirectory = Join-Path $ScoutJobsRoot $JobId
+    $Process = $null
+    $ScoutUser = $null
+    $ScoutPassword = $null
+
+    try {
+        $LockTaken = $ScanMutex.WaitOne(0)
+        if (-not $LockTaken) {
+            $Result.error_code = "SCAN_FAILED_RESOURCE_LIMIT"
+            $Result.output = "Another Docker Scout full scan is already running."
+            return $Result
+        }
+
+        New-Item -ItemType Directory -Force -Path $JobDirectory | Out-Null
+        $CacheDirectory = Join-Path $JobDirectory "cache"
+        $TempDirectory = Join-Path $JobDirectory "tmp"
+        New-Item -ItemType Directory -Force -Path $CacheDirectory, $TempDirectory | Out-Null
+
+        $ScoutUser = Get-DpapiSecretValue -Path $ScoutUserDpapi -Label "Docker Scout Hub user"
+        $ScoutPassword = Get-DpapiSecretValue -Path $ScoutPasswordDpapi -Label "Docker Scout Hub password"
+
+        $Arguments = @("scout", "cves", "--format", "markdown")
+        if ($Severity.Count -gt 0) {
+            $Arguments += @("--only-severity", ($Severity -join ","))
+        }
+        if ([bool]$Job.only_fixed) {
+            $Arguments += "--only-fixed"
+        }
+        if ([bool]$Job.cisa_kev) {
+            $Arguments += "--only-cisa-kev"
+        }
+        $Arguments += "local://$RawImage"
+
+        $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $StartInfo.FileName = $Docker
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+        $StartInfo.CreateNoWindow = $true
+        $StartInfo.WorkingDirectory = $JobDirectory
+        foreach ($Argument in $Arguments) {
+            [void]$StartInfo.ArgumentList.Add([string]$Argument)
+        }
+
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_USER")
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_PASSWORD")
+        $StartInfo.Environment["DOCKER_SCOUT_CACHE_DIR"] = $CacheDirectory
+        $StartInfo.Environment["TEMP"] = $TempDirectory
+        $StartInfo.Environment["TMP"] = $TempDirectory
+        $StartInfo.Environment["NO_COLOR"] = "1"
+        $StartInfo.Environment["DOCKER_SCOUT_NEW_VERSION_WARN"] = "false"
+        if (-not [string]::IsNullOrWhiteSpace($ScoutUser)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_USER"] = $ScoutUser
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ScoutPassword)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_PASSWORD"] = $ScoutPassword
+        }
+
+        $Process = [Diagnostics.Process]::new()
+        $Process.StartInfo = $StartInfo
+        [void]$Process.Start()
+
+        $StdOutTask = $Process.StandardOutput.ReadToEndAsync()
+        $StdErrTask = $Process.StandardError.ReadToEndAsync()
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($ScoutTimeoutSeconds)
+
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = "scout_full_scan"
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            Start-Sleep -Seconds 1
+            $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            $StdOut = $StdOutTask.GetAwaiter().GetResult()
+            $StdErr = $StdErrTask.GetAwaiter().GetResult()
+            $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+            $Result.status = "timeout"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_TIMEOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Process.WaitForExit()
+        $StdOut = $StdOutTask.GetAwaiter().GetResult()
+        $StdErr = $StdErrTask.GetAwaiter().GetResult()
+        $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+        $Counts = Get-ScoutVulnerabilityCounts -Output $Combined
+        $Result.vulnerability_counts = $Counts
+        if ([bool]$Job.only_fixed) {
+            $Result.fixable_vulnerability_counts = $Counts
+        }
+        $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+        $Result.exit_code = [int]$Process.ExitCode
+
+        if ([int]$Process.ExitCode -ne 0) {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_SCOUT"
+            return $Result
+        }
+
+        $Result.status = "succeeded"
+        $Result.scan_complete = $true
+        $Result.error_code = $null
+        return $Result
+    }
+    catch {
+        $Result.status = "failed"
+        $Result.scan_complete = $false
+        $Result.error_code = "SCAN_FAILED_INTERNAL"
+        $Result.output = Get-BoundedScoutOutput -Text $_.Exception.Message -RedactValues @($ScoutUser, $ScoutPassword)
+        return $Result
+    }
+    finally {
+        $ScoutUser = $null
+        $ScoutPassword = $null
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
+        if (Test-Path -LiteralPath $JobDirectory -PathType Container) {
+            Remove-Item -LiteralPath $JobDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($LockTaken) {
+            try { $ScanMutex.ReleaseMutex() } catch {}
+        }
+        $ScanMutex.Dispose()
     }
 }
 
@@ -986,6 +1392,7 @@ $Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenance
 if (-not $Mutex.WaitOne(0)) { exit 0 }
 
 Recover-OrphanedJobs
+Remove-StaleScoutJobDirectories
 Write-RunnerLog "runner started"
 
 try {
@@ -1004,6 +1411,8 @@ try {
             }
 
             $ProcessingPath = Join-Path $Processing $RequestFile.Name
+            $Action = ""
+            $Job = $null
             try {
                 Move-Item -LiteralPath $RequestFile.FullName -Destination $ProcessingPath -Force
                 $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
@@ -1016,7 +1425,8 @@ try {
                     "repo_status",
                     "repo_pull_ff",
                     "scheduled_task_status",
-                    "scheduled_task_control"
+                    "scheduled_task_control",
+                    "scout_full_scan"
                 )) { throw "Action is not allowlisted." }
 
                 Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
@@ -1085,6 +1495,12 @@ try {
                         last_task_result=$Run.last_task_result
                     }
                 }
+                elseif ($Action -eq "scout_full_scan") {
+                    $Run = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+                    $Run.started_unix = $Started
+                    $Run.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Run
+                }
                 else {
                     $Run = Run-ProjectRedeploy -Job $Job
                     $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
@@ -1100,10 +1516,21 @@ try {
             }
             catch {
                 Write-RunnerLog "job $JobId failed: $($_.Exception.Message)"
-                Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
-                    job_id=$JobId; status="failed"
-                    finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-                    error=$_.Exception.Message
+                if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+                    $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+                    $Failure.status = "failed"
+                    $Failure.scan_complete = $false
+                    $Failure.error_code = "SCAN_FAILED_INTERNAL"
+                    $Failure.output = $_.Exception.Message
+                    $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Failure
+                }
+                else {
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="failed"
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        error=$_.Exception.Message
+                    }
                 }
             }
             finally {

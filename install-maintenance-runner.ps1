@@ -22,8 +22,9 @@ if ($ParseErrors.Count -gt 0) {
     throw "Runner syntax validation failed: $Details"
 }
 
-$PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-if (-not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) { throw "Windows PowerShell 5.1 was not found." }
+$PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+if (-not $PwshCommand) { throw "PowerShell 7 (pwsh.exe) is required for the maintenance runner." }
+$PowerShell = $PwshCommand.Source
 
 $Heartbeat = Join-Path $Control "runner-heartbeat.json"
 if (Test-Path -LiteralPath $Heartbeat) {

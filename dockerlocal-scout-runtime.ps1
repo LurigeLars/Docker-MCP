@@ -248,6 +248,8 @@ function Download-DeploymentFiles {
         "requirements.txt",
         "compose.proxy.yaml",
         "compose.public.yaml",
+        "maintenance-runner.ps1",
+        "install-maintenance-runner.ps1",
         "public/gateway/gateway.mjs"
     )) {
         $uri = "https://raw.githubusercontent.com/LurigeLars/Docker-MCP/$Ref/$name"
@@ -420,6 +422,15 @@ switch ($Action) {
 
         Invoke-RuntimeHydration
         Update-SupervisorConfig
+
+        $RunnerInstaller = Join-Path $ContainerizedRoot "install-maintenance-runner.ps1"
+        if (-not (Test-Path -LiteralPath $RunnerInstaller -PathType Leaf)) {
+            throw "Maintenance runner installer was not synchronized."
+        }
+        & $RunnerInstaller
+        if ($LASTEXITCODE -ne 0) {
+            throw "Maintenance runner installation failed."
+        }
 
         Write-Host "DOCKER_SCOUT_DPAPI_MIGRATION_OK"
         Show-Status
