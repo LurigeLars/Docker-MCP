@@ -25,15 +25,21 @@ if (-not (Test-Path -LiteralPath $SourceSync -PathType Leaf)) {
     throw "sync-openai-egress.ps1 must be next to this installer."
 }
 
-if (-not $ApiToken) {
-    $ApiToken = Read-Host "Cloudflare API token (Account Filter Lists Edit only)" -AsSecureString
-}
-
 New-Item -ItemType Directory -Path $Root -Force | Out-Null
 Copy-Item -LiteralPath $SourceSync -Destination $Sync -Force
 
-$Protected = ConvertFrom-SecureString -SecureString $ApiToken
-[IO.File]::WriteAllText($SecretPath, $Protected, [Text.Encoding]::ASCII)
+if ($ApiToken) {
+    $Protected = ConvertFrom-SecureString -SecureString $ApiToken
+    [IO.File]::WriteAllText($SecretPath, $Protected, [Text.Encoding]::ASCII)
+}
+elseif (-not (Test-Path -LiteralPath $SecretPath -PathType Leaf)) {
+    $ApiToken = Read-Host "Cloudflare API token (Account Filter Lists Edit only)" -AsSecureString
+    $Protected = ConvertFrom-SecureString -SecureString $ApiToken
+    [IO.File]::WriteAllText($SecretPath, $Protected, [Text.Encoding]::ASCII)
+}
+else {
+    Write-Host "Reusing existing DPAPI-protected Cloudflare token."
+}
 
 $Config = [ordered]@{
     accountId  = $AccountId.ToLowerInvariant()
