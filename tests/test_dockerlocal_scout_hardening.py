@@ -56,6 +56,11 @@ class DockerLocalScoutHardeningTests(unittest.TestCase):
         self.assertIn('[string]$existingRuntime.name -eq "mcp-edge"', RUNTIME)
         self.assertIn('$existingRuntime.recovery.arguments = @("Up")', RUNTIME)
 
+    def test_pinned_install_syncs_and_recreates_public_gateway(self) -> None:
+        self.assertIn('"public/gateway/gateway.mjs"', RUNTIME)
+        self.assertIn("New-Item -ItemType Directory -Force -Path $parent", RUNTIME)
+        self.assertIn("up -d --force-recreate mcp gateway", RUNTIME)
+
     def test_migration_recreates_container_before_runtime_hydration(self) -> None:
         recreate = RUNTIME.index("--force-recreate")
         hydrate = RUNTIME.index("Invoke-RuntimeHydration", recreate)

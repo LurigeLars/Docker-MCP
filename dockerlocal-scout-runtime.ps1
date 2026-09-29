@@ -243,10 +243,13 @@ function Download-DeploymentFiles {
         "server.py",
         "Dockerfile",
         "requirements.txt",
-        "compose.public.yaml"
+        "compose.public.yaml",
+        "public/gateway/gateway.mjs"
     )) {
         $uri = "https://raw.githubusercontent.com/LurigeLars/Docker-MCP/$Ref/$name"
         $target = Join-Path $ContainerizedRoot $name
+        $parent = Split-Path -Parent $target
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
         Invoke-WebRequest -Uri $uri -OutFile $target
     }
 }
@@ -397,9 +400,9 @@ switch ($Action) {
                 throw "DockerLocal MCP image build failed."
             }
 
-            & docker compose -f $ComposePath up -d --force-recreate mcp
+            & docker compose -f $ComposePath up -d --force-recreate mcp gateway
             if ($LASTEXITCODE -ne 0) {
-                throw "DockerLocal MCP recreation failed."
+                throw "DockerLocal MCP/gateway recreation failed."
             }
         }
         finally {
