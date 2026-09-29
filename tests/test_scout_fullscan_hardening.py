@@ -198,6 +198,35 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
         self.assertIn("vulnerability_counts", FULLSCAN)
         self.assertIn("fixable_vulnerability_counts", FULLSCAN)
 
+    def test_counts_are_parsed_from_image_summary_row_only(self):
+        count_fn = RUNNER[
+            RUNNER.index("function Get-ScoutVulnerabilityCounts {"):
+            RUNNER.index("function Get-ScoutDetectedVulnerabilityTotal {")
+        ]
+        self.assertIn("<tr><td>vulnerabilities</td><td>", count_fn)
+        self.assertIn("$SummaryRow.Groups[\"badges\"].Value", count_fn)
+        self.assertNotIn("[regex]::Match(\n            [string]$Output,\n            ('alt=", count_fn)
+
+    def test_detected_total_is_captured_as_cross_check(self):
+        total_fn = RUNNER[
+            RUNNER.index("function Get-ScoutDetectedVulnerabilityTotal {"):
+            RUNNER.index("function New-ScoutFullScanResult {")
+        ]
+        self.assertIn("Detected\\s+\\d+\\s+vulnerable", total_fn)
+        self.assertIn("detected_vulnerabilities_total", FULLSCAN)
+
+    def test_bounded_output_preserves_head_and_tail(self):
+        bounded = RUNNER[
+            RUNNER.index("function Get-BoundedScoutOutput {"):
+            RUNNER.index("function Get-ScoutVulnerabilityCounts {")
+        ]
+        self.assertIn('$Value.Substring(0, $HeadLength)', bounded)
+        self.assertIn('"...[TRUNCATED]..."', bounded)
+        self.assertIn(
+            '$Value.Substring($Value.Length - $TailLength)',
+            bounded,
+        )
+
     def test_fullscan_uses_dpapi_credentials_only_in_child_environment(self):
         self.assertIn("scout_hub_user.dpapi", RUNNER)
         self.assertIn("scout_hub_password.dpapi", RUNNER)
