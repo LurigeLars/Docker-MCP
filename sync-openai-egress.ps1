@@ -127,8 +127,15 @@ function Get-CloudflareListItems {
         }
 
         $Cursor = $null
-        if ($Response.result_info -and $Response.result_info.cursors -and $Response.result_info.cursors.after) {
-            $Cursor = [string]$Response.result_info.cursors.after
+        $ResultInfoProperty = $Response.PSObject.Properties["result_info"]
+        if ($ResultInfoProperty -and $ResultInfoProperty.Value) {
+            $CursorsProperty = $ResultInfoProperty.Value.PSObject.Properties["cursors"]
+            if ($CursorsProperty -and $CursorsProperty.Value) {
+                $AfterProperty = $CursorsProperty.Value.PSObject.Properties["after"]
+                if ($AfterProperty -and $AfterProperty.Value) {
+                    $Cursor = [string]$AfterProperty.Value
+                }
+            }
         }
     } while ($Cursor)
 
