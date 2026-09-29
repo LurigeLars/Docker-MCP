@@ -268,7 +268,7 @@ def _assert_scout_image_size(image: str) -> None:
             "Docker Scout remote scan refused: "
             f"{image} is {_bytes_human(size)}, above the configured "
             f"{_bytes_human(SCOUT_MAX_IMAGE_BYTES)} limit. "
-            "Run large scans through the local/admin path instead."
+            "Use scout_full_scan for host-based scanning instead."
         )
 
 
@@ -1076,6 +1076,39 @@ def scout_cves(
         args.append("--only-cisa-kev")
     args.append(f"local://{image}")
     return _scout(args)
+
+
+@mcp.tool(annotations=SCOUT_READ)
+def scout_full_scan(
+    image: str,
+    severity: list[str] | None = None,
+    only_fixed: bool = False,
+    cisa_kev: bool = False,
+) -> str:
+    """Queue a host-based Docker Scout CVE scan for a local image, including images above the public 1 GiB limit."""
+    image = _image(image)
+
+    normalized: list[str] = []
+    for item in severity or []:
+        value = str(item).lower()
+        if value not in SEVERITIES:
+            raise ValueError(f"Unsupported severity: {value}")
+        if value not in normalized:
+            normalized.append(value)
+
+    if not isinstance(only_fixed, bool) or not isinstance(cisa_kev, bool):
+        raise ValueError("only_fixed and cisa_kev must be boolean")
+
+    job_id = _write_job(
+        {
+            "action": "scout_full_scan",
+            "image": image,
+            "severity": normalized,
+            "only_fixed": only_fixed,
+            "cisa_kev": cisa_kev,
+        }
+    )
+    return json.dumps({"job_id": job_id, "status": "queued"}, separators=(",", ":"))
 
 
 @mcp.tool(annotations=SCOUT_READ)
