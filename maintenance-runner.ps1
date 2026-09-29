@@ -281,14 +281,13 @@ function Get-DpapiSecretValue {
 function Get-BoundedScoutOutput {
     param(
         [AllowEmptyString()][string]$Text,
-        [AllowNull()][string]$UserSecret,
-        [AllowNull()][string]$PasswordSecret
+        [object[]]$RedactValues = @()
     )
 
     $Value = [string]$Text
-    foreach ($Secret in @($UserSecret, $PasswordSecret)) {
-        if (-not [string]::IsNullOrEmpty([string]$Secret)) {
-            $Value = $Value.Replace([string]$Secret, "[REDACTED]")
+    foreach ($RedactValue in @($RedactValues)) {
+        if (-not [string]::IsNullOrEmpty([string]$RedactValue)) {
+            $Value = $Value.Replace([string]$RedactValue, "[REDACTED]")
         }
     }
 
@@ -473,7 +472,7 @@ function Invoke-ScoutFullScan {
     $Metadata = Get-LocalScoutImageMetadata -Image $RawImage
     if (-not [bool]$Metadata.ok) {
         $Result.error_code = [string]$Metadata.error_code
-        $Result.output = Get-BoundedScoutOutput -Text ([string]$Metadata.output) -UserSecret $null -PasswordSecret $null
+        $Result.output = Get-BoundedScoutOutput -Text ([string]$Metadata.output)
         return $Result
     }
 
@@ -586,7 +585,7 @@ function Invoke-ScoutFullScan {
             $Result.status = "timeout"
             $Result.scan_complete = $false
             $Result.error_code = "SCAN_TIMEOUT"
-            $Result.output = Get-BoundedScoutOutput -Text $Combined -UserSecret $ScoutUser -PasswordSecret $ScoutPassword
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
             return $Result
         }
 
@@ -599,7 +598,7 @@ function Invoke-ScoutFullScan {
         if ([bool]$Job.only_fixed) {
             $Result.fixable_vulnerability_counts = $Counts
         }
-        $Result.output = Get-BoundedScoutOutput -Text $Combined -UserSecret $ScoutUser -PasswordSecret $ScoutPassword
+        $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
         $Result.exit_code = [int]$Process.ExitCode
 
         if ([int]$Process.ExitCode -ne 0) {
@@ -618,7 +617,7 @@ function Invoke-ScoutFullScan {
         $Result.status = "failed"
         $Result.scan_complete = $false
         $Result.error_code = "SCAN_FAILED_INTERNAL"
-        $Result.output = Get-BoundedScoutOutput -Text $_.Exception.Message -UserSecret $ScoutUser -PasswordSecret $ScoutPassword
+        $Result.output = Get-BoundedScoutOutput -Text $_.Exception.Message -RedactValues @($ScoutUser, $ScoutPassword)
         return $Result
     }
     finally {
