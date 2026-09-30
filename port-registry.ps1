@@ -94,6 +94,49 @@ function Get-McpPortListener {
     return [ordered]@{ listening = $true; processes = $Processes }
 }
 
+function Get-DockerConfiguredHostPorts {
+    $Docker = Get-Command docker.exe -ErrorAction SilentlyContinue
+    if (-not $Docker) { return @() }
+
+    $Ids = @(& $Docker.Source ps -aq 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0 -or $Ids.Count -eq 0) { return @() }
+
+    $Rows = @()
+    foreach ($Id in $Ids) {
+        $InspectText = (& $Docker.Source inspect $Id 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($InspectText)) { continue }
+        try {
+            $Inspect = @($InspectText | ConvertFrom-Json)[0]
+        }
+        catch {
+            continue
+        }
+
+        $Bindings = $Inspect.HostConfig.PortBindings
+        if ($null -eq $Bindings) { continue }
+
+        foreach ($Property in $Bindings.PSObject.Properties) {
+            $ContainerPort = [string]$Property.Name
+            foreach ($Binding in @($Property.Value)) {
+                if ($null -eq $Binding) { continue }
+                $HostPortText = [string]$Binding.HostPort
+                $HostPort = 0
+                if (-not [int]::TryParse($HostPortText, [ref]$HostPort)) { continue }
+                if ($HostPort -lt 1 -or $HostPort -gt 65535) { continue }
+                $Rows += [ordered]@{
+                    port = $HostPort
+                    container = ([string]$Inspect.Name).TrimStart("/")
+                    container_id = ([string]$Inspect.Id).Substring(0, [Math]::Min(12, ([string]$Inspect.Id).Length))
+                    container_port = $ContainerPort
+                }
+            }
+        }
+    }
+
+    return @($Rows | Sort-Object port, container -Unique)
+}
+
+
 function Test-McpPortOwnerCommand {
     param(
         [Parameter(Mandatory)][int]$Port,
@@ -170,6 +213,11 @@ function Reserve-McpPort {
             $Reserved[[int]$Entry.Value.port] = [string]$Entry.Key
         }
 
+        $DockerReserved = @{}
+        foreach ($Entry in @(Get-DockerConfiguredHostPorts)) {
+            $DockerReserved[[int]$Entry.port] = $Entry
+        }
+
         $Candidates = @()
         if ($PreferredPort -ne 0) { $Candidates += $PreferredPort }
         foreach ($Port in $RangeStart..$RangeEnd) {
@@ -180,6 +228,7 @@ function Reserve-McpPort {
         $Adopted = $false
         foreach ($Port in $Candidates) {
             if ($Reserved.ContainsKey([int]$Port)) { continue }
+            if ($DockerReserved.ContainsKey([int]$Port)) { continue }
             $Listener = Get-McpPortListener -Port $Port
             if (-not [bool]$Listener.listening) {
                 $Chosen = [int]$Port
@@ -237,9 +286,20 @@ function Get-McpPortRegistryStatus {
     $ReservedPorts = @{}
     foreach ($Row in $Rows) { $ReservedPorts[[int]$Row.port] = $true }
 
+    $DockerReservedPorts = @(
+        Get-DockerConfiguredHostPorts |
+            Where-Object {
+                [int]$_.port -ge [int]$Registry.range_start -and
+                [int]$_.port -le [int]$Registry.range_end
+            }
+    )
+    $DockerReservedLookup = @{}
+    foreach ($Row in $DockerReservedPorts) { $DockerReservedLookup[[int]$Row.port] = $true }
+
     $UnregisteredListeners = @()
     foreach ($Port in ([int]$Registry.range_start)..([int]$Registry.range_end)) {
         if ($ReservedPorts.ContainsKey([int]$Port)) { continue }
+        if ($DockerReservedLookup.ContainsKey([int]$Port)) { continue }
         $Listener = Get-McpPortListener -Port $Port
         if ([bool]$Listener.listening) {
             $UnregisteredListeners += [ordered]@{
@@ -254,6 +314,7 @@ function Get-McpPortRegistryStatus {
         range_start = [int]$Registry.range_start
         range_end = [int]$Registry.range_end
         services = @($Rows | Sort-Object port, service)
+        docker_reserved_ports = @($DockerReservedPorts | Sort-Object port, container)
         unregistered_listeners = @($UnregisteredListeners | Sort-Object port)
     }
 }
