@@ -16,9 +16,6 @@ $Reservations = @(
 $Results = @()
 foreach ($Item in $Reservations) {
     $Json = & $Helper -Service $Item.Service -PreferredPort $Item.Port -AdoptIfCommandContains $Item.Owner
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to reserve port $($Item.Port) for $($Item.Service)."
-    }
     $Results += (($Json -join [Environment]::NewLine) | ConvertFrom-Json)
 }
 
