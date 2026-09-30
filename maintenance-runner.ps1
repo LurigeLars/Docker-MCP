@@ -305,50 +305,86 @@ function Get-BoundedScoutOutput {
     return $Value
 }
 
-function Get-ScoutVulnerabilityCounts {
-    param([AllowEmptyString()][string]$Output)
+function ConvertFrom-ScoutGitLabReport {
+    param([AllowEmptyString()][string]$JsonText)
+
+    try {
+        $Report = $JsonText | ConvertFrom-Json -Depth 100
+    }
+    catch {
+        throw "Docker Scout returned invalid GitLab JSON."
+    }
+
+    $Vulnerabilities = @()
+    if ($null -ne $Report.vulnerabilities) {
+        $Vulnerabilities = @($Report.vulnerabilities)
+    }
 
     $Counts = [ordered]@{}
+    $UniqueCves = [ordered]@{}
     foreach ($Severity in $ScoutSeverities) {
         $Counts[$Severity] = 0
-    }
-
-    $SummaryRow = [regex]::Match(
-        [string]$Output,
-        '<tr><td>vulnerabilities</td><td>(?<badges>.*?)</td></tr>',
-        [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
-            [Text.RegularExpressions.RegexOptions]::Singleline
-    )
-    if (-not $SummaryRow.Success) {
-        return $Counts
-    }
-
-    $Badges = $SummaryRow.Groups["badges"].Value
-    foreach ($Severity in $ScoutSeverities) {
-        $Match = [regex]::Match(
-            $Badges,
-            ('alt="{0}: (?<count>\d+)"' -f [regex]::Escape($Severity)),
-            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        $UniqueCves[$Severity] = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
         )
-        if ($Match.Success) {
-            $Counts[$Severity] = [int]$Match.Groups["count"].Value
+    }
+
+    foreach ($Vulnerability in $Vulnerabilities) {
+        $Severity = ([string]$Vulnerability.severity).ToLowerInvariant()
+        if ($Severity -notin $ScoutSeverities) {
+            $Severity = "unspecified"
+        }
+        $Counts[$Severity]++
+
+        $Cve = [string]$Vulnerability.cve
+        if ([string]::IsNullOrWhiteSpace($Cve)) {
+            foreach ($Identifier in @($Vulnerability.identifiers)) {
+                $Type = ([string]$Identifier.type).ToLowerInvariant()
+                $Value = [string]$Identifier.value
+                if ($Type -eq "cve" -and -not [string]::IsNullOrWhiteSpace($Value)) {
+                    $Cve = $Value
+                    break
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Cve)) {
+            [void]$UniqueCves[$Severity].Add($Cve)
         }
     }
-    return $Counts
+
+    $UniqueCounts = [ordered]@{}
+    $CveIds = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Sorted = @($UniqueCves[$Severity] | Sort-Object)
+        $UniqueCounts[$Severity] = $Sorted.Count
+        $CveIds[$Severity] = $Sorted
+    }
+
+    return [ordered]@{
+        vulnerability_counts = $Counts
+        unique_cve_counts = $UniqueCounts
+        cve_ids = $CveIds
+        detected_vulnerabilities_total = $Vulnerabilities.Count
+    }
 }
 
-function Get-ScoutDetectedVulnerabilityTotal {
-    param([AllowEmptyString()][string]$Output)
+function Remove-ScoutJobDirectory {
+    param([Parameter(Mandatory)][string]$Path)
 
-    $Match = [regex]::Match(
-        [string]$Output,
-        'Detected\s+\d+\s+vulnerable\s+packages?\s+with\s+(?:a\s+total\s+of\s+)?(?<count>\d+)\s+vulnerabilit(?:y|ies)',
-        [Text.RegularExpressions.RegexOptions]::IgnoreCase
-    )
-    if ($Match.Success) {
-        return [int]$Match.Groups["count"].Value
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $true
     }
-    return $null
+
+    foreach ($Attempt in 1..15) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
 }
 
 function New-ScoutFullScanResult {
@@ -373,6 +409,7 @@ function New-ScoutFullScanResult {
         cisa_kev = $CisaKev
         output = ""
         error_code = $null
+        cleanup_complete = $null
     }
 }
 
@@ -552,7 +589,7 @@ function Invoke-ScoutFullScan {
         $ScoutUser = Get-DpapiSecretValue -Path $ScoutUserDpapi -Label "Docker Scout Hub user"
         $ScoutPassword = Get-DpapiSecretValue -Path $ScoutPasswordDpapi -Label "Docker Scout Hub password"
 
-        $Arguments = @("scout", "cves", "--format", "markdown")
+        $Arguments = @("scout", "cves", "--format", "gitlab")
         if ($Severity.Count -gt 0) {
             $Arguments += @("--only-severity", ($Severity -join ","))
         }
@@ -627,22 +664,45 @@ function Invoke-ScoutFullScan {
         $StdOut = $StdOutTask.GetAwaiter().GetResult()
         $StdErr = $StdErrTask.GetAwaiter().GetResult()
         $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
-        $Counts = Get-ScoutVulnerabilityCounts -Output $Combined
-        $Result.vulnerability_counts = $Counts
-        $Result.detected_vulnerabilities_total = Get-ScoutDetectedVulnerabilityTotal -Output $Combined
-        if ([bool]$Job.only_fixed) {
-            $Result.fixable_vulnerability_counts = $Counts
-        }
-        $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
         $Result.exit_code = [int]$Process.ExitCode
 
         if ([int]$Process.ExitCode -ne 0) {
             $Result.status = "failed"
             $Result.scan_complete = $false
             $Result.error_code = "SCAN_FAILED_SCOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
             return $Result
         }
 
+        try {
+            $Structured = ConvertFrom-ScoutGitLabReport -JsonText $StdOut
+        }
+        catch {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_PARSE"
+            $Result.output = Get-BoundedScoutOutput -Text (
+                @($_.Exception.Message, $StdErr) -join [Environment]::NewLine
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Result.vulnerability_counts = $Structured.vulnerability_counts
+        $Result.unique_cve_counts = $Structured.unique_cve_counts
+        $Result.cve_ids = $Structured.cve_ids
+        $Result.detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        if ([bool]$Job.only_fixed) {
+            $Result.fixable_vulnerability_counts = $Structured.vulnerability_counts
+            $Result.fixable_unique_cve_counts = $Structured.unique_cve_counts
+        }
+
+        $Summary = [ordered]@{
+            vulnerability_counts = $Structured.vulnerability_counts
+            unique_cve_counts = $Structured.unique_cve_counts
+            cve_ids = $Structured.cve_ids
+            detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        } | ConvertTo-Json -Depth 8 -Compress
+        $Result.output = Get-BoundedScoutOutput -Text $Summary -RedactValues @($ScoutUser, $ScoutPassword)
         $Result.status = "succeeded"
         $Result.scan_complete = $true
         $Result.error_code = $null
@@ -664,9 +724,7 @@ function Invoke-ScoutFullScan {
             }
             $Process.Dispose()
         }
-        if (Test-Path -LiteralPath $JobDirectory -PathType Container) {
-            Remove-Item -LiteralPath $JobDirectory -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        $Result.cleanup_complete = Remove-ScoutJobDirectory -Path $JobDirectory
         if ($LockTaken) {
             try { $ScanMutex.ReleaseMutex() } catch {}
         }
