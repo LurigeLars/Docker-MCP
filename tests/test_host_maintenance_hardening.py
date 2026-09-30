@@ -74,6 +74,14 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
                     },
                 }
             ],
+            "docker_reserved_ports": [
+                {
+                    "port": 8771,
+                    "container": "influencerresearch-mcp",
+                    "container_id": "abcdef123456",
+                    "container_port": "8770/tcp",
+                }
+            ],
             "unregistered_listeners": [
                 {
                     "port": 8773,
@@ -96,6 +104,7 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertEqual(result["range_end"], 8799)
         self.assertEqual(result["services"][0]["service"], "yfinance")
         self.assertEqual(result["services"][0]["port"], 8772)
+        self.assertEqual(result["docker_reserved_ports"][0]["port"], 8771)
         self.assertEqual(result["unregistered_listeners"][0]["port"], 8773)
         self.assertNotIn("output", result)
 

@@ -334,8 +334,22 @@ installer supplies an expected command-line fragment and the listener owner matc
 local installer use; the remote Docker MCP surface exposes only `port_registry_status`, never an
 arbitrary process/command matching primitive.
 
-The read-only status tool also reports live listeners inside 8760–8799 that are not yet in the
-registry. This makes legacy/manual allocations visible before they create another collision.
+The allocator also inspects Docker's configured host-port bindings, including stopped containers.
+A Docker-backed service therefore keeps its host port protected even while its container is down;
+another MCP cannot claim the port during that outage.
+
+The read-only status tool reports both Docker-configured host ports and live listeners inside
+8760–8799 that are not yet in the registry. This makes legacy/manual allocations visible before
+they create another collision.
+
+Existing non-Docker services can be seeded once with the local-only helper:
+
+```powershell
+.\reserve-mcp-port.ps1 -Service example-http -PreferredPort 8765 -AdoptIfCommandContains "expected-process-fragment"
+```
+
+The command-line fragment is checked only on the host during migration and is not exposed through
+the remote MCP surface.
 
 ## Event-driven local runtime supervisor
 
