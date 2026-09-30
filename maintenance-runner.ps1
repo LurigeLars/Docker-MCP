@@ -3,6 +3,12 @@ param([switch]$SelfTest)
 $ErrorActionPreference = "Stop"
 
 $Root = Join-Path $env:LOCALAPPDATA "DockerLocalMCP"
+$PortRegistryHelper = Join-Path $PSScriptRoot "port-registry.ps1"
+if (-not (Test-Path -LiteralPath $PortRegistryHelper -PathType Leaf)) {
+    throw "port-registry.ps1 must be next to maintenance-runner.ps1."
+}
+. $PortRegistryHelper
+
 $Control = Join-Path $Root "control"
 $Requests = Join-Path $Control "requests"
 $Processing = Join-Path $Control "processing"
@@ -1537,6 +1543,7 @@ try {
                     "compose_file_state",
                     "repo_status",
                     "repo_pull_ff",
+                    "port_registry_status",
                     "scheduled_task_status",
                     "scheduled_task_control",
                     "scout_full_scan"
@@ -1586,6 +1593,15 @@ try {
                         action=$Run.action; repo=$Run.repo; branch=$Run.branch
                         before_head=$Run.before_head; after_head=$Run.after_head
                         changed=$Run.changed; clean=$Run.clean
+                    }
+                }
+                elseif ($Action -eq "port_registry_status") {
+                    $State = Get-McpPortRegistryStatus
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        version=$State.version; range_start=$State.range_start; range_end=$State.range_end
+                        services=$State.services
                     }
                 }
                 elseif ($Action -eq "scheduled_task_status") {
