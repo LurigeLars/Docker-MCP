@@ -19,7 +19,7 @@ foreach ($Item in $Reservations) {
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to reserve port $($Item.Port) for $($Item.Service)."
     }
-    $Results += ($Json | ConvertFrom-Json)
+    $Results += (($Json -join [Environment]::NewLine) | ConvertFrom-Json)
 }
 
 [ordered]@{
