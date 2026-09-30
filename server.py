@@ -851,6 +851,16 @@ def repo_pull_ff(repo: str):
 
 
 @mcp.tool(annotations=READ_ONLY)
+def port_registry_status():
+    """Read the persistent host MCP port registry and current listener ownership."""
+    return _compact_runner_request(
+        {"action": "port_registry_status"},
+        ("version", "range_start", "range_end", "services"),
+        timeout_seconds=12.0,
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
 def scheduled_task_status(task: str):
     """Read state and execution principal for one allowlisted Windows Scheduled Task alias."""
     task = _maintenance_alias(task)
