@@ -9,8 +9,8 @@ if (-not (Test-Path -LiteralPath $Helper -PathType Leaf)) {
 $Reservations = @(
     @{ Service = "desktop-tradingview-http"; Port = 8765; Owner = "src/server/http.js" },
     @{ Service = "gdrive-mcp-http"; Port = 8766; Owner = "gdrive_mcp.server" },
-    @{ Service = "avanza-mcp-http"; Port = 8767; Owner = "avanza-mcp\\scripts\\windows\\run-public-http-hidden.py" },
-    @{ Service = "avanza-local-gateway"; Port = 8769; Owner = "avanza-mcp\\public\\gateway\\gateway.mjs" }
+    @{ Service = "avanza-mcp-http"; Port = 8767; Owner = "avanza-mcp\scripts\windows\run-public-http-hidden.py" },
+    @{ Service = "avanza-local-gateway"; Port = 8769; Owner = "avanza-mcp\public\gateway\gateway.mjs" }
 )
 
 $Results = @()
