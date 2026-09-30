@@ -1601,7 +1601,7 @@ try {
                         job_id=$JobId; status="succeeded"; started_unix=$Started
                         finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                         version=$State.version; range_start=$State.range_start; range_end=$State.range_end
-                        services=$State.services; unregistered_listeners=$State.unregistered_listeners
+                        services=$State.services; docker_reserved_ports=$State.docker_reserved_ports; unregistered_listeners=$State.unregistered_listeners
                     }
                 }
                 elseif ($Action -eq "scheduled_task_status") {
