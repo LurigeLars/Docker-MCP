@@ -129,7 +129,7 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
         self.assertIn("$ScoutOutputLimit = 16000", RUNNER)
         bounded = RUNNER[
             RUNNER.index("function Get-BoundedScoutOutput {"):
-            RUNNER.index("function Get-ScoutVulnerabilityCounts {")
+            RUNNER.index("function ConvertFrom-ScoutGitLabReport {")
         ]
         self.assertIn('Replace([string]$RedactValue, "[REDACTED]")', bounded)
         self.assertIn('$Value.Substring(0, $HeadLength)', bounded)
@@ -241,7 +241,7 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
     def test_bounded_output_preserves_head_and_tail(self):
         bounded = RUNNER[
             RUNNER.index("function Get-BoundedScoutOutput {"):
-            RUNNER.index("function Get-ScoutVulnerabilityCounts {")
+            RUNNER.index("function ConvertFrom-ScoutGitLabReport {")
         ]
         self.assertIn('$Value.Substring(0, $HeadLength)', bounded)
         self.assertIn('"...[TRUNCATED]..."', bounded)
