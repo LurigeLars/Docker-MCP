@@ -236,10 +236,26 @@ function Get-McpPortRegistryStatus {
         }
     }
 
+    $ReservedPorts = @{}
+    foreach ($Row in $Rows) { $ReservedPorts[[int]$Row.port] = $true }
+
+    $UnregisteredListeners = @()
+    foreach ($Port in ([int]$Registry.range_start)..([int]$Registry.range_end)) {
+        if ($ReservedPorts.ContainsKey([int]$Port)) { continue }
+        $Listener = Get-McpPortListener -Port $Port
+        if ([bool]$Listener.listening) {
+            $UnregisteredListeners += [ordered]@{
+                port = [int]$Port
+                listener = $Listener
+            }
+        }
+    }
+
     return [ordered]@{
         version = 1
         range_start = [int]$Registry.range_start
         range_end = [int]$Registry.range_end
         services = @($Rows | Sort-Object port, service)
+        unregistered_listeners = @($UnregisteredListeners | Sort-Object port)
     }
 }
