@@ -56,6 +56,39 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertNotIn("started_unix", result)
         self.assertNotIn("job_id", result)
 
+    def test_port_registry_status_is_read_only_and_compacts_listener_state(self):
+        raw = {
+            "status": "succeeded",
+            "version": 1,
+            "range_start": 8760,
+            "range_end": 8799,
+            "services": [
+                {
+                    "service": "yfinance",
+                    "port": 8772,
+                    "reserved_at": "2026-09-30T19:00:00Z",
+                    "preferred_port": 8772,
+                    "listener": {
+                        "listening": True,
+                        "processes": [{"pid": 1234, "name": "pythonw.exe"}],
+                    },
+                }
+            ],
+            "output": "must-not-leak",
+        }
+        with unittest.mock.patch.object(server, "_runner_request", return_value=raw) as runner:
+            result = json.loads(server.port_registry_status())
+
+        runner.assert_called_once_with(
+            {"action": "port_registry_status"},
+            timeout_seconds=12.0,
+        )
+        self.assertEqual(result["range_start"], 8760)
+        self.assertEqual(result["range_end"], 8799)
+        self.assertEqual(result["services"][0]["service"], "yfinance")
+        self.assertEqual(result["services"][0]["port"], 8772)
+        self.assertNotIn("output", result)
+
     def test_scheduled_task_status_includes_security_context_and_uses_longer_timeout(self):
         raw = {
             "status": "succeeded",
