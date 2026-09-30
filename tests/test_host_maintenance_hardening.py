@@ -74,6 +74,15 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
                     },
                 }
             ],
+            "unregistered_listeners": [
+                {
+                    "port": 8773,
+                    "listener": {
+                        "listening": True,
+                        "processes": [{"pid": 5678, "name": "python.exe"}],
+                    },
+                }
+            ],
             "output": "must-not-leak",
         }
         with unittest.mock.patch.object(server, "_runner_request", return_value=raw) as runner:
@@ -87,6 +96,7 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertEqual(result["range_end"], 8799)
         self.assertEqual(result["services"][0]["service"], "yfinance")
         self.assertEqual(result["services"][0]["port"], 8772)
+        self.assertEqual(result["unregistered_listeners"][0]["port"], 8773)
         self.assertNotIn("output", result)
 
     def test_scheduled_task_status_includes_security_context_and_uses_longer_timeout(self):
