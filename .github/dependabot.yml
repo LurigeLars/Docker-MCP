@@ -19,9 +19,7 @@ updates:
       prefix: "deps"
 
   - package-ecosystem: "docker"
-    directories:
-      - "/"
-      - "/dependency-watch/edge-images"
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -36,6 +34,18 @@ updates:
           - "patch"
     commit-message:
       prefix: "deps"
+
+  # Signal-only reviewed candidates for the shared MCP edge. Keep this separate
+  # from runtime Dockerfile updates so an edge-watch PR never bundles a deployable
+  # base-image change from the repository root.
+  - package-ecosystem: "docker"
+    directory: "/dependency-watch/edge-images"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps-edge-watch"
 
   - package-ecosystem: "docker-compose"
     directory: "/"
