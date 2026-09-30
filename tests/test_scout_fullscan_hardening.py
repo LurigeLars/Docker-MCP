@@ -140,19 +140,28 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
         self.assertIn('$Result.status = "succeeded"', FULLSCAN)
         finally_pos = FULLSCAN.index("finally {")
         cleanup_pos = FULLSCAN.index(
-            "Remove-Item -LiteralPath $JobDirectory -Recurse -Force",
+            "$Result.cleanup_complete = Remove-ScoutJobDirectory -Path $JobDirectory",
             finally_pos,
         )
         self.assertGreater(cleanup_pos, finally_pos)
 
     # 11
     def test_job_directory_is_removed_after_failure(self):
-        catch_pos = FULLSCAN.index("catch {")
-        cleanup_pos = FULLSCAN.index(
-            "Remove-Item -LiteralPath $JobDirectory -Recurse -Force"
-        )
-        self.assertLess(catch_pos, cleanup_pos)
         self.assertIn('$Result.error_code = "SCAN_FAILED_INTERNAL"', FULLSCAN)
+        self.assertIn(
+            '$Result.cleanup_complete = Remove-ScoutJobDirectory -Path $JobDirectory',
+            FULLSCAN,
+        )
+
+    def test_job_directory_cleanup_retries_windows_file_locks(self):
+        cleanup = RUNNER[
+            RUNNER.index("function Remove-ScoutJobDirectory {"):
+            RUNNER.index("function New-ScoutFullScanResult {")
+        ]
+        self.assertIn("foreach ($Attempt in 1..15)", cleanup)
+        self.assertIn("Start-Sleep -Milliseconds 500", cleanup)
+        self.assertIn("Remove-Item -LiteralPath $Path -Recurse -Force", cleanup)
+        self.assertIn("return $false", cleanup)
 
     # 12
     def test_old_orphan_job_directories_are_cleaned_conservatively(self):
@@ -194,27 +203,40 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
         for field in (
             "status", "scan_complete", "image", "image_id", "image_size_bytes",
             "severity", "only_fixed", "cisa_kev", "output", "error_code",
+            "cleanup_complete",
         ):
             self.assertIn(field, RUNNER)
         self.assertIn("vulnerability_counts", FULLSCAN)
+        self.assertIn("unique_cve_counts", FULLSCAN)
         self.assertIn("fixable_vulnerability_counts", FULLSCAN)
+        self.assertIn("fixable_unique_cve_counts", FULLSCAN)
 
-    def test_counts_are_parsed_from_image_summary_row_only(self):
-        count_fn = RUNNER[
-            RUNNER.index("function Get-ScoutVulnerabilityCounts {"):
-            RUNNER.index("function Get-ScoutDetectedVulnerabilityTotal {")
+    def test_counts_are_parsed_from_structured_gitlab_json(self):
+        parser = RUNNER[
+            RUNNER.index("function ConvertFrom-ScoutGitLabReport {"):
+            RUNNER.index("function Remove-ScoutJobDirectory {")
         ]
-        self.assertIn("<tr><td>vulnerabilities</td><td>", count_fn)
-        self.assertIn("$SummaryRow.Groups[\"badges\"].Value", count_fn)
-        self.assertNotIn("[regex]::Match(\n            [string]$Output,\n            ('alt=", count_fn)
+        self.assertIn("ConvertFrom-Json -Depth 100", parser)
+        self.assertIn("$Report.vulnerabilities", parser)
+        self.assertIn("$Vulnerability.severity", parser)
+        self.assertIn("$Vulnerability.cve", parser)
+        self.assertIn("$Vulnerability.identifiers", parser)
+        self.assertIn("unique_cve_counts", parser)
+        self.assertIn("detected_vulnerabilities_total", parser)
 
-    def test_detected_total_is_captured_as_cross_check(self):
-        total_fn = RUNNER[
-            RUNNER.index("function Get-ScoutDetectedVulnerabilityTotal {"):
-            RUNNER.index("function New-ScoutFullScanResult {")
-        ]
-        self.assertIn("Detected\\s+\\d+\\s+vulnerable", total_fn)
-        self.assertIn("detected_vulnerabilities_total", FULLSCAN)
+    def test_fullscan_requests_gitlab_json_not_markdown(self):
+        self.assertIn(
+            '$Arguments = @("scout", "cves", "--format", "gitlab")',
+            FULLSCAN,
+        )
+        self.assertNotIn(
+            '$Arguments = @("scout", "cves", "--format", "markdown")',
+            FULLSCAN,
+        )
+
+    def test_structured_parse_failure_is_fail_visible(self):
+        self.assertIn('$Result.error_code = "SCAN_FAILED_PARSE"', FULLSCAN)
+        self.assertIn('$Result.scan_complete = $false', FULLSCAN)
 
     def test_bounded_output_preserves_head_and_tail(self):
         bounded = RUNNER[
