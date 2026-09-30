@@ -762,9 +762,10 @@ function Invoke-ScriptHandler {
     # into a non-zero process exit code on its own. Make process semantics explicit.
     $InvocationLines = @(
         '$ErrorActionPreference = ''Stop'''
+        '$Error.Clear()'
         'try {'
         "    $Command"
-        '    if (-not $?) { exit 1 }'
+        '    if (-not $? -or $Error.Count -gt 0) { exit 1 }'
         '    exit 0'
         '}'
         'catch {'
@@ -1405,6 +1406,25 @@ Write-Host "HOST=$Action"
 
         if ([int]$Invalid.exit_code -eq 0) {
             throw "Script failure was incorrectly reported as exit code 0."
+        }
+
+        $InternalErrorScript = Join-Path $TestRoot "handler-internal-error.ps1"
+        @'
+param([switch]$Noop)
+$ErrorActionPreference = "Continue"
+Set-StrictMode -Version Latest
+$null = $DefinitelyUnsetVariable
+'@ | Set-Content -LiteralPath $InternalErrorScript -Encoding utf8
+
+        $InternalError = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $InternalErrorScript `
+            -Arguments @("-Noop") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$InternalError.exit_code -eq 0) {
+            throw "Script-internal PowerShell error was incorrectly reported as exit code 0."
         }
 
         $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
