@@ -1410,6 +1410,7 @@ Write-Host "HOST=$Action"
 
         $InternalErrorScript = Join-Path $TestRoot "handler-internal-error.ps1"
         @'
+param([switch]$Noop)
 $ErrorActionPreference = "Continue"
 Set-StrictMode -Version Latest
 $null = $DefinitelyUnsetVariable
@@ -1419,7 +1420,7 @@ $null = $DefinitelyUnsetVariable
             -JobId ([Guid]::NewGuid().ToString("N")) `
             -Project "selftest" `
             -Script $InternalErrorScript `
-            -Arguments @() `
+            -Arguments @("-Noop") `
             -WorkingDirectory $TestRoot
 
         if ([int]$InternalError.exit_code -eq 0) {
