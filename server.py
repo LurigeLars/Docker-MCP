@@ -855,7 +855,7 @@ def port_registry_status():
     """Read the persistent host MCP port registry and current listener ownership."""
     return _compact_runner_request(
         {"action": "port_registry_status"},
-        ("version", "range_start", "range_end", "services", "unregistered_listeners"),
+        ("version", "range_start", "range_end", "services", "docker_reserved_ports", "unregistered_listeners"),
         timeout_seconds=12.0,
     )
 
