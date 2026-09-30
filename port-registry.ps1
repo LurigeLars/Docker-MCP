@@ -1,6 +1,4 @@
 $ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
-
 $script:McpPortRangeStart = 8760
 $script:McpPortRangeEnd = 8799
 $script:McpPortRegistryMutexName = "Local\DockerLocalMcpPortRegistry"
