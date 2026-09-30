@@ -55,6 +55,7 @@ Read-only inspection:
 - `image_usage_audit`
 - `maintenance_job_status`
 - `maintenance_runner_status`
+- `port_registry_status` — persistent host MCP port reservations plus listeners in the managed range that are not registered
 
 Narrow maintenance:
 
@@ -294,6 +295,47 @@ To allowlist an additional repository without creating a Scheduled Task mapping,
 ```
 
 The helper performs the same exact-root, `main`, and HTTPS GitHub-origin validation, preserves the existing task allowlist, and restarts only the local Maintenance Runner so it reloads the updated configuration.
+
+## Host MCP port registry
+
+Local MCP services should not independently guess static ports. Docker MCP installs a small host-side
+registry at:
+
+```text
+%LOCALAPPDATA%\DockerLocalMCP\port-registry.json
+```
+
+The default managed range is **8760–8799**. A service reserves a port once through
+`port-registry.ps1` and then reuses that reservation on every normal start. Allocation is protected
+by a named Windows mutex and an atomic JSON write.
+
+The intended lifecycle is:
+
+```text
+first install
+  -> request preferred port (optional)
+  -> skip ports reserved by another service
+  -> skip ports with an unrelated live listener
+  -> reserve first safe port
+  -> persist mapping
+
+normal start / restart
+  -> read the existing service reservation
+  -> use exactly that port
+  -> if another process owns it, fail closed
+```
+
+Do **not** automatically move to another port at runtime. Cloudflare ingress, health checks and MCP
+clients rely on stable local endpoints. Dynamic allocation happens only when a service has no
+reservation yet.
+
+For migration of an already-running service, the helper can adopt a listening port only when the
+installer supplies an expected command-line fragment and the listener owner matches it. This is for
+local installer use; the remote Docker MCP surface exposes only `port_registry_status`, never an
+arbitrary process/command matching primitive.
+
+The read-only status tool also reports live listeners inside 8760–8799 that are not yet in the
+registry. This makes legacy/manual allocations visible before they create another collision.
 
 ## Event-driven local runtime supervisor
 
