@@ -211,6 +211,28 @@ function Write-RunnerLog {
     Add-Content -LiteralPath $Log -Value "$(Get-Date -Format o) $Message" -Encoding utf8
 }
 
+function ConvertTo-ContainerCreatedUtc {
+    param([Parameter(Mandatory)] $Value)
+
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).UtcDateTime
+    }
+
+    if ($Value -is [DateTime]) {
+        $DateValue = [DateTime]$Value
+        if ($DateValue.Kind -eq [DateTimeKind]::Unspecified) {
+            $DateValue = [DateTime]::SpecifyKind($DateValue, [DateTimeKind]::Utc)
+        }
+        return $DateValue.ToUniversalTime()
+    }
+
+    return ([DateTimeOffset]::Parse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    )).UtcDateTime
+}
+
 function Recover-OrphanedJobs {
     foreach ($ProcessingFile in @(Get-ChildItem -LiteralPath $Processing -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
         $JobId = [IO.Path]::GetFileNameWithoutExtension($ProcessingFile.Name)
@@ -1130,8 +1152,13 @@ function Get-ComposeFileState {
         }
 
         $CreatedUtc = $null
+        $CreatedDisplay = $null
         try {
-            $CreatedUtc = ([DateTimeOffset]::Parse([string]$Inspect.Created)).UtcDateTime
+            $CreatedUtc = ConvertTo-ContainerCreatedUtc -Value $Inspect.Created
+            $CreatedDisplay = $CreatedUtc.ToString(
+                "o",
+                [Globalization.CultureInfo]::InvariantCulture
+            )
         }
         catch {
             $Errors += @{ project = $Project; service = $Service; error = "container_created_time_invalid" }
@@ -1149,7 +1176,7 @@ function Get-ComposeFileState {
                     container = ([string]$Inspect.Name).TrimStart("/")
                     compose_file = $Path
                     status = "missing"
-                    container_created_at = [string]$Inspect.Created
+                    container_created_at = $CreatedDisplay
                     compose_file_modified_at = $null
                 }
                 $ContainerFiles += $Entry
@@ -1170,7 +1197,7 @@ function Get-ComposeFileState {
                 container = ([string]$Inspect.Name).TrimStart("/")
                 compose_file = $File.FullName
                 status = if ($IsNewer) { "newer_than_container" } else { "ok" }
-                container_created_at = [string]$Inspect.Created
+                container_created_at = $CreatedDisplay
                 compose_file_modified_at = $ModifiedUtc.ToString("o")
             }
             $ContainerFiles += $Entry
@@ -1362,6 +1389,22 @@ function Run-ProjectRedeploy {
 }
 
 function Invoke-RunnerSelfTest {
+    $ExpectedCreatedUtc = [DateTime]::SpecifyKind(
+        [DateTime]::new(2026, 10, 1, 2, 39, 48),
+        [DateTimeKind]::Utc
+    )
+    $JsonCreated = ('{"Created":"2026-10-01T02:39:48Z"}' | ConvertFrom-Json).Created
+    foreach ($CreatedValue in @(
+        $JsonCreated,
+        $ExpectedCreatedUtc,
+        [DateTimeOffset]::new($ExpectedCreatedUtc)
+    )) {
+        $ParsedCreatedUtc = ConvertTo-ContainerCreatedUtc -Value $CreatedValue
+        if ($ParsedCreatedUtc -ne $ExpectedCreatedUtc) {
+            throw "Container created timestamp normalization regression."
+        }
+    }
+
     $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("dockerlocal-runner-selftest-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
     $TestScript = Join-Path $TestRoot "handler.ps1"
