@@ -30,6 +30,20 @@ $SecretHolder = "mcp-edge-secret-holder"
 $Cloudflared = "mcp-cloudflared"
 $RuntimeSecretPath = "/run/mcp-edge-secrets/tunnel_token"
 
+# Declarative edge network registry. Keep this aligned with the remotely managed
+# Cloudflare tunnel ingress routes instead of deriving desired state from the
+# networks the current cloudflared container happens to have.
+$RequiredEdgeNetworks = @(
+    "avanza-mcp-public_edge",
+    "dockerlocal-public_edge",
+    "firecrawl_edge",
+    "gdrive-public_edge",
+    "github-public_edge",
+    "influencerresearch-public_edge",
+    "tradingview-mcp-public_edge",
+    "yfinance-mcp-public_edge"
+)
+
 New-Item -ItemType Directory -Force -Path $EdgeRoot, $SecretDir | Out-Null
 
 function Write-Utf8NoBom {
@@ -189,20 +203,365 @@ function Get-CurrentEdgeMetadata {
         throw "Unexpected cloudflared image reference; refusing to rewrite the edge deployment."
     }
 
-    $networkJson = (& docker inspect $Cloudflared --format "{{json .NetworkSettings.Networks}}" 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($networkJson)) {
-        throw "Unable to inspect current cloudflared networks."
-    }
-
-    $networkObject = $networkJson | ConvertFrom-Json
-    $networkNames = @($networkObject.PSObject.Properties.Name | Sort-Object -Unique)
+    $networkNames = @($RequiredEdgeNetworks | Sort-Object -Unique)
     if ($networkNames.Count -eq 0) {
-        throw "Existing cloudflared container is not attached to any networks."
+        throw "Required edge network registry is empty."
     }
 
     foreach ($network in $networkNames) {
-        if ($network -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') {
+        if ($network -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}
+}
+
+function Write-EdgeCompose {
+    param(
+        [Parameter(Mandatory)][string]$Image,
+        [Parameter(Mandatory)][string[]]$Networks
+    )
+
+    $lines = [Collections.Generic.List[string]]::new()
+
+    foreach ($line in @(
+        'name: mcp-edge',
+        '',
+        'services:',
+        '  secret-holder:',
+        '    image: busybox:1.37.0-musl',
+        '    container_name: mcp-edge-secret-holder',
+        '    command: ["sh", "-c", "while :; do sleep 3600; done"]',
+        '    user: "65532:65532"',
+        '    network_mode: none',
+        '    volumes:',
+        '      - tunnel-secrets:/run/mcp-edge-secrets',
+        '    read_only: true',
+        '    cap_drop:',
+        '      - ALL',
+        '    security_opt:',
+        '      - no-new-privileges:true',
+        '    restart: unless-stopped',
+        '',
+        '  cloudflared:',
+        "    image: $Image",
+        '    container_name: mcp-cloudflared',
+        '    command:',
+        '      - tunnel',
+        '      - run',
+        '      - --token-file',
+        '      - /run/mcp-edge-secrets/tunnel_token',
+        '    volumes:',
+        '      - type: volume',
+        '        source: tunnel-secrets',
+        '        target: /run/mcp-edge-secrets',
+        '        read_only: true',
+        '    networks:'
+    )) {
+        [void]$lines.Add($line)
+    }
+
+    for ($i = 0; $i -lt $Networks.Count; $i++) {
+        [void]$lines.Add(("      edge{0}: {{}}" -f $i))
+    }
+
+    foreach ($line in @(
+        '    read_only: true',
+        '    cap_drop:',
+        '      - ALL',
+        '    security_opt:',
+        '      - no-new-privileges:true',
+        '    restart: unless-stopped',
+        '',
+        'volumes:',
+        '  tunnel-secrets:',
+        '    driver: local',
+        '    driver_opts:',
+        '      type: tmpfs',
+        '      device: tmpfs',
+        '      o: "size=65536,uid=65532,gid=65532,mode=0700"',
+        '',
+        'networks:'
+    )) {
+        [void]$lines.Add($line)
+    }
+
+    for ($i = 0; $i -lt $Networks.Count; $i++) {
+        [void]$lines.Add(("  edge{0}:" -f $i))
+        [void]$lines.Add('    external: true')
+        [void]$lines.Add(("    name: {0}" -f $Networks[$i]))
+    }
+
+    Write-Utf8NoBom -Path $ComposePath -Text (($lines -join [Environment]::NewLine) + [Environment]::NewLine)
+}
+
+function Get-CloudflaredMissingNetworks {
+    $networkJson = (& docker inspect $Cloudflared --format "{{json .NetworkSettings.Networks}}" 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($networkJson)) {
+        return @($RequiredEdgeNetworks)
+    }
+
+    $networkObject = $networkJson | ConvertFrom-Json
+    $actual = @($networkObject.PSObject.Properties.Name)
+    return @(
+        $RequiredEdgeNetworks |
+            Where-Object { $actual -notcontains $_ }
+    )
+}
+
+function Test-CloudflaredNoTokenEnv {
+    $envJson = (& docker inspect $Cloudflared --format "{{json .Config.Env}}" 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($envJson)) {
+        throw "Unable to inspect cloudflared environment metadata."
+    }
+
+    $envEntries = @($envJson | ConvertFrom-Json)
+    $keys = @(
+        $envEntries |
+            ForEach-Object { ($_ -split "=", 2)[0] }
+    )
+
+    return -not ($keys -contains "TUNNEL_TOKEN")
+}
+
+function Invoke-EdgeUp {
+    if (-not (Test-Path -LiteralPath $ComposePath -PathType Leaf)) {
+        throw "mcp-edge compose file is missing."
+    }
+    if (-not (Test-Path -LiteralPath $DpapiPath -PathType Leaf)) {
+        throw "Tunnel DPAPI secret is missing. Run this script with -Action Install first."
+    }
+
+    Push-Location $EdgeRoot
+    try {
+        & docker compose -f $ComposePath up -d secret-holder
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to start the mcp-edge secret holder."
+        }
+
+        $token = $null
+        try {
+            $token = Get-DpapiSecretValue -Path $DpapiPath -Label "Cloudflare tunnel"
+            [void](Invoke-DockerWithExactStdin -InputText $token -Arguments @(
+                "exec", "-i", $SecretHolder,
+                "sh", "-c",
+                "umask 077; cat > /run/mcp-edge-secrets/tunnel_token"
+            ))
+        }
+        finally {
+            $token = $null
+        }
+
+        & docker exec $SecretHolder test -s $RuntimeSecretPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Tunnel token was not materialized into the Docker tmpfs."
+        }
+
+        & docker compose -f $ComposePath up -d cloudflared
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to start cloudflared with token-file authentication."
+        }
+
+        $deadline = (Get-Date).AddSeconds(20)
+        do {
+            $running = (& docker inspect $Cloudflared --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
+            if ($LASTEXITCODE -eq 0 -and $running -eq "true") {
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        } while ((Get-Date) -lt $deadline)
+
+        if ($running -ne "true") {
+            throw "cloudflared did not remain running after the hardened redeploy."
+        }
+
+        $missingNetworks = @(Get-CloudflaredMissingNetworks)
+        if ($missingNetworks.Count -gt 0) {
+            throw "cloudflared is missing required edge networks: $($missingNetworks -join ', ')"
+        }
+
+        if (-not (Test-CloudflaredNoTokenEnv)) {
+            throw "TUNNEL_TOKEN is still present in cloudflared Config.Env."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Update-SupervisorConfig {
+    if (-not (Test-Path -LiteralPath $SupervisorConfigPath -PathType Leaf)) {
+        throw "Runtime supervisor config is missing: $SupervisorConfigPath"
+    }
+
+    $config = Get-Content -LiteralPath $SupervisorConfigPath -Raw | ConvertFrom-Json
+    if ([int]$config.version -ne 1) {
+        throw "Unsupported runtime supervisor config version."
+    }
+
+    $existing = @(
+        $config.runtimes |
+            Where-Object { [string]$_.name -ne "mcp-edge" }
+    )
+
+    $edgeRuntime = [pscustomobject]@{
+        name = "mcp-edge"
+        enabled = $true
+        event_containers = @(
+            $SecretHolder,
+            $Cloudflared
+        )
+        health = [pscustomobject]@{
+            checks = @(
+                [pscustomobject]@{
+                    container = $SecretHolder
+                    require_healthy = $false
+                    required_files = @($RuntimeSecretPath)
+                },
+                [pscustomobject]@{
+                    container = $Cloudflared
+                    require_healthy = $false
+                    required_files = @()
+                }
+            )
+        }
+        recovery = [pscustomobject]@{
+            script = $StableScriptPath
+            arguments = @("Up")
+            working_directory = $EdgeRoot
+        }
+        cooldown_seconds = 30
+        recovery_wait_seconds = 30
+    }
+
+    $config.runtimes = @($existing + $edgeRuntime)
+    Write-Utf8NoBom -Path $SupervisorConfigPath -Text (($config | ConvertTo-Json -Depth 10) + [Environment]::NewLine)
+}
+
+function Show-Status {
+    $dpapi = Test-Path -LiteralPath $DpapiPath -PathType Leaf
+    $legacy = Test-Path -LiteralPath $LegacyEnvPath -PathType Leaf
+
+    $holderRunning = $false
+    $secretPresent = $false
+    $cloudflaredRunning = $false
+    $tokenEnvAbsent = $false
+    $edgeNetworksComplete = $false
+
+    $holderState = (& docker inspect $SecretHolder --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $holderState -eq "true") {
+        $holderRunning = $true
+        & docker exec $SecretHolder test -s $RuntimeSecretPath 2>$null
+        $secretPresent = ($LASTEXITCODE -eq 0)
+    }
+
+    $cloudflaredState = (& docker inspect $Cloudflared --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $cloudflaredState -eq "true") {
+        $cloudflaredRunning = $true
+        $tokenEnvAbsent = Test-CloudflaredNoTokenEnv
+        $edgeNetworksComplete = (@(Get-CloudflaredMissingNetworks).Count -eq 0)
+    }
+
+    Write-Host "dpapi tunnel token: $dpapi"
+    Write-Host "legacy tunnel.env exists: $legacy"
+    Write-Host "secret holder running: $holderRunning"
+    Write-Host "tmpfs token present: $secretPresent"
+    Write-Host "cloudflared running: $cloudflaredRunning"
+    Write-Host "TUNNEL_TOKEN absent from Config.Env: $tokenEnvAbsent"
+    Write-Host "required edge networks attached: $edgeNetworksComplete"
+
+    if ($dpapi -and -not $legacy -and $holderRunning -and $secretPresent -and $cloudflaredRunning -and $tokenEnvAbsent -and $edgeNetworksComplete) {
+        Write-Host "MCP_EDGE_SECRET_HARDENING: PASS"
+    }
+    else {
+        Write-Host "MCP_EDGE_SECRET_HARDENING: REVIEW REQUIRED"
+    }
+}
+
+switch ($Action) {
+    "Install" {
+        $legacyToken = $null
+        $storedToken = $null
+
+        try {
+            $legacyToken = Get-LegacyTunnelToken
+
+            if (-not (Test-Path -LiteralPath $DpapiPath -PathType Leaf)) {
+                if ([string]::IsNullOrWhiteSpace($legacyToken)) {
+                    throw "No existing TUNNEL_TOKEN was found to migrate."
+                }
+                Save-DpapiSecret -Path $DpapiPath -Value $legacyToken -Label "Cloudflare tunnel"
+            }
+
+            $storedToken = Get-DpapiSecretValue -Path $DpapiPath -Label "Cloudflare tunnel"
+            if (
+                -not [string]::IsNullOrWhiteSpace($legacyToken) -and
+                $storedToken -ne $legacyToken
+            ) {
+                throw "DPAPI tunnel token does not match tunnel.env; refusing to remove the legacy file."
+            }
+        }
+        finally {
+            $legacyToken = $null
+            $storedToken = $null
+        }
+
+        $currentScript = (Resolve-Path -LiteralPath $PSCommandPath).Path
+        if ($currentScript -ne $StableScriptPath) {
+            Copy-Item -LiteralPath $currentScript -Destination $StableScriptPath -Force
+        }
+
+        $metadata = Get-CurrentEdgeMetadata
+
+        if (
+            (Test-Path -LiteralPath $ComposePath -PathType Leaf) -and
+            -not (Test-Path -LiteralPath $ComposeBackupPath -PathType Leaf)
+        ) {
+            Copy-Item -LiteralPath $ComposePath -Destination $ComposeBackupPath
+        }
+
+        Write-EdgeCompose -Image $metadata.image -Networks $metadata.networks
+
+        try {
+            Invoke-EdgeUp
+        }
+        catch {
+            if (Test-Path -LiteralPath $ComposeBackupPath -PathType Leaf) {
+                Copy-Item -LiteralPath $ComposeBackupPath -Destination $ComposePath -Force
+                try {
+                    Push-Location $EdgeRoot
+                    & docker compose -f $ComposePath up -d *> $null
+                }
+                catch {}
+                finally {
+                    Pop-Location
+                }
+            }
+            throw
+        }
+
+        Update-SupervisorConfig
+
+        if (Test-Path -LiteralPath $LegacyEnvPath -PathType Leaf) {
+            Remove-Item -LiteralPath $LegacyEnvPath -Force
+        }
+
+        Write-Host "MCP_EDGE_DPAPI_MIGRATION_OK"
+        Show-Status
+    }
+
+    "Up" {
+        Invoke-EdgeUp
+        Show-Status
+    }
+
+    "Status" {
+        Show-Status
+    }
+}
+) {
             throw "Unexpected Docker network name: $network"
+        }
+
+        & docker network inspect $network *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Required Docker edge network is missing: $network"
         }
     }
 
