@@ -1,8 +1,7 @@
 import json
 import sys
 import types
-import unittest
-from unittest import mock
+import unittest.mock
 
 
 class _DummyMCP:
@@ -76,8 +75,8 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             "errors": [],
         }
 
-        with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with mock.patch.object(
+        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+            with unittest.mock.patch.object(
                 server,
                 "_runner_request",
                 side_effect=[
@@ -112,8 +111,8 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             "errors": [],
         }
 
-        with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with mock.patch.object(
+        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+            with unittest.mock.patch.object(
                 server,
                 "_runner_request",
                 side_effect=[
@@ -156,8 +155,8 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             "errors": [],
         }
 
-        with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with mock.patch.object(
+        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+            with unittest.mock.patch.object(
                 server,
                 "_runner_request",
                 side_effect=[desired, file_state],
@@ -184,8 +183,8 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             "errors": [],
         }
 
-        with mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with mock.patch.object(
+        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+            with unittest.mock.patch.object(
                 server,
                 "_runner_request",
                 side_effect=[desired, file_state],
