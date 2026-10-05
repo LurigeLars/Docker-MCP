@@ -30,6 +30,20 @@ $SecretHolder = "mcp-edge-secret-holder"
 $Cloudflared = "mcp-cloudflared"
 $RuntimeSecretPath = "/run/mcp-edge-secrets/tunnel_token"
 
+# Declarative edge network registry. Keep this aligned with the remotely managed
+# Cloudflare tunnel ingress routes instead of deriving desired state from the
+# networks the current cloudflared container happens to have.
+$RequiredEdgeNetworks = @(
+    "avanza-mcp-public_edge",
+    "dockerlocal-public_edge",
+    "firecrawl_edge",
+    "gdrive-public_edge",
+    "github-public_edge",
+    "influencerresearch-public_edge",
+    "tradingview-mcp-public_edge",
+    "yfinance-mcp-public_edge"
+)
+
 New-Item -ItemType Directory -Force -Path $EdgeRoot, $SecretDir | Out-Null
 
 function Write-Utf8NoBom {
@@ -189,20 +203,19 @@ function Get-CurrentEdgeMetadata {
         throw "Unexpected cloudflared image reference; refusing to rewrite the edge deployment."
     }
 
-    $networkJson = (& docker inspect $Cloudflared --format "{{json .NetworkSettings.Networks}}" 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($networkJson)) {
-        throw "Unable to inspect current cloudflared networks."
-    }
-
-    $networkObject = $networkJson | ConvertFrom-Json
-    $networkNames = @($networkObject.PSObject.Properties.Name | Sort-Object -Unique)
+    $networkNames = @($RequiredEdgeNetworks | Sort-Object -Unique)
     if ($networkNames.Count -eq 0) {
-        throw "Existing cloudflared container is not attached to any networks."
+        throw "Required edge network registry is empty."
     }
 
     foreach ($network in $networkNames) {
         if ($network -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') {
             throw "Unexpected Docker network name: $network"
+        }
+
+        & docker network inspect $network *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Required Docker edge network is missing: $network"
         }
     }
 
@@ -291,6 +304,20 @@ function Write-EdgeCompose {
     Write-Utf8NoBom -Path $ComposePath -Text (($lines -join [Environment]::NewLine) + [Environment]::NewLine)
 }
 
+function Get-CloudflaredMissingNetworks {
+    $networkJson = (& docker inspect $Cloudflared --format "{{json .NetworkSettings.Networks}}" 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($networkJson)) {
+        return @($RequiredEdgeNetworks)
+    }
+
+    $networkObject = $networkJson | ConvertFrom-Json
+    $actual = @($networkObject.PSObject.Properties.Name)
+    return @(
+        $RequiredEdgeNetworks |
+            Where-Object { $actual -notcontains $_ }
+    )
+}
+
 function Test-CloudflaredNoTokenEnv {
     $envJson = (& docker inspect $Cloudflared --format "{{json .Config.Env}}" 2>$null | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($envJson)) {
@@ -339,7 +366,7 @@ function Invoke-EdgeUp {
             throw "Tunnel token was not materialized into the Docker tmpfs."
         }
 
-        & docker compose -f $ComposePath up -d --force-recreate cloudflared
+        & docker compose -f $ComposePath up -d cloudflared
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to start cloudflared with token-file authentication."
         }
@@ -355,6 +382,11 @@ function Invoke-EdgeUp {
 
         if ($running -ne "true") {
             throw "cloudflared did not remain running after the hardened redeploy."
+        }
+
+        $missingNetworks = @(Get-CloudflaredMissingNetworks)
+        if ($missingNetworks.Count -gt 0) {
+            throw "cloudflared is missing required edge networks: $($missingNetworks -join ', ')"
         }
 
         if (-not (Test-CloudflaredNoTokenEnv)) {
@@ -423,6 +455,7 @@ function Show-Status {
     $secretPresent = $false
     $cloudflaredRunning = $false
     $tokenEnvAbsent = $false
+    $edgeNetworksComplete = $false
 
     $holderState = (& docker inspect $SecretHolder --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
     if ($LASTEXITCODE -eq 0 -and $holderState -eq "true") {
@@ -435,6 +468,7 @@ function Show-Status {
     if ($LASTEXITCODE -eq 0 -and $cloudflaredState -eq "true") {
         $cloudflaredRunning = $true
         $tokenEnvAbsent = Test-CloudflaredNoTokenEnv
+        $edgeNetworksComplete = (@(Get-CloudflaredMissingNetworks).Count -eq 0)
     }
 
     Write-Host "dpapi tunnel token: $dpapi"
@@ -443,8 +477,9 @@ function Show-Status {
     Write-Host "tmpfs token present: $secretPresent"
     Write-Host "cloudflared running: $cloudflaredRunning"
     Write-Host "TUNNEL_TOKEN absent from Config.Env: $tokenEnvAbsent"
+    Write-Host "required edge networks attached: $edgeNetworksComplete"
 
-    if ($dpapi -and -not $legacy -and $holderRunning -and $secretPresent -and $cloudflaredRunning -and $tokenEnvAbsent) {
+    if ($dpapi -and -not $legacy -and $holderRunning -and $secretPresent -and $cloudflaredRunning -and $tokenEnvAbsent -and $edgeNetworksComplete) {
         Write-Host "MCP_EDGE_SECRET_HARDENING: PASS"
     }
     else {
