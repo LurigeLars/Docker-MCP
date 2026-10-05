@@ -742,6 +742,7 @@ def image_usage_audit():
                 inspect = _json("GET", f"/containers/{_quote(container_id)}/json") or {}
                 running_id = str(inspect.get("Image") or running_id)
             except Exception:
+                # Best-effort inspect: fall back to ImageID from the container list.
                 pass
         if running_id:
             in_use_by.setdefault(running_id, []).append(name)
