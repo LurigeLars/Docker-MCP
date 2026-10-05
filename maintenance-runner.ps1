@@ -3,6 +3,12 @@ param([switch]$SelfTest)
 $ErrorActionPreference = "Stop"
 
 $Root = Join-Path $env:LOCALAPPDATA "DockerLocalMCP"
+$PortRegistryHelper = Join-Path $PSScriptRoot "port-registry.ps1"
+if (-not (Test-Path -LiteralPath $PortRegistryHelper -PathType Leaf)) {
+    throw "port-registry.ps1 must be next to maintenance-runner.ps1."
+}
+. $PortRegistryHelper
+
 $Control = Join-Path $Root "control"
 $Requests = Join-Path $Control "requests"
 $Processing = Join-Path $Control "processing"
@@ -203,6 +209,28 @@ function Write-JsonAtomic {
 function Write-RunnerLog {
     param([string] $Message)
     Add-Content -LiteralPath $Log -Value "$(Get-Date -Format o) $Message" -Encoding utf8
+}
+
+function ConvertTo-ContainerCreatedUtc {
+    param([Parameter(Mandatory)] $Value)
+
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).UtcDateTime
+    }
+
+    if ($Value -is [DateTime]) {
+        $DateValue = [DateTime]$Value
+        if ($DateValue.Kind -eq [DateTimeKind]::Unspecified) {
+            $DateValue = [DateTime]::SpecifyKind($DateValue, [DateTimeKind]::Utc)
+        }
+        return $DateValue.ToUniversalTime()
+    }
+
+    return ([DateTimeOffset]::Parse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    )).UtcDateTime
 }
 
 function Recover-OrphanedJobs {
@@ -762,9 +790,10 @@ function Invoke-ScriptHandler {
     # into a non-zero process exit code on its own. Make process semantics explicit.
     $InvocationLines = @(
         '$ErrorActionPreference = ''Stop'''
+        '$Error.Clear()'
         'try {'
         "    $Command"
-        '    if (-not $?) { exit 1 }'
+        '    if (-not $? -or $Error.Count -gt 0) { exit 1 }'
         '    exit 0'
         '}'
         'catch {'
@@ -1123,8 +1152,13 @@ function Get-ComposeFileState {
         }
 
         $CreatedUtc = $null
+        $CreatedDisplay = $null
         try {
-            $CreatedUtc = ([DateTimeOffset]::Parse([string]$Inspect.Created)).UtcDateTime
+            $CreatedUtc = ConvertTo-ContainerCreatedUtc -Value $Inspect.Created
+            $CreatedDisplay = $CreatedUtc.ToString(
+                "o",
+                [Globalization.CultureInfo]::InvariantCulture
+            )
         }
         catch {
             $Errors += @{ project = $Project; service = $Service; error = "container_created_time_invalid" }
@@ -1142,7 +1176,7 @@ function Get-ComposeFileState {
                     container = ([string]$Inspect.Name).TrimStart("/")
                     compose_file = $Path
                     status = "missing"
-                    container_created_at = [string]$Inspect.Created
+                    container_created_at = $CreatedDisplay
                     compose_file_modified_at = $null
                 }
                 $ContainerFiles += $Entry
@@ -1163,7 +1197,7 @@ function Get-ComposeFileState {
                 container = ([string]$Inspect.Name).TrimStart("/")
                 compose_file = $File.FullName
                 status = if ($IsNewer) { "newer_than_container" } else { "ok" }
-                container_created_at = [string]$Inspect.Created
+                container_created_at = $CreatedDisplay
                 compose_file_modified_at = $ModifiedUtc.ToString("o")
             }
             $ContainerFiles += $Entry
@@ -1355,6 +1389,22 @@ function Run-ProjectRedeploy {
 }
 
 function Invoke-RunnerSelfTest {
+    $ExpectedCreatedUtc = [DateTime]::SpecifyKind(
+        [DateTime]::new(2026, 10, 1, 2, 39, 48),
+        [DateTimeKind]::Utc
+    )
+    $JsonCreated = ('{"Created":"2026-10-01T02:39:48Z"}' | ConvertFrom-Json).Created
+    foreach ($CreatedValue in @(
+        $JsonCreated,
+        $ExpectedCreatedUtc,
+        [DateTimeOffset]::new($ExpectedCreatedUtc)
+    )) {
+        $ParsedCreatedUtc = ConvertTo-ContainerCreatedUtc -Value $CreatedValue
+        if ($ParsedCreatedUtc -ne $ExpectedCreatedUtc) {
+            throw "Container created timestamp normalization regression."
+        }
+    }
+
     $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("dockerlocal-runner-selftest-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
     $TestScript = Join-Path $TestRoot "handler.ps1"
@@ -1405,6 +1455,25 @@ Write-Host "HOST=$Action"
 
         if ([int]$Invalid.exit_code -eq 0) {
             throw "Script failure was incorrectly reported as exit code 0."
+        }
+
+        $InternalErrorScript = Join-Path $TestRoot "handler-internal-error.ps1"
+        @'
+param([switch]$Noop)
+$ErrorActionPreference = "Continue"
+Set-StrictMode -Version Latest
+$null = $DefinitelyUnsetVariable
+'@ | Set-Content -LiteralPath $InternalErrorScript -Encoding utf8
+
+        $InternalError = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $InternalErrorScript `
+            -Arguments @("-Noop") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$InternalError.exit_code -eq 0) {
+            throw "Script-internal PowerShell error was incorrectly reported as exit code 0."
         }
 
         $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
@@ -1517,6 +1586,7 @@ try {
                     "compose_file_state",
                     "repo_status",
                     "repo_pull_ff",
+                    "port_registry_status",
                     "scheduled_task_status",
                     "scheduled_task_control",
                     "scout_full_scan"
@@ -1566,6 +1636,15 @@ try {
                         action=$Run.action; repo=$Run.repo; branch=$Run.branch
                         before_head=$Run.before_head; after_head=$Run.after_head
                         changed=$Run.changed; clean=$Run.clean
+                    }
+                }
+                elseif ($Action -eq "port_registry_status") {
+                    $State = Get-McpPortRegistryStatus
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        version=$State.version; range_start=$State.range_start; range_end=$State.range_end
+                        services=$State.services; docker_reserved_ports=$State.docker_reserved_ports; unregistered_listeners=$State.unregistered_listeners
                     }
                 }
                 elseif ($Action -eq "scheduled_task_status") {

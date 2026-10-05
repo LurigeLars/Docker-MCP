@@ -140,6 +140,7 @@ foreach ($File in @(
     "compose.proxy.yaml",
     "compose.public.yaml",
     "maintenance-runner.ps1",
+    "port-registry.ps1",
     "install-maintenance-runner.ps1"
 )) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $File) -Destination (Join-Path $InstallRoot $File) -Force

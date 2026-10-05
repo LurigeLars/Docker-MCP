@@ -39,6 +39,25 @@ class McpEdgeSecretHardeningTests(unittest.TestCase):
         self.assertIn('required_files = @($RuntimeSecretPath)', SCRIPT)
         self.assertIn('arguments = @("Up")', SCRIPT)
 
+    def test_edge_networks_are_declarative_and_cover_active_ingress_routes(self) -> None:
+        for network in (
+            "avanza-mcp-public_edge",
+            "dockerlocal-public_edge",
+            "firecrawl_edge",
+            "gdrive-public_edge",
+            "github-public_edge",
+            "influencerresearch-public_edge",
+            "tradingview-mcp-public_edge",
+            "yfinance-mcp-public_edge",
+        ):
+            self.assertIn(f'"{network}"', SCRIPT)
+        self.assertIn("Required Docker edge network is missing", SCRIPT)
+        self.assertIn("Get-CloudflaredMissingNetworks", SCRIPT)
+
+    def test_recovery_does_not_force_recreate_healthy_cloudflared(self) -> None:
+        self.assertIn("& docker compose -f $ComposePath up -d cloudflared", SCRIPT)
+        self.assertNotIn("up -d --force-recreate cloudflared", SCRIPT)
+
     def test_migration_keeps_rollback_compose_until_hardened_start_succeeds(self) -> None:
         self.assertIn("compose.pre-dpapi.yaml", SCRIPT)
         self.assertIn("Copy-Item -LiteralPath $ComposeBackupPath -Destination $ComposePath -Force", SCRIPT)
