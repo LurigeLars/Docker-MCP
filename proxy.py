@@ -299,6 +299,7 @@ def cleanup_superseded_images() -> dict:
                 ) or {}
                 image_id = str(inspect.get("Image") or image_id)
             except Exception:
+                # Best-effort inspect: fall back to ImageID from the container list.
                 pass
         if image_id:
             used_image_ids.add(image_id)
@@ -670,6 +671,7 @@ class Handler(socketserver.BaseRequestHandler):
             try:
                 deny(self.request, "502 Bad Gateway", "docker engine unavailable")
             except Exception:
+                # The client may already be disconnected; the upstream failure is logged above.
                 pass
         finally:
             upstream.close()
