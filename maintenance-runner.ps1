@@ -1151,6 +1151,11 @@ function Get-ComposeFileState {
             continue
         }
 
+        $WorkingDirProp = $Labels.PSObject.Properties["com.docker.compose.project.working_dir"]
+        $ConfigHashProp = $Labels.PSObject.Properties["com.docker.compose.config-hash"]
+        $WorkingDir = if ($null -ne $WorkingDirProp) { [string]$WorkingDirProp.Value } else { "" }
+        $RunningConfigHash = if ($null -ne $ConfigHashProp) { [string]$ConfigHashProp.Value } else { "" }
+
         $CreatedUtc = $null
         $CreatedDisplay = $null
         try {
@@ -1165,6 +1170,10 @@ function Get-ComposeFileState {
         }
 
         $ContainerFiles = @()
+        $ResolvedFiles = @()
+        $HasMissing = $false
+        $HasNewer = $false
+
         foreach ($PathText in @($FilesText -split ",")) {
             $Path = ([string]$PathText).Trim()
             if ([string]::IsNullOrWhiteSpace($Path)) { continue }
@@ -1180,11 +1189,12 @@ function Get-ComposeFileState {
                     compose_file_modified_at = $null
                 }
                 $ContainerFiles += $Entry
-                $Drift += $Entry
+                $HasMissing = $true
                 continue
             }
 
             $File = Get-Item -LiteralPath $Path
+            $ResolvedFiles += $File.FullName
             $ModifiedUtc = $File.LastWriteTimeUtc
             $IsNewer = $false
             if ($null -ne $CreatedUtc) {
@@ -1201,7 +1211,58 @@ function Get-ComposeFileState {
                 compose_file_modified_at = $ModifiedUtc.ToString("o")
             }
             $ContainerFiles += $Entry
-            if ($IsNewer) { $Drift += $Entry }
+            if ($IsNewer) { $HasNewer = $true }
+        }
+
+        # File mtime is only a heuristic. If a Compose file is newer than the
+        # container, verify the rendered service config against the immutable
+        # config hash embedded in the container. Matching hashes are
+        # informational mtime-only changes, not deployment drift.
+        if (
+            $HasNewer -and
+            -not $HasMissing -and
+            $ResolvedFiles.Count -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($WorkingDir) -and
+            (Test-Path -LiteralPath $WorkingDir -PathType Container) -and
+            -not [string]::IsNullOrWhiteSpace($RunningConfigHash)
+        ) {
+            $HashArgs = @("compose")
+            foreach ($ResolvedFile in $ResolvedFiles) {
+                $HashArgs += @("-f", $ResolvedFile)
+            }
+
+            $HashRun = Invoke-DockerText -Arguments ($HashArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            if ([int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                $DesiredConfigHash = if ($Tokens.Count -gt 0) { [string]$Tokens[-1] } else { "" }
+
+                if (
+                    -not [string]::IsNullOrWhiteSpace($DesiredConfigHash) -and
+                    $DesiredConfigHash -eq $RunningConfigHash
+                ) {
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "mtime_only"
+                            $Entry.config_hash_verified = $true
+                        }
+                    }
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace($DesiredConfigHash)) {
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "config_hash_mismatch"
+                            $Entry.running_config_hash = $RunningConfigHash
+                            $Entry.desired_config_hash = $DesiredConfigHash
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach ($Entry in $ContainerFiles) {
+            if ([string]$Entry.status -in @("missing", "newer_than_container", "config_hash_mismatch")) {
+                $Drift += $Entry
+            }
         }
 
         $Containers += @{

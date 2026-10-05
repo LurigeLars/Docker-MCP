@@ -238,7 +238,7 @@ function Write-EdgeCompose {
         '',
         'services:',
         '  secret-holder:',
-        '    image: busybox:1.37.0-musl',
+        '    image: busybox:1.38.0-musl',
         '    container_name: mcp-edge-secret-holder',
         '    command: ["sh", "-c", "while :; do sleep 3600; done"]',
         '    user: "65532:65532"',
