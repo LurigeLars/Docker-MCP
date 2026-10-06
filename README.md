@@ -1,44 +1,198 @@
 # Docker MCP
 
-## Current deployment and security posture
+[![PowerShell syntax](https://github.com/LurigeLars/Docker-MCP/actions/workflows/powershell-syntax.yml/badge.svg)](https://github.com/LurigeLars/Docker-MCP/actions/workflows/powershell-syntax.yml)
+[![Static analysis](https://github.com/LurigeLars/Docker-MCP/actions/workflows/static-analysis.yml/badge.svg)](https://github.com/LurigeLars/Docker-MCP/actions/workflows/static-analysis.yml)
+[![CodeQL](https://github.com/LurigeLars/Docker-MCP/actions/workflows/codeql.yml/badge.svg)](https://github.com/LurigeLars/Docker-MCP/actions/workflows/codeql.yml)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-Docker MCP is intentionally a narrow maintenance boundary rather than a general Docker or host shell interface.
+A deliberately restricted Model Context Protocol (MCP) server for **inspecting and
+maintaining a local Docker Desktop environment without giving the MCP client the raw
+Docker socket or a general host shell**.
 
-- The MCP server runs as non-root UID 65532; the public gateway runs as non-root `node`.
-- The MCP and gateway use read-only filesystems where applicable, drop Linux capabilities, and use `no-new-privileges`.
-- The raw Docker socket is mounted only into the restricted socket proxy, never into the model-facing MCP container.
-- `container_inspect` exposes the configured container user for security auditing without returning container environment variables or command lines.
-- Host Git maintenance is alias-only and limited to clean `main` checkouts with an exact HTTPS GitHub `origin` and `git pull --ff-only origin main`.
-- Repository-only allowlisting is supported without inventing a Scheduled Task mapping; no arbitrary path, branch, remote, command, argument, or shell input is exposed to the MCP caller.
-- Machine-specific paths, identities, Cloudflare values, local allowlists, tokens, and credentials must remain outside Git.
+It is intended for an AI-assisted local infrastructure stack where the model should be
+able to answer questions such as:
 
-A restricted Model Context Protocol server for inspecting and maintaining a local Docker Desktop environment without exposing the raw Docker socket to the MCP client.
+- Which containers are running?
+- Which image or Compose deployment is stale?
+- Does this container run as root?
+- Is a newer image available?
+- Which known repository checkout is behind its remote?
+- Can this one allowlisted service be safely restarted or redeployed?
 
-> **Independent project.** This repository is not a fork of `docker/hub-mcp` or `docker/mcp-gateway`. It serves a different purpose: local Docker Engine inspection and narrowly scoped maintenance. It can integrate with Docker MCP Gateway as a client/runtime layer, but it does not derive from that gateway's source code.
+The answer should not require handing the model arbitrary Docker administrator access.
 
-## Why this exists
+> **Independent project.** This repository is not a fork of `docker/hub-mcp` or
+> `docker/mcp-gateway`. It can integrate with Docker MCP Toolkit/Gateway, but the
+> restricted local maintenance layer in this repository is its own implementation.
 
-Giving an AI client the raw Docker socket is effectively equivalent to giving it Docker administrator access. Docker MCP puts a narrow policy boundary in front of the Engine instead:
+## Why this project exists
+
+Mounting `/var/run/docker.sock` into a model-facing service is effectively equivalent
+to granting broad Docker administrator capability. From there, generic container
+creation or host mounts can become host compromise.
+
+Docker MCP inserts explicit policy boundaries between the MCP client and that socket.
 
 ```text
 MCP client
-  -> Docker MCP server
-  -> restricted Docker API proxy
-  -> Docker Engine
+   |
+   v
+Docker MCP server
+   |
+   v
+restricted Docker API proxy
+   |
+   v
+Docker Engine
 ```
 
-For a remote MCP client, an authenticated edge can be added:
+Only the restricted socket proxy receives the Docker socket. The model-facing MCP
+container does not.
+
+Windows host operations that cannot safely happen inside the container use a second,
+separate boundary:
 
 ```text
-Remote MCP client
-  -> Cloudflare Access
-  -> authenticated MCP gateway
-  -> Docker MCP server
-  -> restricted Docker API proxy
-  -> Docker Engine
+MCP client
+   |
+   v
+Docker MCP
+   |
+   v
+host Maintenance Runner
+   |
+   +--> exact allowlisted repository alias
+   +--> exact allowlisted Scheduled Task alias
+   +--> exact allowlisted Compose project/service
 ```
 
-Only the socket proxy receives `/var/run/docker.sock`.
+The caller supplies an alias or a bounded operation — not an arbitrary path, branch,
+remote, command line or PowerShell expression.
+
+## What it can do
+
+The tool surface has three main jobs.
+
+| Area | Examples |
+|---|---|
+| Inspection | containers, logs, stats, images, Compose state, deployment drift |
+| Narrow maintenance | fast-forward an allowlisted repo, restart an allowlisted task/container, redeploy an allowlisted Compose target, clean known stale resources |
+| Docker Scout | CVEs, recommendations, SBOM and image comparisons |
+
+The repository also includes a small host-side MCP port registry so local services can
+reserve stable ports instead of independently guessing from the same range.
+
+For runtimes that genuinely require host-side recovery after Docker restarts — for
+example because credentials live only in tmpfs — an optional event-driven runtime
+supervisor can invoke **preconfigured local recovery scripts**. The supervisor itself is
+not exposed as a generic MCP command surface.
+
+## What it deliberately does not expose
+
+The following are intentionally outside the MCP contract:
+
+- arbitrary `docker exec`;
+- arbitrary `docker run`;
+- a general shell or PowerShell runner;
+- raw Docker socket access;
+- arbitrary host filesystem paths;
+- arbitrary Git remotes or branches;
+- arbitrary Compose files/build contexts;
+- generic container deletion;
+- arbitrary Scheduled Task names;
+- arbitrary process arguments.
+
+This is the core design constraint, not an accidental limitation.
+
+## Security model
+
+The maintained deployment uses several layers rather than trusting one gateway:
+
+- the MCP server runs non-root;
+- the model-facing container never receives the raw Docker socket;
+- the restricted proxy exposes only the Docker API operations required by the reviewed
+  tools;
+- `container_inspect` deliberately omits environment variables and command lines while
+  still exposing fields needed for privilege audits;
+- repository maintenance is fail-closed: exact local root, clean checkout, expected
+  HTTPS GitHub origin, `main` branch and fast-forward-only update;
+- host maintenance resolves aliases from ignored local configuration;
+- public access, when enabled, is authenticated through Cloudflare Access and a reviewed
+  gateway;
+- machine paths, identities, allowlists, Access configuration and credentials remain
+  outside Git.
+
+## Local and remote architecture
+
+Local use:
+
+```text
+local MCP client
+      |
+      v
+Docker MCP Toolkit / profile
+      |
+      v
+Docker MCP server
+      |
+      v
+restricted socket proxy
+      |
+      v
+Docker Desktop Engine
+```
+
+Optional remote use:
+
+```text
+ChatGPT / remote MCP client
+      |
+      v
+Cloudflare Access
+      |
+      v
+authenticated MCP gateway
+      |
+      v
+Docker MCP server
+      |
+      v
+restricted socket proxy
+      |
+      v
+Docker Desktop Engine
+```
+
+The public edge does not replace the local policy boundary; it adds authentication in
+front of it.
+
+## Quick start
+
+Requirements:
+
+- Windows with Docker Desktop;
+- Docker MCP Toolkit;
+- PowerShell;
+- Docker Engine running.
+
+Install the local profile from the repository root:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install.ps1
+.\test.ps1
+```
+
+The default profile is `dockerlocal`.
+
+Run the profile locally with Docker MCP Gateway:
+
+```powershell
+docker mcp gateway run --profile dockerlocal
+```
+
+The detailed sections below document the exact tool surface, optional Cloudflare path,
+host maintenance runner, port registry and runtime supervisor.
 
 ## Scope
 
