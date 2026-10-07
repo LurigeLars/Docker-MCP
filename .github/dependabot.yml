@@ -41,8 +41,7 @@ updates:
   - package-ecosystem: "docker"
     directory: "/dependency-watch/edge-images"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: "daily"
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps-edge-watch"
