@@ -804,15 +804,13 @@ def image_usage_audit():
 
 @mcp.tool(annotations=DESTRUCTIVE)
 def cleanup_superseded_images(image_refs: list[str]):
-    """Remove only explicitly requested, pinned local image refs that no container uses."""
+    """Remove only explicitly requested local image refs that no container uses."""
     if not isinstance(image_refs, list) or not (1 <= len(image_refs) <= 20):
         raise ValueError("image_refs must contain 1-20 explicit image references")
 
     clean_refs: list[str] = []
     for raw_ref in image_refs:
         ref = _image(str(raw_ref or "").strip())
-        if ref.endswith(":latest"):
-            raise ValueError("Mutable :latest references are not accepted for cleanup")
         last = ref.rsplit("/", 1)[-1]
         if not (ref.startswith("sha256:") or "@sha256:" in ref or ":" in last):
             raise ValueError("Cleanup requires an explicit tag or immutable digest")
