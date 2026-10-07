@@ -206,7 +206,7 @@ Read-only inspection:
 - `images_list`
 - `image_inspect`
 - `mcp_deployment_audit` — checks every running Compose project for Compose files newer than its containers, and additionally compares `docker compose config --hash` plus desired image for allowlisted projects. This catches both broad file-level drift and exact desired-config drift without a background watcher.
-- `image_usage_audit`
+- `image_usage_audit` — reports container usage plus repository-level superseded hints; hints are not deletion-safe because unused images can still be Dockerfile build-stage inputs
 - `maintenance_job_status`
 - `maintenance_runner_status`
 - `port_registry_status` — persistent host MCP port reservations plus listeners in the managed range that are not registered
