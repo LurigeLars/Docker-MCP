@@ -234,16 +234,121 @@ class ProxyPolicyTests(unittest.TestCase):
                 "/dockerlocal/cleanup-stale-mcp-probes?min_age_seconds=900&extra=1",
             )
         )
+        cleanup_refs = "%5B%22busybox%3A1.37.0-musl%22%5D"
         self.assertTrue(
+            proxy.allowed_custom(
+                "POST",
+                f"/dockerlocal/cleanup-superseded-images?refs={cleanup_refs}",
+            )
+        )
+        self.assertFalse(
             proxy.allowed_custom(
                 "POST", "/dockerlocal/cleanup-superseded-images"
             )
         )
         self.assertFalse(
             proxy.allowed_custom(
-                "POST", "/dockerlocal/cleanup-superseded-images?extra=1"
+                "POST",
+                "/dockerlocal/cleanup-superseded-images?refs=%5B%22busybox%3Alatest%22%5D",
             )
         )
+        self.assertFalse(
+            proxy.allowed_custom(
+                "POST",
+                f"/dockerlocal/cleanup-superseded-images?refs={cleanup_refs}&extra=1",
+            )
+        )
+
+
+class SelectiveImageCleanupTests(unittest.TestCase):
+    def test_cleanup_deletes_only_explicitly_requested_unused_image(self):
+        busybox_id = "sha256:" + ("b" * 64)
+        node_id = "sha256:" + ("c" * 64)
+        images = [
+            {
+                "Id": busybox_id,
+                "RepoTags": ["busybox:1.37.0-musl"],
+                "RepoDigests": [],
+                "Size": 1024,
+            },
+            {
+                "Id": node_id,
+                "RepoTags": ["node:22.23.3-slim"],
+                "RepoDigests": [],
+                "Size": 2048,
+            },
+        ]
+
+        with unittest.mock.patch.object(
+            proxy, "engine_json", side_effect=[[], images]
+        ):
+            with unittest.mock.patch.object(
+                proxy,
+                "engine_request",
+                return_value=(200, {}, b""),
+            ) as delete:
+                result = proxy.cleanup_superseded_images(
+                    ["busybox:1.37.0-musl"]
+                )
+
+        self.assertEqual(result["removed_count"], 1)
+        self.assertEqual(result["removed"][0]["ref"], "busybox:1.37.0-musl")
+        self.assertNotIn("node:22.23.3-slim", str(result))
+        delete.assert_called_once()
+        self.assertIn(busybox_id.replace(":", "%3A"), delete.call_args.args[1])
+
+    def test_cleanup_refuses_image_used_by_any_container(self):
+        busybox_id = "sha256:" + ("b" * 64)
+        rows = [
+            {
+                "Id": "",
+                "ImageID": busybox_id,
+                "Names": ["/secret-holder"],
+            }
+        ]
+        images = [
+            {
+                "Id": busybox_id,
+                "RepoTags": ["busybox:1.37.0-musl"],
+                "RepoDigests": [],
+                "Size": 1024,
+            }
+        ]
+
+        with unittest.mock.patch.object(
+            proxy, "engine_json", side_effect=[rows, images]
+        ):
+            with unittest.mock.patch.object(proxy, "engine_request") as delete:
+                result = proxy.cleanup_superseded_images(
+                    ["busybox:1.37.0-musl"]
+                )
+
+        self.assertEqual(result["removed_count"], 0)
+        self.assertEqual(result["skipped"][0]["reason"], "in_use")
+        self.assertEqual(result["skipped"][0]["in_use_by"], ["secret-holder"])
+        delete.assert_not_called()
+
+    def test_cleanup_reports_unrequested_or_missing_refs_without_broadening_scope(self):
+        images = [
+            {
+                "Id": "sha256:" + ("c" * 64),
+                "RepoTags": ["node:22.23.3-slim"],
+                "RepoDigests": [],
+                "Size": 2048,
+            }
+        ]
+
+        with unittest.mock.patch.object(
+            proxy, "engine_json", side_effect=[[], images]
+        ):
+            with unittest.mock.patch.object(proxy, "engine_request") as delete:
+                result = proxy.cleanup_superseded_images(
+                    ["busybox:1.37.0-musl"]
+                )
+
+        self.assertEqual(result["removed_count"], 0)
+        self.assertEqual(result["skipped"], [{"ref": "busybox:1.37.0-musl", "reason": "not_found"}])
+        delete.assert_not_called()
 
 
 class RuntimeSourceDriftTests(unittest.TestCase):

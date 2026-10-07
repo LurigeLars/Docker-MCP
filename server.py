@@ -793,9 +793,28 @@ def image_usage_audit():
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
-def cleanup_superseded_images():
-    """Remove only unused tagged images superseded by another in-use image from the same repository."""
-    raw = _json("POST", "/dockerlocal/cleanup-superseded-images", timeout=180) or {}
+def cleanup_superseded_images(image_refs: list[str]):
+    """Remove only explicitly requested, pinned local image refs that no container uses."""
+    if not isinstance(image_refs, list) or not (1 <= len(image_refs) <= 20):
+        raise ValueError("image_refs must contain 1-20 explicit image references")
+
+    clean_refs: list[str] = []
+    for raw_ref in image_refs:
+        ref = _image(str(raw_ref or "").strip())
+        if ref.endswith(":latest"):
+            raise ValueError("Mutable :latest references are not accepted for cleanup")
+        last = ref.rsplit("/", 1)[-1]
+        if not (ref.startswith("sha256:") or "@sha256:" in ref or ":" in last):
+            raise ValueError("Cleanup requires an explicit tag or immutable digest")
+        if ref not in clean_refs:
+            clean_refs.append(ref)
+
+    raw = _json(
+        "POST",
+        "/dockerlocal/cleanup-superseded-images",
+        query={"refs": json.dumps(clean_refs, separators=(",", ":"))},
+        timeout=180,
+    ) or {}
     return json.dumps(raw, separators=(",", ":"))
 
 

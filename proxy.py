@@ -281,7 +281,8 @@ def repo_from_tag(tag: str) -> str:
     return tag[:colon] if colon > slash else tag
 
 
-def cleanup_superseded_images() -> dict:
+def cleanup_superseded_images(refs: list[str]) -> dict:
+    """Delete only explicitly requested local image refs that are unused by every container."""
     rows = engine_json("GET", "/containers/json?all=1") or []
     images = engine_json("GET", "/images/json?all=0") or []
 
@@ -305,33 +306,63 @@ def cleanup_superseded_images() -> dict:
             used_image_ids.add(image_id)
             in_use_by.setdefault(image_id, []).append(name)
 
-    used_repos = set()
+    by_ref: dict[str, list[dict]] = {}
     for image in images:
         image_id = str(image.get("Id") or "")
-        if image_id not in used_image_ids:
-            continue
+        if image_id:
+            by_ref.setdefault(image_id, []).append(image)
         for tag in image.get("RepoTags") or []:
-            used_repos.add(repo_from_tag(str(tag)))
+            by_ref.setdefault(str(tag), []).append(image)
+        for digest in image.get("RepoDigests") or []:
+            by_ref.setdefault(str(digest), []).append(image)
 
     protected_words = re.compile(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep)(?:$|[-_.])")
     candidates = []
     skipped = []
     removed = []
+    seen_ids = set()
 
-    for image in images:
-        image_id = str(image.get("Id") or "")
+    for ref in refs:
+        matches = by_ref.get(ref, [])
+        unique = {}
+        for image in matches:
+            image_id = str(image.get("Id") or "")
+            if image_id:
+                unique[image_id] = image
+
+        if not unique:
+            skipped.append({"ref": ref, "reason": "not_found"})
+            continue
+        if len(unique) != 1:
+            skipped.append({"ref": ref, "reason": "ambiguous_ref"})
+            continue
+
+        image_id, image = next(iter(unique.items()))
         tags = [str(x) for x in (image.get("RepoTags") or [])]
-        if not image_id or image_id in used_image_ids or not tags:
+        if image_id in seen_ids:
+            skipped.append({"ref": ref, "id": image_id[:19], "reason": "duplicate_image"})
             continue
+        seen_ids.add(image_id)
 
-        repos = {repo_from_tag(tag) for tag in tags}
-        if any(protected_words.search(tag) for tag in tags):
-            skipped.append({"id": image_id[:19], "tags": tags, "reason": "protected_name"})
+        if image_id in used_image_ids:
+            skipped.append(
+                {
+                    "ref": ref,
+                    "id": image_id[:19],
+                    "tags": tags,
+                    "reason": "in_use",
+                    "in_use_by": in_use_by.get(image_id, []),
+                }
+            )
             continue
-        if not repos or not all(repo in used_repos for repo in repos):
+        if any(protected_words.search(tag) for tag in tags):
+            skipped.append(
+                {"ref": ref, "id": image_id[:19], "tags": tags, "reason": "protected_name"}
+            )
             continue
 
         candidate = {
+            "ref": ref,
             "id": image_id[:19],
             "tags": tags,
             "size": int(image.get("Size") or 0),
@@ -349,6 +380,7 @@ def cleanup_superseded_images() -> dict:
             detail = body.decode("utf-8", "replace")[:500]
             skipped.append(
                 {
+                    "ref": ref,
                     "id": image_id[:19],
                     "tags": tags,
                     "reason": f"delete_http_{status}",
@@ -357,6 +389,7 @@ def cleanup_superseded_images() -> dict:
             )
 
     return {
+        "requested_refs": refs,
         "examined_images": len(images),
         "candidates": candidates,
         "removed": removed,
@@ -495,7 +528,31 @@ def allowed_custom(method: str, target: str) -> bool:
         return _no_query(parsed)
 
     if method == "POST" and path == "/dockerlocal/cleanup-superseded-images":
-        return _no_query(parsed)
+        if set(query) != {"refs"}:
+            return False
+        raw_refs = _single(query, "refs")
+        if raw_refs is None:
+            return False
+        try:
+            refs = json.loads(raw_refs)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(refs, list) or not (1 <= len(refs) <= 20):
+            return False
+        for ref in refs:
+            if not isinstance(ref, str) or not _image_ref(ref):
+                return False
+            decoded = urllib.parse.unquote(ref)
+            if decoded.endswith(":latest"):
+                return False
+            last = decoded.rsplit("/", 1)[-1]
+            if not (
+                decoded.startswith("sha256:")
+                or "@sha256:" in decoded
+                or ":" in last
+            ):
+                return False
+        return True
 
     if method == "POST" and path == "/dockerlocal/cleanup-stale-mcp-probes":
         if set(query) != {"min_age_seconds"}:
@@ -579,7 +636,9 @@ class Handler(socketserver.BaseRequestHandler):
                 deny(self.request, "403 Forbidden", "Docker API operation blocked")
                 return
             try:
-                result = cleanup_superseded_images()
+                query = _query(parsed_target)
+                refs = json.loads(_single(query, "refs") or "[]")
+                result = cleanup_superseded_images(refs)
                 send_json_response(self.request, "200 OK", result)
             except Exception as exc:
                 print(f"MAINTENANCE ERROR {type(exc).__name__}", file=sys.stderr, flush=True)
