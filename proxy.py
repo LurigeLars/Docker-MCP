@@ -320,7 +320,6 @@ def cleanup_superseded_images(refs: list[str]) -> dict:
     candidates = []
     skipped = []
     removed = []
-    seen_ids = set()
 
     for ref in refs:
         matches = by_ref.get(ref, [])
@@ -339,10 +338,6 @@ def cleanup_superseded_images(refs: list[str]) -> dict:
 
         image_id, image = next(iter(unique.items()))
         tags = [str(x) for x in (image.get("RepoTags") or [])]
-        if image_id in seen_ids:
-            skipped.append({"ref": ref, "id": image_id[:19], "reason": "duplicate_image"})
-            continue
-        seen_ids.add(image_id)
 
         if image_id in used_image_ids:
             skipped.append(
@@ -369,7 +364,7 @@ def cleanup_superseded_images(refs: list[str]) -> dict:
         }
         candidates.append(candidate)
 
-        target = urllib.parse.quote(image_id, safe="")
+        target = urllib.parse.quote(ref, safe="")
         status, _headers, body = engine_request(
             "DELETE",
             f"/images/{target}?force=0&noprune=0",
@@ -543,8 +538,6 @@ def allowed_custom(method: str, target: str) -> bool:
             if not isinstance(ref, str) or not _image_ref(ref):
                 return False
             decoded = urllib.parse.unquote(ref)
-            if decoded.endswith(":latest"):
-                return False
             last = decoded.rsplit("/", 1)[-1]
             if not (
                 decoded.startswith("sha256:")
