@@ -381,7 +381,7 @@ Two execution modes are supported:
 - **Compose mode**: the runner executes only the configured Compose files and allowlisted services.
 - **Script-backed mode**: the runner invokes one absolute, allowlisted PowerShell `.ps1` wrapper with a fixed argument array for the requested operation. This is intended for projects whose wrapper owns required runtime setup such as DPAPI-backed or tmpfs secret injection.
 
-Script-backed projects are whole-project operations: callers must omit the `services` argument. The local config contains the script path and fixed arguments only; credentials and secret values must remain in the project-specific secret store and must not be copied into the maintenance config.
+Script-backed projects are whole-project operations: callers must omit the `services` argument. The local config contains the script path and fixed arguments only; credentials and secret values must remain in the project-specific secret store and must not be copied into the maintenance config. An operation may use an empty argument array when the allowlisted wrapper itself requires no parameters.
 
 ## Allowlisted Windows host maintenance
 
