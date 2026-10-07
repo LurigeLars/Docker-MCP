@@ -728,7 +728,11 @@ def mcp_deployment_audit():
 
 @mcp.tool(annotations=READ_ONLY)
 def image_usage_audit():
-    """Classify local images by container use and identify conservative superseded cleanup candidates."""
+    """Classify local images by container use and report repository-level superseded hints.
+
+    Hints are never declared safe for deletion because an unused local image may still
+    be an active Dockerfile build-stage/base dependency.
+    """
     rows = _json("GET", "/containers/json", query={"all": "1"}) or []
     images = _json("GET", "/images/json", query={"all": "0"}) or []
 
@@ -765,7 +769,7 @@ def image_usage_audit():
         used_by = in_use_by.get(image_id, [])
         repos = {_repo_from_tag(tag) for tag in tags}
         protected = any(protected_words.search(tag) for tag in tags)
-        superseded = bool(tags) and not used_by and bool(repos) and all(repo in used_repos for repo in repos)
+        superseded_hint = bool(tags) and not used_by and bool(repos) and all(repo in used_repos for repo in repos)
         item = {
             "id": image_id,
             "tags": tags,
@@ -773,20 +777,26 @@ def image_usage_audit():
             "size": _bytes_human(float(image.get("Size") or 0)),
             "in_use_by": used_by,
             "protected_name": protected,
-            "superseded_repository_in_use": superseded,
+            "superseded_repository_hint": superseded_hint,
         }
         items.append(item)
-        if superseded and not protected:
+        if superseded_hint and not protected:
             candidates.append(item)
 
     payload = {
         "images": items,
-        "safe_superseded_candidates": candidates,
+        # Compatibility field retained deliberately, but no heuristic-only image is
+        # called safe. Deletion requires an explicit pinned ref through
+        # cleanup_superseded_images.
+        "safe_superseded_candidates": [],
+        "repository_superseded_hints": candidates,
+        "cleanup_requires_explicit_ref": True,
         "summary": {
             "images": len(items),
             "in_use": sum(1 for item in items if item["in_use_by"]),
             "unused": sum(1 for item in items if not item["in_use_by"]),
-            "safe_superseded_candidates": len(candidates),
+            "safe_superseded_candidates": 0,
+            "repository_superseded_hints": len(candidates),
         },
     }
     return json.dumps(payload, separators=(",", ":"))
