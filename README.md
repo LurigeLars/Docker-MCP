@@ -221,7 +221,7 @@ Narrow maintenance:
 - `container_restart`
 - `image_prune_dangling`
 - `cleanup_stale_mcp_containers`
-- `cleanup_superseded_images`
+- `cleanup_superseded_images` — deletes only explicitly supplied pinned image refs after verifying that no running or stopped container uses the resolved image; it never infers deletions from repository names alone
 - `compose_redeploy`
 
 Docker Scout:
