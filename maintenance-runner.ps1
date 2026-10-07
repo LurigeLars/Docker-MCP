@@ -765,7 +765,7 @@ function Invoke-ScriptHandler {
         [Parameter(Mandatory)][string]$JobId,
         [Parameter(Mandatory)][string]$Project,
         [Parameter(Mandatory)][string]$Script,
-        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments,
         [Parameter(Mandatory)][string]$WorkingDirectory
     )
 
@@ -1479,6 +1479,17 @@ param(
 Write-Output "ACTION=$Action"
 Write-Host "HOST=$Action"
 '@ | Set-Content -LiteralPath $TestScript -Encoding utf8
+
+        $ZeroArgs = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @() `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$ZeroArgs.exit_code -ne 0) {
+            throw "Zero-argument script invocation regression."
+        }
 
         $Named = Invoke-ScriptHandler `
             -JobId ([Guid]::NewGuid().ToString("N")) `
