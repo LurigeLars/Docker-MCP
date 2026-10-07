@@ -246,7 +246,7 @@ class ProxyPolicyTests(unittest.TestCase):
                 "POST", "/dockerlocal/cleanup-superseded-images"
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             proxy.allowed_custom(
                 "POST",
                 "/dockerlocal/cleanup-superseded-images?refs=%5B%22busybox%3Alatest%22%5D",
@@ -295,7 +295,43 @@ class SelectiveImageCleanupTests(unittest.TestCase):
         self.assertEqual(result["removed"][0]["ref"], "busybox:1.37.0-musl")
         self.assertNotIn("node:22.23.3-slim", str(result))
         delete.assert_called_once()
-        self.assertIn(busybox_id.replace(":", "%3A"), delete.call_args.args[1])
+        self.assertIn("busybox%3A1.37.0-musl", delete.call_args.args[1])
+
+
+    def test_cleanup_removes_each_explicit_alias_for_same_unused_image(self):
+        image_id = "sha256:" + ("d" * 64)
+        digest_ref = "cloudflare/cloudflared@sha256:" + ("d" * 64)
+        refs = [
+            "cloudflare/cloudflared:2026.9.3",
+            "cloudflare/cloudflared:latest",
+            digest_ref,
+        ]
+        images = [
+            {
+                "Id": image_id,
+                "RepoTags": refs[:2],
+                "RepoDigests": [digest_ref],
+                "Size": 4096,
+            }
+        ]
+
+        with unittest.mock.patch.object(
+            proxy, "engine_json", side_effect=[[], images]
+        ):
+            with unittest.mock.patch.object(
+                proxy,
+                "engine_request",
+                return_value=(200, {}, b""),
+            ) as delete:
+                result = proxy.cleanup_superseded_images(refs)
+
+        self.assertEqual(result["removed_count"], 3)
+        self.assertEqual([item["ref"] for item in result["removed"]], refs)
+        self.assertEqual(delete.call_count, 3)
+        called_targets = [call.args[1] for call in delete.call_args_list]
+        self.assertTrue(any("2026.9.3" in target for target in called_targets))
+        self.assertTrue(any("latest" in target for target in called_targets))
+        self.assertTrue(any("%40sha256%3A" in target for target in called_targets))
 
     def test_cleanup_refuses_image_used_by_any_container(self):
         busybox_id = "sha256:" + ("b" * 64)
