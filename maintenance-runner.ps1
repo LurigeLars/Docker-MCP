@@ -1683,7 +1683,6 @@ try {
                     "compose_file_state",
                     "repo_status",
                     "repo_pull_ff",
-                    "community_probe",
                     "port_registry_status",
                     "scheduled_task_status",
                     "scheduled_task_control",
@@ -1737,45 +1736,6 @@ try {
                         before_head=$Run.before_head; after_head=$Run.after_head
                         changed=$Run.changed; clean=$Run.clean
                     }
-                }
-                elseif ($Action -eq "community_probe") {
-                    $Mode = [string]$Job.operation
-                    if ($Mode -cnotin @("status","sync","study")) {
-                        throw "Invalid Community probe operation."
-                    }
-                    $Script = Join-Path $Root "community-probe-maintenance.ps1"
-                    if (-not (Test-Path -LiteralPath $Script -PathType Leaf)) {
-                        throw "Community probe is not installed."
-                    }
-                    $Run = Invoke-ScriptHandler -JobId $JobId -Project "community-probe" -Script $Script -Arguments @("-Operation",$Mode) -WorkingDirectory $Root
-                    if ([int]$Run.exit_code -ne 0) {
-                        throw "COMMUNITY_PROBE_FAILED"
-                    }
-                    try {
-                        $Parsed = ([string]$Run.output).Trim() | ConvertFrom-Json
-                    }
-                    catch {
-                        throw "COMMUNITY_PROBE_RESPONSE_NOT_JSON"
-                    }
-                    if ([string]$Parsed.status -cne "succeeded" -or
-                        [string]$Parsed.operation -cne $Mode) {
-                        throw "COMMUNITY_PROBE_RESPONSE_INVALID"
-                    }
-                    $Result = @{
-                        job_id=$JobId; status="succeeded"; started_unix=$Started
-                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-                        operation=$Mode
-                    }
-                    foreach ($Name in @(
-                        "details","ref","updated_checkout","test_suites_passed",
-                        "price_window","markets_total","markets_supported",
-                        "markets_unsupported","horizons","production_writes",
-                        "verified_trading_edge"
-                    )) {
-                        $Property = $Parsed.PSObject.Properties[$Name]
-                        if ($null -ne $Property) { $Result[$Name] = $Property.Value }
-                    }
-                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Result
                 }
                 elseif ($Action -eq "port_registry_status") {
                     $State = Get-McpPortRegistryStatus

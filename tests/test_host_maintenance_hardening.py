@@ -26,38 +26,6 @@ import server
 
 
 class HostMaintenanceBoundaryTests(unittest.TestCase):
-    def test_community_probe_accepts_only_fixed_modes_and_no_paths(self):
-        raw = {
-            "status": "succeeded", "operation": "study",
-            "ref": "a" * 40, "test_suites_passed": 8,
-            "markets_supported": 18, "markets_unsupported": 18,
-            "horizons": [{"sessions": 1, "measured": 102, "clusters": 5}],
-            "production_writes": False,
-            "verified_trading_edge": False,
-            "output": "sensitive child process data must not leak",
-            "repo_path": "must not leak",
-        }
-        with unittest.mock.patch.object(
-            server, "_runner_request", return_value=raw
-        ) as runner:
-            response = json.loads(server.community_probe("study"))
-            self.assertEqual("succeeded", response["status"])
-            self.assertEqual(8, response["test_suites_passed"])
-            self.assertFalse(response["production_writes"])
-            self.assertNotIn("output", response)
-            self.assertNotIn("repo_path", response)
-            runner.assert_called_once_with(
-                {"action": "community_probe", "operation": "study"},
-                timeout_seconds=20.0,
-            )
-
-        with unittest.mock.patch.object(server, "_runner_request") as runner:
-            with self.assertRaises(ValueError):
-                server.community_probe("../scripts/execute")
-            with self.assertRaises(ValueError):
-                server.community_probe("rebuild")
-            runner.assert_not_called()
-
     def test_repo_status_uses_alias_only_and_compacts_result(self):
         raw = {
             "job_id": "a" * 32,
