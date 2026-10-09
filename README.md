@@ -224,6 +224,20 @@ Narrow maintenance:
 - `cleanup_superseded_images` — deletes only explicitly supplied local image refs after verifying that no running or stopped container uses the resolved image; multiple aliases must be supplied explicitly and are untagged one by one without force
 - `compose_redeploy`
 
+## Host disk capacity (read-only)
+
+`host_disk_usage` queries the existing allowlisted Windows maintenance runner for
+local fixed-volume capacity and available space. The result includes volume
+letters, total/available/used bytes, used percent and an observation timestamp.
+It takes no user-controlled path or command, does not inspect file names or
+credentials, and cannot clean up or resize disks. The MCP gateway and runtime
+socket-proxy retain their existing restrictions.
+
+Treat `measurement_status=unknown` or a runner timeout as **UNKNOWN**, not
+0% utilization. The host drive measurement is not the same as Docker's internal
+WSL2 virtual-disk usage. The daily watch alerts at roughly 80% used only when
+valid host capacity and available bytes were measured.
+
 Docker Scout:
 
 - `scout_quickview`
