@@ -452,6 +452,21 @@ Two execution modes are supported:
 
 Script-backed projects are whole-project operations: callers must omit the `services` argument. The local config contains the script path and fixed arguments only; credentials and secret values must remain in the project-specific secret store and must not be copied into the maintenance config. An operation may use an empty argument array when the allowlisted wrapper itself requires no parameters.
 
+## AIRSEA aggregate coverage: on-demand read-only access
+
+`airsea_coverage_report` is a dedicated, **no-argument**, read-only inspection
+of the existing AIRSEA-Monitor shadow pilot. It returns up to 14 days of
+privacy-preserving AIS intake counts, acceptance/rejection reasons and coarse
+W/M/E-zone aggregates. This is **not** a Market Engine integration, recurring
+monitor, second collector, or trade signal. No raw vessel records, credentials,
+positions or host paths are accessible to the caller.
+
+The existing Windows Maintenance Runner permits this function only when the
+specific `MarketObservationPilotShadow` scheduled-task alias is already
+allowlisted in local-only host maintenance configuration. Both the current
+DockerLocal MCP image and installed host-side runner must be updated before
+the tool appears. See [AIRSEA read-only report design and release gate](docs/AIRSEA-READONLY-REPORT.md).
+
 ## Allowlisted Windows host maintenance
 
 The same host-side Maintenance Runner can expose a small Windows maintenance surface without exposing PowerShell or a generic process runner.

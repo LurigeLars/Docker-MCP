@@ -55,7 +55,7 @@ services:
       UPSTREAM_PATH: /mcp
       PORT: "8080"
       RATE_PER_MIN: "180"
-      ALLOWED_TOOLS: containers_list,container_inspect,container_logs,container_stats,compose_status,mcp_deployment_audit,image_usage_audit,cleanup_stale_mcp_containers,cleanup_superseded_images,compose_redeploy,maintenance_job_status,maintenance_runner_status,host_disk_usage,repo_status,repo_pull_ff,community_probe,port_registry_status,scheduled_task_status,scheduled_task_control,images_list,image_inspect,image_pull,container_restart,image_prune_dangling,scout_quickview,scout_cves,scout_full_scan,scout_recommendations,scout_sbom,scout_compare
+      ALLOWED_TOOLS: containers_list,container_inspect,container_logs,container_stats,compose_status,mcp_deployment_audit,image_usage_audit,cleanup_stale_mcp_containers,cleanup_superseded_images,compose_redeploy,maintenance_job_status,maintenance_runner_status,host_disk_usage,repo_status,repo_pull_ff,community_probe,port_registry_status,scheduled_task_status,scheduled_task_control,airsea_coverage_report,images_list,image_inspect,image_pull,container_restart,image_prune_dangling,scout_quickview,scout_cves,scout_full_scan,scout_recommendations,scout_sbom,scout_compare
     volumes:
       - ./public/gateway:/app:ro
     depends_on:

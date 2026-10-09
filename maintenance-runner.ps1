@@ -1687,6 +1687,7 @@ try {
                     "port_registry_status",
                     "scheduled_task_status",
                     "scheduled_task_control",
+                    "airsea_coverage_report",
                     "host_disk_usage",
                     "scout_full_scan"
                 )) { throw "Action is not allowlisted." }
@@ -1803,6 +1804,37 @@ try {
                         action=$Run.action; task=$Run.task; operation=$Run.operation
                         before_state=$Run.before_state; after_state=$Run.after_state
                         last_task_result=$Run.last_task_result
+                    }
+                }
+                elseif ($Action -eq "airsea_coverage_report") {
+                    # Explicitly opt-in by the existing local-only scheduled-task
+                    # allowlist. No caller paths, SQL or arbitrary host commands.
+                    if (-not $HostScheduledTasks.ContainsKey("MarketObservationPilotShadow")) {
+                        throw "AIRSEA_REPORT_NOT_ALLOWLISTED"
+                    }
+                    $ReportScript = Join-Path $Root "airsea-coverage-report.py"
+                    if (-not (Test-Path -LiteralPath $ReportScript -PathType Leaf)) {
+                        throw "AIRSEA_REPORT_HELPER_NOT_INSTALLED"
+                    }
+                    $PythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
+                    if ($null -eq $PythonCommand) { throw "AIRSEA_PYTHON_NOT_AVAILABLE" }
+                    $RawReport = (& $PythonCommand.Source -I -B $ReportScript 2>$null | Out-String).Trim()
+                    if ($LASTEXITCODE -ne 0) { throw "AIRSEA_REPORT_NOT_AVAILABLE" }
+                    try {
+                        $Report = $RawReport | ConvertFrom-Json -ErrorAction Stop
+                    } catch {
+                        throw "AIRSEA_REPORT_INVALID_JSON"
+                    }
+                    if ($null -eq $Report -or [string]$Report.status -cne "succeeded") {
+                        throw "AIRSEA_REPORT_UNAVAILABLE"
+                    }
+                    # The Python helper has an exact immutable query surface
+                    # and cannot return raw observation tables. The server
+                    # performs independent strict field whitelisting.
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        report=$Report
                     }
                 }
                 elseif ($Action -eq "host_disk_usage") {
