@@ -980,6 +980,16 @@ def runtime_supervisor_status(log_tail: int = 40):
 
 
 @mcp.tool(annotations=READ_ONLY)
+def host_disk_usage():
+    """Read fixed-drive capacity and free space from Windows, without shell access or cleanup."""
+    return _compact_runner_request(
+        {"action": "host_disk_usage"},
+        ("measurement_status", "measured_unix", "drives"),
+        timeout_seconds=12.0,
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
 def maintenance_runner_status():
     """Report whether the host-side allowlisted Docker maintenance runner is alive."""
     heartbeat = CONTROL_DIR / "runner-heartbeat.json"
