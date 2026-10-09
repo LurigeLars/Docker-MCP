@@ -878,6 +878,27 @@ def repo_pull_ff(repo: str):
     )
 
 
+@mcp.tool(annotations=WRITE_SAFE)
+def community_probe(operation: Literal["status", "sync", "study"]):
+    """Fixed Trade Spine Community shadow checkout: inspect, sync or bounded research.
+
+    This is *not* a shell, arbitrary repo runner, generic ref selector, or
+    production trading capability. The Windows host runner must have an
+    explicit local, exact-path allowlist; no caller-supplied paths, branches,
+    flags or commands are accepted. Study is read-only on trading data.
+    """
+    if operation not in {"status", "sync", "study"}:
+        raise ValueError("Unsupported Community probe operation")
+    return _compact_runner_request(
+        {"action": "community_probe", "operation": operation},
+        ("operation", "details", "ref", "updated_checkout", "test_suites_passed",
+         "price_window", "markets_total", "markets_supported",
+         "markets_unsupported", "horizons", "production_writes",
+         "verified_trading_edge"),
+        timeout_seconds=20.0,
+    )
+
+
 @mcp.tool(annotations=READ_ONLY)
 def port_registry_status():
     """Read the persistent host MCP port registry and current listener ownership."""
