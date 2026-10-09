@@ -8,7 +8,7 @@ $Control = Join-Path $env:LOCALAPPDATA "DockerLocalMCP\control"
 
 New-Item -ItemType Directory -Force -Path $Root, $GatewayDir, $Control | Out-Null
 
-foreach ($file in @("server.py","proxy.py","Dockerfile","Dockerfile.proxy","compose.proxy.yaml","compose.public.yaml","maintenance-runner.ps1","install-maintenance-runner.ps1")) {
+foreach ($file in @("server.py","proxy.py","Dockerfile","Dockerfile.proxy","compose.proxy.yaml","compose.public.yaml","maintenance-runner.ps1","port-registry.ps1","airsea-coverage-report.py","install-maintenance-runner.ps1")) {
     Copy-Item (Join-Path $Source $file) (Join-Path $Root $file) -Force
 }
 Copy-Item (Join-Path $Source "public\gateway\gateway.mjs") (Join-Path $GatewayDir "gateway.mjs") -Force
