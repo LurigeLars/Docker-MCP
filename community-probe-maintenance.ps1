@@ -22,7 +22,7 @@ function Get-Settings {
   return @{Path=$Path; Origin=[string]$Cfg.origin_url}
 }
 function Git {
-  param([hashtable]$Cfg,[string[]]$Args,[string]$Failure)
+  param([hashtable]$Cfg,[string[]]$GitArguments,[string]$Failure)
   $Hooks = Join-Path $Root "empty-git-hooks"
   New-Item -ItemType Directory -Force -Path $Hooks | Out-Null
   $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
@@ -33,7 +33,7 @@ function Git {
     $env:GIT_TERMINAL_PROMPT = "0"
     $env:GCM_INTERACTIVE = "Never"
     $ErrorActionPreference = "Continue"
-    $Text = (& $GitExe -c "core.hooksPath=$Hooks" -c "submodule.recurse=false" -C $Cfg.Path @Args 2>&1 | ForEach-Object { $_.ToString() } | Out-String).Trim()
+    $Text = (& $GitExe -c "core.hooksPath=$Hooks" -c "submodule.recurse=false" -C $Cfg.Path @GitArguments 2>&1 | ForEach-Object { $_.ToString() } | Out-String).Trim()
     $Exit = [int]$LASTEXITCODE
   }
   finally {
@@ -74,11 +74,11 @@ function Sync-Branch {
   return @{before_head=$Before.head; after_head=$After.head; changed=($Before.head -cne $After.head)}
 }
 function Run-FixedUV {
-  param([string]$RepoPath,[string[]]$Args,[int]$Timeout)
+  param([string]$RepoPath,[string[]]$UvArguments,[int]$Timeout)
   $Exe = (Get-Command uv.exe -ErrorAction Stop).Source
   $Out = Join-Path $Root ("community-probe-" + [guid]::NewGuid().ToString("N") + ".out")
   $Err = $Out + ".err"
-  $AllArgs = @("run","--python","3.12","--with-requirements","requirements-mcp.txt","python") + $Args
+  $AllArgs = @("run","--python","3.12","--with-requirements","requirements-mcp.txt","python") + $UvArguments
   foreach ($Text in $AllArgs) {
     if ($Text -notmatch '^[A-Za-z0-9_./:-]+$') { throw "PROBE_UNSAFE_ARG" }
   }
