@@ -47,7 +47,6 @@ tools:
   - name: maintenance_runner_status
   - name: repo_status
   - name: repo_pull_ff
-  - name: community_probe
   - name: scheduled_task_status
   - name: airsea_coverage_report
   - name: scheduled_task_control
