@@ -1449,6 +1449,31 @@ function Run-ProjectRedeploy {
     }
 }
 
+# Read-only fixed-volume telemetry; no caller paths and no mutating operations.
+function Get-HostDiskUsage {
+    $Drives = @()
+    foreach ($Drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($Drive.DriveType -ne [System.IO.DriveType]::Fixed -or -not $Drive.IsReady) { continue }
+            $Total = [int64]$Drive.TotalSize
+            $Available = [int64]$Drive.AvailableFreeSpace
+            if ($Total -le 0 -or $Available -lt 0 -or $Available -gt $Total) { continue }
+            $Letter = ([string]$Drive.Name).Substring(0, 2).ToUpperInvariant()
+            if ($Letter -notmatch '^[A-Z]:$') { continue }
+            $Used = $Total - $Available
+            $Drives += @{
+                volume = $Letter
+                total_bytes = $Total
+                available_bytes = $Available
+                used_bytes = $Used
+                used_percent = [Math]::Round((100.0 * [double]$Used / [double]$Total), 1)
+            }
+        }
+        catch { continue }
+    }
+    return @($Drives | Sort-Object volume)
+}
+
 function Invoke-RunnerSelfTest {
     $ExpectedCreatedUtc = [DateTime]::SpecifyKind(
         [DateTime]::new(2026, 10, 1, 2, 39, 48),
@@ -1662,6 +1687,7 @@ try {
                     "port_registry_status",
                     "scheduled_task_status",
                     "scheduled_task_control",
+                    "host_disk_usage",
                     "scout_full_scan"
                 )) { throw "Action is not allowlisted." }
 
@@ -1777,6 +1803,18 @@ try {
                         action=$Run.action; task=$Run.task; operation=$Run.operation
                         before_state=$Run.before_state; after_state=$Run.after_state
                         last_task_result=$Run.last_task_result
+                    }
+                }
+                elseif ($Action -eq "host_disk_usage") {
+                    # No client-supplied disk paths. Return aggregate capacity only.
+                    $Drives = @(Get-HostDiskUsage)
+                    $MeasurementStatus = if ($Drives.Count -gt 0) { "measured" } else { "unknown" }
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        measurement_status=$MeasurementStatus
+                        measured_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        drives=$Drives
                     }
                 }
                 elseif ($Action -eq "scout_full_scan") {
