@@ -1,6 +1,6 @@
-# Refresh a running DockerLocal MCP public image from this vetted, clean main
-# checkout, preserving existing Cloudflare Access credentials and Compose
-# customizations. Never prunes containers/images or deletes Community data.
+# Refresh DockerLocal's tagged MCP image from a clean reviewed main checkout.
+# Preserves installed Compose, allowlists, and Cloudflare Access credentials.
+# Never prunes containers/images or deletes Community data.
 [CmdletBinding()]
 param([Parameter(Mandatory)][switch]$Apply)
 
@@ -51,6 +51,22 @@ if ($ServerText -match 'def\s+community_probe\b' -or
     throw 'Refusing: source still exposes Community probe.'
 }
 
+# Preserve the installed Compose and gateway.env EXACTLY. Tool authorization
+# formats may vary across deployments (YAML mapping/list, env_file, overrides);
+# retired server tools disappear from MCP tools/list once the backend image
+# is rebuilt. It is unsafe and unnecessary to rewrite an installed allowlist.
+# Validate the existing Compose before copying/building anything.
+Push-Location $Target
+try {
+    & docker.exe compose -f compose.public.yaml config --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Refusing: existing Compose configuration is invalid.'
+    }
+}
+finally { Pop-Location }
+$ComposeHashBefore = (Get-FileHash -LiteralPath $ComposePath -Algorithm SHA256).Hash
+$GatewayEnvHashBefore = (Get-FileHash -LiteralPath $EnvPath -Algorithm SHA256).Hash
+
 # Back up only the overwritten non-secret runtime code files, never env data.
 $Backup = Join-Path $env:LOCALAPPDATA ('DockerLocalMCP\backups\retire-community-' +
     (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -64,29 +80,19 @@ foreach ($Relative in $CopyPaths) {
     }
 }
 Copy-Item -LiteralPath $ComposePath -Destination (Join-Path $Backup 'compose.public.yaml')
-
-# Retain customized Compose settings. Remove only the retired allowlist token.
-$Pattern = '(?m)^(\s*ALLOWED_TOOLS:\s*)([^\r\n]+)$'
-if ($ComposeText -notmatch $Pattern) {
-    throw 'Refusing: existing ALLOWED_TOOLS configuration cannot be verified.'
-}
-$Match = [regex]::Match($ComposeText,$Pattern)
-$Tools = @($Match.Groups[2].Value.Split(',') | ForEach-Object { $_.Trim() } |
-    Where-Object { $_ -ne 'community_probe' -and $_ -ne '' })
-$NewLine = $Match.Groups[1].Value + ($Tools -join ',')
-$UpdatedCompose = $ComposeText.Substring(0,$Match.Index) + $NewLine +
-    $ComposeText.Substring($Match.Index+$Match.Length)
 foreach ($Relative in $CopyPaths) {
     $Dest = Join-Path $Target $Relative
     New-Item -ItemType Directory -Force -Path (Split-Path $Dest) | Out-Null
     Copy-Item -LiteralPath (Join-Path $Source $Relative) -Destination $Dest -Force
-    if ((Get-FileHash (Join-Path $Source $Relative) -Algorithm SHA256).Hash -ne
-        (Get-FileHash $Dest -Algorithm SHA256).Hash) {
+    if ((Get-FileHash -LiteralPath (Join-Path $Source $Relative) -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $Dest -Algorithm SHA256).Hash) {
         throw "Failed to verify copied file: $Relative"
     }
 }
-[IO.File]::WriteAllText($ComposePath,$UpdatedCompose,
-    [Text.UTF8Encoding]::new($false))
+if ((Get-FileHash -LiteralPath $ComposePath -Algorithm SHA256).Hash -ne $ComposeHashBefore -or
+    (Get-FileHash -LiteralPath $EnvPath -Algorithm SHA256).Hash -ne $GatewayEnvHashBefore) {
+    throw 'Refusing: local Compose or gateway.env changed unexpectedly.'
+}
 
 # Compose declares image: dockerlocal-mcp:local but no build:, so the
 # Docker-MCP compose_redeploy tool cannot rebuild the Python MCP image.
