@@ -183,6 +183,11 @@ class AirseaReportTests(unittest.TestCase):
         self.assertIn('Copy-Item -LiteralPath $SourceAirseaReporter', installer)
         manifest = (ROOT / "dockerlocal.yaml").read_text(encoding="utf-8")
         self.assertIn("  - name: airsea_coverage_report", manifest)
+        public_compose = (ROOT / "compose.public.yaml").read_text(encoding="utf-8")
+        self.assertIn("scheduled_task_control,airsea_coverage_report,images_list", public_compose)
+        for installer_path in ("enable-host-maintenance.ps1", "install-public.ps1"):
+            installer = (ROOT / installer_path).read_text(encoding="utf-8")
+            self.assertIn('"airsea-coverage-report.py"', installer)
 
 
 if __name__ == "__main__":
