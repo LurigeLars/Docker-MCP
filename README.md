@@ -361,61 +361,6 @@ The included gateway verifies the Cloudflare Access JWT, the configured audience
 
 See [docs/CONNECTING.md](docs/CONNECTING.md) for the full local and remote connection flow.
 
-## One-time, exact allowlist for the Trade Spine Community research probe
-
-**Opt-in only.** The Docker MCP server's existing `repo_status` / `repo_pull_ff`
-operate exclusively on locally allowlisted, clean `main` checkouts.
-They cannot safely update the *detached research branch* used by
-`C:\\ClaudeCode\\trade-spine-community-probe`. Do **not** widen ordinary
-`repo_pull_ff` to accept arbitrary branches or shell commands.
-
-The dedicated `community_probe` tool is limited to three exact operations:
-`status`, `sync`, and `study`. It has **no caller-supplied paths, dates,
-Git refs, arbitrary scripts, environment variables or command arguments**.
-It uses an explicit local allowlist file
-`%LOCALAPPDATA%\\DockerLocalMCP\\community-probe.local.json` and rejects
-any other checkout directory name, Git origin, or branch. Remote source
-is limited to `LurigeLars/trade-spine` and
-`feature/trade-spine-research-job-supervisor`.
-
-To activate *once* on the Windows host, after reviewing/merging this change
-and pulling an updated Docker-MCP checkout, run:
-
-```powershell
-Set-Location '<YOUR_EXISTING_DOCKER-MCP_CHECKOUT>'
-.\\enable-community-probe.ps1 -RepositoryPath 'C:\\ClaudeCode\\trade-spine-community-probe'
-```
-
-The installer validates exact Git root, clean detached checkout, origin
-and configured feature ref, then creates **only** the fixed research
-allowlist. It preserves the Cloudflare Access gateway configuration,
-copies the host runner, rebuilds the MCP service, and restarts the
-maintenance runner. No trading orders or research schedulers are installed.
-
-Then from ChatGPT via Docker MCP:
-- `community_probe(operation="status")` checks exact checkout state.
-- `community_probe(operation="sync")` fetches the **single fixed
-  source branch** and detaches a clean checkout onto the remote ref.
-- `community_probe(operation="study")` performs that same guarded sync,
-  runs eight fixed unit-test suites, and invokes the already existing
-  `--study-universe` **read-only** pipeline with a bounded rolling
-  50-day TradingView OHLCV window. Its returned JSON contains only
-  status, tested suites, research market counts, 1/5/20-day aggregate
-  outcomes, and the checked-out revision. It never claims verified
-  alpha, runs a production write mode, or migrates the research task.
-
-Long-running calls return a maintenance `job_id`, which can be polled via
-`maintenance_job_status`. The API cannot trigger arbitrary PowerShell,
-Docker, Git, network destinations or trading operations. Code on the
-allowlisted Git branch still executes with the runner's Windows user
-permissions; this trusted branch must remain review-controlled and must
-never be treated as an untrusted PR review runner.
-
-**Safety status:** Keep the PR draft until its static Python security tests
-and Windows PowerShell parsing/runner activation are verified. Simply
-adding an alias to `host-maintenance.local.json` is insufficient; its
-ordinary repo maintenance policy remains restricted to `main`.
-
 ## Host-side Compose maintenance runner
 
 The Docker MCP container deliberately does not receive arbitrary host filesystem access. Narrow Compose redeploy operations are therefore delegated to a small Windows runner.
