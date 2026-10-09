@@ -43,6 +43,7 @@ tools:
   - name: cleanup_superseded_images
   - name: compose_redeploy
   - name: maintenance_job_status
+  - name: host_disk_usage
   - name: maintenance_runner_status
   - name: repo_status
   - name: repo_pull_ff
