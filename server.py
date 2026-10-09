@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import struct
@@ -13,6 +14,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Literal
 
 from fastmcp import FastMCP
@@ -933,7 +935,8 @@ def airsea_coverage_report():
     if raw.get("status") != "succeeded":
         return json.dumps({"status": "unavailable", "reason": "HOST_REPORT_UNAVAILABLE"}, separators=(",", ":"))
     report = raw.get("report")
-    if not isinstance(report, dict) or report.get("status") != "succeeded":
+    if (not isinstance(report, dict) or report.get("status") != "succeeded"
+            or report.get("schema_version") != 2 or report.get("read_only") is not True):
         return json.dumps({"status": "unavailable", "reason": "REPORT_INVALID"}, separators=(",", ":"))
     allowed_counters = (
         "accepted_positions_total", "accepted_static_total",
@@ -960,7 +963,8 @@ def airsea_coverage_report():
             out = {"day": day}
             for key in allowed_counters:
                 number = item[key]
-                if type(number) not in (int, float) or number < 0:
+                if (type(number) not in (int, float) or number < 0
+                        or not math.isfinite(number)):
                     raise ValueError("Invalid counter")
                 out[key] = number
             for key in ("zone_message_counts", "zone_unique_vessels"):
@@ -1002,15 +1006,26 @@ def airsea_coverage_report():
             clean.append(out)
     except (KeyError, TypeError, ValueError, OverflowError):
         return json.dumps({"status": "unavailable", "reason": "REPORT_INVALID"}, separators=(",", ":"))
-    # Whitelist top-level properties too; do not surface arbitrary host metadata.
+    # Whitelist top-level properties too; accept only timezone-aware ISO stamps.
+    def safe_stamp(value: Any) -> str | None:
+        if not isinstance(value, str) or len(value) > 40:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return None
+            return value
+        except ValueError:
+            return None
+
     output = {
         "status": "succeeded",
         "source": "AIRSEA_MONITOR_SHADOW",
         "schema_version": 2,
         "read_only": True,
-        "as_of_utc": report.get("as_of_utc") if isinstance(report.get("as_of_utc"), str) else None,
-        "zone_tracking_since_utc": report.get("zone_tracking_since_utc") if isinstance(report.get("zone_tracking_since_utc"), str) else None,
-        "intake_tracking_since_utc": report.get("intake_tracking_since_utc") if isinstance(report.get("intake_tracking_since_utc"), str) else None,
+        "as_of_utc": safe_stamp(report.get("as_of_utc")),
+        "zone_tracking_since_utc": safe_stamp(report.get("zone_tracking_since_utc")),
+        "intake_tracking_since_utc": safe_stamp(report.get("intake_tracking_since_utc")),
         "days": clean,
         "interpretation": "RECEPTION_OBSERVATIONS_NOT_PHYSICAL_TRAFFIC",
     }
