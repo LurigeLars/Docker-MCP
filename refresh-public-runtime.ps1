@@ -118,9 +118,27 @@ $Leftovers = @(
 foreach ($Item in $Leftovers) {
     if (Test-Path -LiteralPath $Item) { Write-Host "PRESENT: $Item" }
 }
-Get-ScheduledTask -ErrorAction SilentlyContinue |
-    Where-Object { $_.TaskName -match '(?i)Community|TradeSpineResearchJobs' -or
-        @($_.Actions | Where-Object {
-            [string]$_.Arguments -match '(?i)research_job_runner\.py'
-        }).Count -gt 0 } |
-    Select-Object TaskName,State | Format-Table -AutoSize
+# This is post-deployment diagnostic only. A scheduled task's action object
+# may omit Arguments entirely; never fail a successful deployment over that.
+try {
+    Get-ScheduledTask -ErrorAction Stop |
+        Where-Object {
+            $task = $_
+            if ([string]$task.TaskName -match '(?i)Community|TradeSpineResearchJobs') {
+                return $true
+            }
+            foreach ($action in @($task.Actions)) {
+                if ($null -eq $action) { continue }
+                $argumentProperty = $action.PSObject.Properties['Arguments']
+                if ($null -ne $argumentProperty -and
+                    [string]$argumentProperty.Value -match '(?i)research_job_runner\.py') {
+                    return $true
+                }
+            }
+            return $false
+        } |
+        Select-Object TaskName,State | Format-Table -AutoSize
+}
+catch {
+    Write-Warning 'Optional Community scheduled-task diagnostic could not be completed.'
+}
