@@ -96,8 +96,12 @@ class AirseaReportTests(unittest.TestCase):
             for private in ("987654321", "should-not-leak", str(path)):
                 self.assertNotIn(private, serialized)
             # Source database was not migrated or rewritten.
-            self.assertEqual(sqlite3.connect(path).execute(
-                "SELECT COUNT(*) FROM raw_vessel").fetchone()[0], 1)
+            remaining = sqlite3.connect(path)
+            try:
+                self.assertEqual(remaining.execute(
+                    "SELECT COUNT(*) FROM raw_vessel").fetchone()[0], 1)
+            finally:
+                remaining.close()
 
     def test_missing_database_is_explicitly_unavailable(self):
         with tempfile.TemporaryDirectory() as d:
