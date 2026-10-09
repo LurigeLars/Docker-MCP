@@ -920,6 +920,103 @@ def scheduled_task_status(task: str):
     )
 
 
+@mcp.tool(annotations=READ_ONLY)
+def airsea_coverage_report():
+    """Read only aggregated AIRSEA shadow-pilot AIS coverage and intake quality.
+
+    No caller-provided paths, SQL, vessel identifiers, zones, time ranges,
+    commands or raw AIS records. Requires a locally allowlisted pilot task.
+    """
+    raw = _runner_request({"action": "airsea_coverage_report"}, timeout_seconds=15.0)
+    if raw.get("status") == "timeout":
+        return json.dumps({"status": "timeout", "reason": "HOST_REPORT_PENDING"}, separators=(",", ":"))
+    if raw.get("status") != "succeeded":
+        return json.dumps({"status": "unavailable", "reason": "HOST_REPORT_UNAVAILABLE"}, separators=(",", ":"))
+    report = raw.get("report")
+    if not isinstance(report, dict) or report.get("status") != "succeeded":
+        return json.dumps({"status": "unavailable", "reason": "REPORT_INVALID"}, separators=(",", ":"))
+    allowed_counters = (
+        "accepted_positions_total", "accepted_static_total",
+        "coarse_crossings", "tanker_confirmed_crossings", "ais_connected_seconds",
+        "ais_disconnects", "adsb_snapshots", "opensky_snapshots", "source_errors",
+    )
+    allowed_intake = (
+        "frames", "accepted", "accepted_positions", "accepted_static",
+        "rejected", "processing_errors",
+    )
+    reason_keys = (
+        "bad_json", "non_object", "unsupported", "structure", "identifier",
+        "position", "outside_box", "duplicate_stale",
+    )
+    days = report.get("days")
+    if not isinstance(days, list) or len(days) > 14:
+        return json.dumps({"status": "unavailable", "reason": "REPORT_INVALID"}, separators=(",", ":"))
+    clean = []
+    try:
+        for item in days:
+            day = item["day"]
+            if not isinstance(day, str) or not re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", day):
+                raise ValueError("Invalid day")
+            out = {"day": day}
+            for key in allowed_counters:
+                number = item[key]
+                if type(number) not in (int, float) or number < 0:
+                    raise ValueError("Invalid counter")
+                out[key] = number
+            for key in ("zone_message_counts", "zone_unique_vessels"):
+                zone_values = item[key]
+                out[key] = {}
+                for zone in ("W", "M", "E"):
+                    value = zone_values[zone]
+                    if type(value) is not int or value < 0:
+                        raise ValueError("Invalid zone count")
+                    out[key][zone] = value
+            for key in ("zone_tracking_phase", "intake_tracking_phase"):
+                phase = item[key]
+                if phase not in (
+                    "UNKNOWN", "PRE_INSTRUMENTATION_UNKNOWN",
+                    "PARTIAL_INSTALL_DAY", "POST_INSTALLATION"
+                ):
+                    raise ValueError("Invalid phase")
+                out[key] = phase
+            intake = item.get("intake")
+            if intake is None:
+                out["intake"] = None
+            else:
+                out["intake"] = {}
+                for key in allowed_intake:
+                    value = intake[key]
+                    if type(value) is not int or value < 0:
+                        raise ValueError("Invalid intake counter")
+                    out["intake"][key] = value
+                reasons = intake["rejection_reasons"]
+                out["intake"]["rejection_reasons"] = {}
+                for key in reason_keys:
+                    value = reasons[key]
+                    if type(value) is not int or value < 0:
+                        raise ValueError("Invalid reject counter")
+                    out["intake"]["rejection_reasons"][key] = value
+                if intake["accounting"] not in ("OK", "INCONSISTENT"):
+                    raise ValueError("Invalid accounting")
+                out["intake"]["accounting"] = intake["accounting"]
+            clean.append(out)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return json.dumps({"status": "unavailable", "reason": "REPORT_INVALID"}, separators=(",", ":"))
+    # Whitelist top-level properties too; do not surface arbitrary host metadata.
+    output = {
+        "status": "succeeded",
+        "source": "AIRSEA_MONITOR_SHADOW",
+        "schema_version": 2,
+        "read_only": True,
+        "as_of_utc": report.get("as_of_utc") if isinstance(report.get("as_of_utc"), str) else None,
+        "zone_tracking_since_utc": report.get("zone_tracking_since_utc") if isinstance(report.get("zone_tracking_since_utc"), str) else None,
+        "intake_tracking_since_utc": report.get("intake_tracking_since_utc") if isinstance(report.get("intake_tracking_since_utc"), str) else None,
+        "days": clean,
+        "interpretation": "RECEPTION_OBSERVATIONS_NOT_PHYSICAL_TRAFFIC",
+    }
+    return json.dumps(output, separators=(",", ":"))
+
+
 @mcp.tool(annotations=WRITE_SAFE)
 def scheduled_task_control(
     task: str,
