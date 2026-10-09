@@ -955,7 +955,7 @@ def airsea_coverage_report():
     try:
         for item in days:
             day = item["day"]
-            if not isinstance(day, str) or not re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", day):
+            if not isinstance(day, str) or not re.fullmatch("[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
                 raise ValueError("Invalid day")
             out = {"day": day}
             for key in allowed_counters:
