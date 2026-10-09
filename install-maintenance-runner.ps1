@@ -3,12 +3,15 @@ $ErrorActionPreference = "Stop"
 $Root = Join-Path $env:LOCALAPPDATA "DockerLocalMCP"
 $SourceRunner = Join-Path $PSScriptRoot "maintenance-runner.ps1"
 $SourcePortRegistry = Join-Path $PSScriptRoot "port-registry.ps1"
+$SourceAirseaReporter = Join-Path $PSScriptRoot "airsea-coverage-report.py"
 $Runner = Join-Path $Root "maintenance-runner.ps1"
 $PortRegistry = Join-Path $Root "port-registry.ps1"
+$AirseaReporter = Join-Path $Root "airsea-coverage-report.py"
 $Control = Join-Path $Root "control"
 
 if (-not (Test-Path -LiteralPath $SourceRunner -PathType Leaf)) { throw "maintenance-runner.ps1 must be next to this installer." }
 if (-not (Test-Path -LiteralPath $SourcePortRegistry -PathType Leaf)) { throw "port-registry.ps1 must be next to this installer." }
+if (-not (Test-Path -LiteralPath $SourceAirseaReporter -PathType Leaf)) { throw "airsea-coverage-report.py must be next to this installer." }
 
 New-Item -ItemType Directory -Force -Path $Root, $Control | Out-Null
 foreach ($Name in @("requests", "processing", "results")) {
@@ -17,6 +20,7 @@ foreach ($Name in @("requests", "processing", "results")) {
 
 Copy-Item -LiteralPath $SourceRunner -Destination $Runner -Force
 Copy-Item -LiteralPath $SourcePortRegistry -Destination $PortRegistry -Force
+Copy-Item -LiteralPath $SourceAirseaReporter -Destination $AirseaReporter -Force
 
 $Tokens = $null
 $ParseErrors = $null
