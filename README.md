@@ -91,15 +91,15 @@ not exposed as a generic MCP command surface.
 
 The following are intentionally outside the MCP contract:
 
-- arbitrary `docker exec`;
-- arbitrary `docker run`;
-- a general shell or PowerShell runner;
-- raw Docker socket access;
-- arbitrary host filesystem paths;
-- arbitrary Git remotes or branches;
-- arbitrary Compose files/build contexts;
-- generic container deletion;
-- arbitrary Scheduled Task names;
+- arbitrary `docker exec`.
+- arbitrary `docker run`.
+- a general shell or PowerShell runner.
+- raw Docker socket access.
+- arbitrary host filesystem paths.
+- arbitrary Git remotes or branches.
+- arbitrary Compose files/build contexts.
+- generic container deletion.
+- arbitrary Scheduled Task names.
 - arbitrary process arguments.
 
 This is the core design constraint, not an accidental limitation.
@@ -108,15 +108,15 @@ This is the core design constraint, not an accidental limitation.
 
 The maintained deployment uses several layers rather than trusting one gateway:
 
-- the MCP server runs non-root;
-- the model-facing container never receives the raw Docker socket;
+- the MCP server runs non-root.
+- the model-facing container never receives the raw Docker socket.
 - the restricted proxy exposes only the Docker API operations required by the reviewed
   tools;
 - `container_inspect` deliberately omits environment variables and command lines while
   still exposing fields needed for privilege audits;
 - repository maintenance is fail-closed: exact local root, clean checkout, expected
   HTTPS GitHub origin, `main` branch and fast-forward-only update;
-- host maintenance resolves aliases from ignored local configuration;
+- host maintenance resolves aliases from ignored local configuration.
 - public access, when enabled, is authenticated through Cloudflare Access and a reviewed
   gateway;
 - machine paths, identities, allowlists, Access configuration and credentials remain
@@ -170,9 +170,9 @@ front of it.
 
 Requirements:
 
-- Windows with Docker Desktop;
-- Docker MCP Toolkit;
-- PowerShell;
+- Windows with Docker Desktop.
+- Docker MCP Toolkit.
+- PowerShell.
 - Docker Engine running.
 
 Install the local profile from the repository root:
@@ -325,8 +325,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 The installer prompts at runtime for:
 
-- Cloudflare Access team domain;
-- Access application audience tag;
+- Cloudflare Access team domain.
+- Access application audience tag.
 - allowed identity email.
 
 Those values are written only to the ignored local file:
@@ -373,9 +373,9 @@ Install it with:
 
 The runner accepts only:
 
-- an allowlisted project;
-- an allowlisted service for direct Compose projects;
-- `redeploy_current`;
+- an allowlisted project.
+- an allowlisted service for direct Compose projects.
+- `redeploy_current`.
 - `rebuild_and_redeploy`.
 
 By default only this project's own Compose services are allowlisted.
@@ -446,11 +446,11 @@ Example shape:
 
 Repository pulls fail closed unless all of these are true:
 
-- the configured path is the exact Git repository root;
-- the current branch is `main`;
-- tracked and untracked status is clean;
-- there are no unresolved index conflicts;
-- the current `origin` URL exactly matches the local allowlist;
+- the configured path is the exact Git repository root.
+- the current branch is `main`.
+- tracked and untracked status is clean.
+- there are no unresolved index conflicts.
+- the current `origin` URL exactly matches the local allowlist.
 - the update can complete with `--ff-only`.
 
 The runner also disables Git hooks and recursive submodule updates for maintenance Git calls, and disables interactive credential prompts. The MCP schema has no path, remote, branch, argument or command-string field.
@@ -581,18 +581,18 @@ Do not add a runtime merely because it is Dockerized. Persistent `.env` configur
 
 Do not commit:
 
-- `public/gateway.env`;
-- `.env` files;
-- API keys, tokens, passwords, Access audience values, or identity allowlists;
-- `maintenance-projects.local.json`;
+- `public/gateway.env`.
+- `.env` files.
+- API keys, tokens, passwords, Access audience values, or identity allowlists.
+- `maintenance-projects.local.json`.
 - runtime logs, heartbeats, or maintenance job files.
 
 ## Dependency and security automation
 
 This repository includes:
 
-- Dependabot version updates for Python, Dockerfiles, Docker Compose and GitHub Actions;
-- CodeQL analysis for Python, JavaScript/TypeScript and GitHub Actions;
+- Dependabot version updates for Python, Dockerfiles, Docker Compose and GitHub Actions.
+- CodeQL analysis for Python, JavaScript/TypeScript and GitHub Actions.
 - GitHub Dependabot vulnerability alerts through the repository's security settings.
 
 ## License
