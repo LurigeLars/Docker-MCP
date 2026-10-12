@@ -46,6 +46,38 @@ Run the repository smoke test:
 .\test.ps1
 ```
 
+### Maintenance Runner control directory
+
+The runner-backed tools (`repo_status`, `repo_pull_ff`, `scheduled_task_status`,
+`scheduled_task_control`, `host_disk_usage`, `compose_redeploy`, ...) exchange job files
+with the host Maintenance Runner through `/control`. `install.ps1` therefore adds a bind
+mount of `%LOCALAPPDATA%\DockerLocalMCP\control` to the **installed** catalog entry. The
+entry in Git stays free of machine paths.
+
+Docker MCP Gateway refuses writable bind mounts outside its allowed roots, and then does
+not start the server at all (the profile lists zero DockerLocal tools). Every process that
+runs the gateway for this profile must allow exactly that directory:
+
+```text
+MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS=<LOCALAPPDATA>\DockerLocalMCP\control
+```
+
+For a stdio client, set it in that client's server entry, for example:
+
+```json
+"dockerlocal": {
+  "command": "docker",
+  "args": ["mcp", "gateway", "run", "--profile", "dockerlocal"],
+  "env": {
+    "MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS": "<LOCALAPPDATA>\\DockerLocalMCP\\control"
+  }
+}
+```
+
+Add the variable to every client **before** re-running `install.ps1` on an existing
+installation; it is harmless while the installed entry has no mount. Allow only the
+control directory, never a parent such as the user profile.
+
 ## Cloudflare architecture
 
 ```text

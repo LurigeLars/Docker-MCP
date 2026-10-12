@@ -275,7 +275,9 @@ The installer:
 1. builds the restricted Docker API proxy;
 2. verifies the proxy on loopback;
 3. builds the Docker MCP server image;
-4. installs the local Docker MCP catalog entry;
+4. installs the local Docker MCP catalog entry, adding the Maintenance Runner control
+   directory bind mount (`%LOCALAPPDATA%\DockerLocalMCP\control` → `/control`) to the
+   installed copy only;
 5. adds the server to the selected Docker MCP profile;
 6. enables the server tools and performs tool discovery.
 
@@ -298,6 +300,11 @@ docker mcp client connect <client-name> --profile dockerlocal
 ```
 
 The exact client names supported by Docker MCP Toolkit depend on the installed Docker Desktop version.
+
+Because of the control-directory mount, every process that runs the gateway for this
+profile must set `MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS` to that directory;
+otherwise Docker MCP Gateway refuses to start the server. See
+[docs/CONNECTING.md](docs/CONNECTING.md#maintenance-runner-control-directory).
 
 ## Remote connection through Cloudflare Access
 

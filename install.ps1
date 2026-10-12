@@ -45,6 +45,22 @@ finally { Pop-Location }
 
 Copy-Item (Join-Path $InstallDir "dockerlocal.yaml") $EntryPath -Force
 
+# The catalog entry in Git carries no machine path. Bind the Maintenance Runner
+# control directory into the installed copy only, so the local profile reaches the
+# same runner as compose.public.yaml. Without it every runner-backed tool
+# (repo_status, repo_pull_ff, scheduled_task_*, host_disk_usage, ...) fails on /control.
+$ControlDir = Join-Path $env:LOCALAPPDATA "DockerLocalMCP\control"
+New-Item -ItemType Directory -Force $ControlDir | Out-Null
+$ControlMount = "${ControlDir}:/control".Replace("'", "''")
+Add-Content -LiteralPath $EntryPath -Encoding utf8 -Value "volumes:`n  - '$ControlMount'"
+
+# Docker MCP Gateway refuses writable bind mounts outside its allowed roots and then
+# does not start the server at all. Every process that runs the gateway for this
+# profile needs this variable; here it covers the tool discovery below.
+if (-not $env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS) {
+    $env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS = $ControlDir
+}
+
 docker mcp profile show $Profile --format yaml *> $null
 $profileExists = ($LASTEXITCODE -eq 0)
 
@@ -63,3 +79,4 @@ docker mcp profile tools $Profile --enable-all dockerlocal
 docker mcp tools --gateway-arg="--profile=$Profile" list
 
 Write-Host "DockerLocal installation complete."
+Write-Host "Local MCP clients must run the gateway with MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS=$ControlDir (see docs/CONNECTING.md)."
