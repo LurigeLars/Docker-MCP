@@ -78,6 +78,37 @@ Add the variable to every client **before** re-running `install.ps1` on an exist
 installation; it is harmless while the installed entry has no mount. Allow only the
 control directory, never a parent such as the user profile.
 
+### Named containers for stdio clients
+
+Docker MCP Gateway cannot name the containers it starts, so a profile-based client appears
+in Docker under a random name. `local-mcp/stdio-launcher.mjs` is an alternative local path
+that runs the same image directly over stdio under a name that identifies it:
+
+```text
+dockerlocal-stdio-<client>-<launcher pid>
+```
+
+It needs Node.js, the `dockerlocal-mcp:local` image and the socket proxy from `install.ps1`,
+and nothing from Docker MCP Toolkit. The container gets the same hardening as the `mcp`
+service in `compose.public.yaml` (read-only root, no capabilities, no published port), binds
+only the Maintenance Runner control directory and reaches Docker only through the restricted
+socket proxy. It is removed when the client closes the connection.
+
+```json
+"dockerlocal": {
+  "command": "node",
+  "args": ["<path-to-repository>/local-mcp/stdio-launcher.mjs"],
+  "env": {
+    "DOCKERLOCAL_CLIENT": "claude-desktop",
+    "LOCALAPPDATA": "<LOCALAPPDATA>"
+  }
+}
+```
+
+`DOCKERLOCAL_CLIENT` is only a label for the container name. A client using the launcher
+does not need `MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS` and does not get the gateway's
+own management tools (`mcp-find`, `mcp-add`, ...).
+
 ## Cloudflare architecture
 
 ```text

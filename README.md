@@ -306,6 +306,11 @@ profile must set `MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS` to that director
 otherwise Docker MCP Gateway refuses to start the server. See
 [docs/CONNECTING.md](docs/CONNECTING.md#maintenance-runner-control-directory).
 
+Gateway-started containers get random Docker names. For stdio clients that should show up
+under an identifying name (`dockerlocal-stdio-<client>-<pid>`), use
+`local-mcp/stdio-launcher.mjs` instead; see
+[docs/CONNECTING.md](docs/CONNECTING.md#named-containers-for-stdio-clients).
+
 ## Remote connection through Cloudflare Access
 
 The remote path is optional. It is intended for an MCP client that cannot directly reach the local Docker MCP profile.
