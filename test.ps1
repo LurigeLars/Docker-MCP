@@ -1,9 +1,8 @@
 param([string]$Profile = "dockerlocal")
 $ErrorActionPreference = "Stop"
 
-if (-not $env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS) {
-    $env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS = Join-Path $env:LOCALAPPDATA "DockerLocalMCP\control"
-}
+# Set unconditionally: an inherited, broader value must not widen what this process allows.
+$env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS = Join-Path $env:LOCALAPPDATA "DockerLocalMCP\control"
 
 docker mcp profile show $Profile --format yaml
 docker mcp profile server ls --filter "profile=$Profile"

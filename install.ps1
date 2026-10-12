@@ -57,9 +57,8 @@ Add-Content -LiteralPath $EntryPath -Encoding utf8 -Value "volumes:`n  - '$Contr
 # Docker MCP Gateway refuses writable bind mounts outside its allowed roots and then
 # does not start the server at all. Every process that runs the gateway for this
 # profile needs this variable; here it covers the tool discovery below.
-if (-not $env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS) {
-    $env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS = $ControlDir
-}
+# Set unconditionally: an inherited, broader value must not widen what this process allows.
+$env:MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS = $ControlDir
 
 docker mcp profile show $Profile --format yaml *> $null
 $profileExists = ($LASTEXITCODE -eq 0)
