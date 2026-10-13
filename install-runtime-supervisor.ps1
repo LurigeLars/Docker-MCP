@@ -38,6 +38,20 @@ if (-not (Test-Path -LiteralPath $WindowsPowerShell -PathType Leaf)) {
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
+# Stopping the task ends its wscript.exe but not the powershell.exe that wscript launched.
+# A survivor keeps the single-instance mutex, so the new supervisor would exit at once and
+# the old code would keep running. Stop it and its `docker events` stream explicitly.
+$Survivors = @(
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Supervisor) }
+)
+foreach ($Survivor in $Survivors) {
+    Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Survivor.ProcessId)" |
+        Where-Object { $_.Name -eq "docker.exe" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Stop-Process -Id $Survivor.ProcessId -Force -ErrorAction SilentlyContinue
+}
+
 $ActionArgs = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $Supervisor, $ConfigPath
 
 if ($Visible) {
@@ -76,6 +90,20 @@ Start-Sleep -Seconds 2
 $Task = Get-ScheduledTask -TaskName $TaskName
 if ($Task.State -notin @("Running", "Ready")) {
     throw "Runtime supervisor task did not start correctly. Current state: $($Task.State)"
+}
+
+# "Ready" alone can mean the new instance exited on the mutex. Require the process itself.
+$Deadline = (Get-Date).AddSeconds(15)
+do {
+    $Running = @(
+        Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Supervisor) }
+    )
+    if ($Running.Count -eq 1) { break }
+    Start-Sleep -Milliseconds 500
+} while ((Get-Date) -lt $Deadline)
+if ($Running.Count -ne 1) {
+    throw "Expected exactly one runtime supervisor process after install, found $($Running.Count)."
 }
 
 Write-Host "DockerLocal Runtime Supervisor installed."
