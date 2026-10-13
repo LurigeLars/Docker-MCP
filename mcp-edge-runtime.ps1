@@ -10,6 +10,9 @@ Set-StrictMode -Version Latest
 # Seed the global automatic variable once so subsequent exit-code checks fail closed
 # instead of crashing on an unbound variable.
 $global:LASTEXITCODE = 0
+# Native output is always wrapped in @() before Select-Object -First 1. Piping a native
+# command straight into it stops the command early and leaves $LASTEXITCODE stale (or -1
+# in Windows PowerShell), so the exit-code check after it would test the previous command.
 
 if (-not $env:LOCALAPPDATA) {
     throw "LOCALAPPDATA is required."
@@ -193,7 +196,7 @@ function Invoke-DockerWithExactStdin {
 }
 
 function Get-CurrentEdgeMetadata {
-    $image = (& docker inspect $Cloudflared --format "{{.Config.Image}}" 2>$null | Select-Object -First 1)
+    $image = (@(& docker inspect $Cloudflared --format "{{.Config.Image}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($image)) {
         throw "Existing $Cloudflared container was not found; refusing to guess the deployed image/network set."
     }
@@ -305,7 +308,7 @@ function Write-EdgeCompose {
 }
 
 function Get-CloudflaredMissingNetworks {
-    $networkJson = (& docker inspect $Cloudflared --format "{{json .NetworkSettings.Networks}}" 2>$null | Select-Object -First 1)
+    $networkJson = (@(& docker inspect $Cloudflared --format "{{json .NetworkSettings.Networks}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($networkJson)) {
         return @($RequiredEdgeNetworks)
     }
@@ -319,7 +322,7 @@ function Get-CloudflaredMissingNetworks {
 }
 
 function Test-CloudflaredNoTokenEnv {
-    $envJson = (& docker inspect $Cloudflared --format "{{json .Config.Env}}" 2>$null | Select-Object -First 1)
+    $envJson = (@(& docker inspect $Cloudflared --format "{{json .Config.Env}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($envJson)) {
         throw "Unable to inspect cloudflared environment metadata."
     }
@@ -373,7 +376,7 @@ function Invoke-EdgeUp {
 
         $deadline = (Get-Date).AddSeconds(20)
         do {
-            $running = (& docker inspect $Cloudflared --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
+            $running = (@(& docker inspect $Cloudflared --format "{{.State.Running}}" 2>$null) | Select-Object -First 1)
             if ($LASTEXITCODE -eq 0 -and $running -eq "true") {
                 break
             }
@@ -457,14 +460,14 @@ function Show-Status {
     $tokenEnvAbsent = $false
     $edgeNetworksComplete = $false
 
-    $holderState = (& docker inspect $SecretHolder --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
+    $holderState = (@(& docker inspect $SecretHolder --format "{{.State.Running}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -eq 0 -and $holderState -eq "true") {
         $holderRunning = $true
         & docker exec $SecretHolder test -s $RuntimeSecretPath 2>$null
         $secretPresent = ($LASTEXITCODE -eq 0)
     }
 
-    $cloudflaredState = (& docker inspect $Cloudflared --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
+    $cloudflaredState = (@(& docker inspect $Cloudflared --format "{{.State.Running}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -eq 0 -and $cloudflaredState -eq "true") {
         $cloudflaredRunning = $true
         $tokenEnvAbsent = Test-CloudflaredNoTokenEnv

@@ -24,6 +24,19 @@ class RuntimeSupervisorHealthTests(unittest.TestCase):
         self.assertLess(exit_code, select)
         self.assertIn("if ($InspectExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($RawState)) {", HEALTH)
 
+    def test_no_script_reads_an_exit_code_after_stopping_docker_early(self):
+        # Same trap in every script: `& docker ... | Select-Object -First 1` stops docker
+        # early, so a following $LASTEXITCODE test reads -1 or the previous command's code.
+        # A closing parenthesis before the pipe means the call was collected with @() first.
+        pattern = re.compile(r"&\s*\$?[Dd]ocker\b[^\n|)]*\|\s*Select-Object\s+-First")
+        offenders = [
+            f"{path.name}:{number}"
+            for path in sorted(ROOT.glob("*.ps1"))
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if pattern.search(line)
+        ]
+        self.assertEqual(offenders, [])
+
     def test_a_missing_or_stopped_container_is_still_unhealthy(self):
         self.assertIn("if (-not [bool]$State.Running) {", HEALTH)
         self.assertIn("catch {\n            return $false", HEALTH)
