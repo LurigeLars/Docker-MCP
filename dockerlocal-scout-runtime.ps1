@@ -7,6 +7,9 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $global:LASTEXITCODE = 0
+# Native output is always wrapped in @() before Select-Object -First 1. Piping a native
+# command straight into it stops the command early and leaves $LASTEXITCODE stale (or -1
+# in Windows PowerShell), so the exit-code check after it would test the previous command.
 
 if (-not $env:LOCALAPPDATA) {
     throw "LOCALAPPDATA is required."
@@ -100,7 +103,7 @@ function Save-DpapiSecret {
 function Get-ContainerEnvValue {
     param([Parameter(Mandatory)][string]$Name)
 
-    $json = (& docker inspect $Container --format "{{json .Config.Env}}" 2>$null | Select-Object -First 1)
+    $json = (@(& docker inspect $Container --format "{{json .Config.Env}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
         throw "Unable to inspect the existing DockerLocal MCP container."
     }
@@ -181,7 +184,7 @@ function Write-RuntimeSecret {
 }
 
 function Test-LongLivedScoutEnvAbsent {
-    $json = (& docker inspect $Container --format "{{json .Config.Env}}" 2>$null | Select-Object -First 1)
+    $json = (@(& docker inspect $Container --format "{{json .Config.Env}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
         throw "Unable to inspect DockerLocal MCP environment metadata."
     }
@@ -325,7 +328,7 @@ function Show-Status {
     $passwordRuntimePresent = $false
     $longLivedEnvAbsent = $false
 
-    $state = (& docker inspect $Container --format "{{.State.Running}}" 2>$null | Select-Object -First 1)
+    $state = (@(& docker inspect $Container --format "{{.State.Running}}" 2>$null) | Select-Object -First 1)
     if ($LASTEXITCODE -eq 0 -and $state -eq "true") {
         $running = $true
 
