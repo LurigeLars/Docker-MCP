@@ -172,9 +172,14 @@ function Test-RuntimeHealthy {
 
         try {
             $InspectArgs = @("inspect", "--format", "{{json .State}}", $Container)
-            $RawState = (& $Docker @InspectArgs 2>$null | Select-Object -First 1)
+            # Capture before selecting. Piping a native command into Select-Object -First 1
+            # stops it early, which leaves $LASTEXITCODE at -1 in Windows PowerShell and
+            # stale in PowerShell 7, so every healthy container looked unhealthy.
+            $InspectOutput = @(& $Docker @InspectArgs 2>$null)
+            $InspectExitCode = $LASTEXITCODE
+            $RawState = [string]($InspectOutput | Select-Object -First 1)
 
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($RawState)) {
+            if ($InspectExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($RawState)) {
                 return $false
             }
 
