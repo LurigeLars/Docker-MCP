@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   gateway:
-    image: node:26.10.0-alpine
+    image: node:26.11.1-alpine
     container_name: dockerlocal-gateway
     command: ["node", "/app/gateway.mjs"]
     user: node
