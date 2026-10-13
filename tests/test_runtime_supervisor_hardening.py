@@ -37,6 +37,19 @@ class RuntimeSupervisorHealthTests(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
+    def test_installer_replaces_a_surviving_supervisor_process(self):
+        installer = (ROOT / "install-runtime-supervisor.ps1").read_text(encoding="utf-8")
+        stop_task = installer.index("Stop-ScheduledTask -TaskName $TaskName")
+        stop_survivor = installer.index("Stop-Process -Id $Survivor.ProcessId -Force")
+        register = installer.index("Register-ScheduledTask -TaskName $TaskName")
+        # The task's wscript.exe dies with the task; the powershell.exe it started does not,
+        # and it holds the single-instance mutex.
+        self.assertLess(stop_task, stop_survivor)
+        self.assertLess(stop_survivor, register)
+        self.assertIn("$_.CommandLine.Contains($Supervisor)", installer)
+        self.assertIn("Expected exactly one runtime supervisor process after install", installer)
+        self.assertIn('"Local\\DockerLocalRuntimeSupervisor"', SUPERVISOR)
+
     def test_a_missing_or_stopped_container_is_still_unhealthy(self):
         self.assertIn("if (-not [bool]$State.Running) {", HEALTH)
         self.assertIn("catch {\n            return $false", HEALTH)
