@@ -1,4 +1,4 @@
-FROM python:3.12-alpine
+FROM python:3.14-alpine
 COPY proxy.py /app/proxy.py
 RUN chmod 0444 /app/proxy.py
 ENTRYPOINT ["python", "/app/proxy.py"]
