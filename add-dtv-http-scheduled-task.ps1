@@ -52,10 +52,10 @@ if ($Actions.Count -ne 1) {
 }
 $Action = $Actions[0]
 $LauncherName = [IO.Path]::GetFileName([string]$Action.Execute)
-$Args = [string]$Action.Arguments
+$LauncherArguments = [string]$Action.Arguments
 $AllowedLauncher = $LauncherName -in @("pythonw.exe","python.exe","node.exe")
-$ExpectedScript = ($Args -match '(^|[\\/\s"])run-http-hidden\.py([\\/\s"]|$)' -or
-                   $Args -match '(^|[\\/\s"])src[\\/]server[\\/]http\.js([\\/\s"]|$)')
+$ExpectedScript = ($LauncherArguments -match '(^|[\\/\s"])run-http-hidden\.py([\\/\s"]|$)' -or
+                   $LauncherArguments -match '(^|[\\/\s"])src[\\/]server[\\/]http\.js([\\/\s"]|$)')
 if (-not $AllowedLauncher -or -not $ExpectedScript) {
     throw "DTV task action does not match the verified local HTTP launcher. No changes made."
 }
