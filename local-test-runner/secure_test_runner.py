@@ -235,12 +235,12 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
             "--mount", "type=bind,source=" + str(tar) + ",target=/input/source.tar,readonly",
             "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
             "--label", "dockerlocal.test-job=" + job_id, image_id]
-    created = False
+    create_attempted = False
     try:
+        create_attempted = True
         out = _run(args, timeout=30)
         if out.returncode:
             raise RuntimeError("Sandbox create refused")
-        created = True
         # Independently check the runtime security boundary before starting.
         state = _run([docker, "inspect", "--format", "{{json .HostConfig}}", name], timeout=30)
         if state.returncode:
@@ -286,11 +286,19 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
         code = int(value)
         return ("PASSED" if code == 0 else "FAILED"), code
     finally:
-        if created:
-            # Name is constructed from a validated random 128-bit identifier.
-            removed = _run([docker, "rm", "--force", name], timeout=30)
-            if removed.returncode:
-                raise SandboxCleanupFailure("Sandbox cleanup failed; manual intervention required")
+        if create_attempted:
+            # Even a timed-out or failed 'docker create' can leave a container.
+            # The name uses a fresh 128-bit local ID, never a caller value.
+            try:
+                removed = _run([docker, "rm", "--force", name], timeout=30)
+                if removed.returncode:
+                    # The only permitted nonzero cleanup result is a proven
+                    # "No such container" from Docker; all others halt the queue.
+                    message = removed.stderr.decode("utf-8", "replace").casefold()
+                    if "no such container" not in message and "no such object" not in message:
+                        raise SandboxCleanupFailure("Unable to prove container cleanup")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise SandboxCleanupFailure("Sandbox cleanup could not be verified") from error
 
 def work_once() -> dict:
     config = _config()
