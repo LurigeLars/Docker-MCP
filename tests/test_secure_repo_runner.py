@@ -134,6 +134,8 @@ class SecureRunnerTests(unittest.TestCase):
 
     def test_sandbox_is_checked_before_start(self):
         calls = []
+        cid = "a" * 64
+        jobid = "a" * 32
         def fake_run(argv, **_kwargs):
             calls.append(argv)
             if "info" in argv:
@@ -144,25 +146,53 @@ class SecureRunnerTests(unittest.TestCase):
             if "image" in argv and "inspect" in argv:
                 return type("Result", (), {"returncode": 0, "stdout": IMAGE.encode()})()
             if "create" in argv:
-                return type("Result", (), {"returncode": 0, "stdout": b"created"})()
-            if "--format" in argv and "{{json .HostConfig}}" in argv:
-                # A hostile daemon/image must not be executed on a mismatch.
+                return type("Result", (), {"returncode": 0, "stdout": cid.encode()})()
+            if "inspect" in argv and "{{json .}}" in argv:
                 state = {"NetworkMode": "bridge", "ReadonlyRootfs": True,
                          "Privileged": False, "CapDrop": ["ALL"],
                          "SecurityOpt": ["no-new-privileges"], "PidsLimit": 64,
                          "Memory": 1024 * 1024 * 1024, "Mounts": [{
                              "Type": "bind", "Target": "/input/source.tar", "ReadOnly": True
                          }]}
+                meta = {"Id": cid, "Name": "/dl-regression-" + jobid,
+                        "Image": IMAGE, "HostConfig": state,
+                        "Config": {"Labels": {"dockerlocal.test-job": jobid}}}
                 return type("Result", (), {
-                    "returncode": 0, "stdout": json.dumps(state).encode()
+                    "returncode": 0, "stdout": json.dumps(meta).encode()
                 })()
             return type("Result", (), {"returncode": 0, "stdout": b""})()
-        with patch.object(runner.shutil, "which", return_value="/mock/docker"):
-            with patch.object(runner, "_run", side_effect=fake_run):
-                with self.assertRaisesRegex(RuntimeError, "isolation mismatch"):
-                    runner._docker_job(self.config, "a" * 32, self.root / "source.tar")
+        with patch.object(runner, "_run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "isolation mismatch"):
+                runner._docker_job(self.config, jobid, self.root / "source.tar")
         self.assertFalse(any("start" in cmd for cmd in calls))
         self.assertTrue(any("rm" in cmd for cmd in calls))
+        self.assertTrue(any(cid in cmd for cmd in calls if "rm" in cmd))
+
+    def test_name_collision_does_not_delete_unowned_container(self):
+        calls = []
+        jobid = "b" * 32
+        def fake_run(argv, **_kwargs):
+            calls.append(argv)
+            if "info" in argv:
+                return type("R", (), {"returncode": 0,
+                    "stdout": b'["name=seccomp,profile=builtin"]'})()
+            if "image" in argv and "inspect" in argv:
+                return type("R", (), {"returncode": 0,
+                    "stdout": IMAGE.encode()})()
+            if "create" in argv:
+                return type("R", (), {"returncode": 1,
+                    "stdout": b"", "stderr": b"Conflict"})()
+            if "inspect" in argv:
+                metadata = {"Id": "e" * 64,
+                    "Name": "/dl-regression-" + jobid,
+                    "Config": {"Labels": {"dockerlocal.test-job": "other-job"}}}
+                return type("R", (), {"returncode": 0,
+                    "stdout": json.dumps(metadata).encode()})()
+            raise AssertionError("Unowned container must not be touched")
+        with patch.object(runner, "_run", side_effect=fake_run):
+            with self.assertRaises(runner.SandboxCleanupFailure):
+                runner._docker_job(self.config, jobid, self.root / "source.tar")
+        self.assertFalse(any("rm" in cmd for cmd in calls))
 
     def test_cleanup_failure_locks_down_future_jobs(self):
         runner.submit("trade-spine", SHA)
