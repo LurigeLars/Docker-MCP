@@ -1,6 +1,6 @@
 # Secure repository regression runner — security contract (proposal)
 
-Status: **design only / NOT IMPLEMENTED / NOT ENABLED**.
+Status: **LOCAL IMPLEMENTATION STAGED / NOT INSTALLED / NOT ENABLED**.
 
 This contract is intentionally narrower than `docker run`, `docker exec`,
 PowerShell, arbitrary test commands, and arbitrary host paths. It protects the
@@ -17,11 +17,13 @@ repository. Code execution must not occur with privileges, credentials or the
 filesystem access of the Windows Maintenance Runner, MCP server or Docker
 socket proxy.
 
-The existing Windows Maintenance Runner may broker a **fixed, separately
-reviewed** container invocation, but may not execute repository code or scripts
-on Windows. Docker administrator access held by the broker is a critical
-security boundary. Its invocation template, repository allowlist and OCI image
-digest must be controlled by the local operator, not editable through MCP.
+The first staged implementation uses a **separate local stdio-only MCP process**
+and a host-side fixed-command queue worker, not the existing Docker-MCP
+Maintenance Runner or public container. This avoids changing the public
+socket-proxy policy or granting its publicly reachable MCP instance access to
+the test queue. The host worker necessarily has limited Docker administrative
+capability, so the fixed invocation template, repository allowlist and OCI image
+ID must be controlled by the operator, never by the MCP client.
 
 The first implementation must be **local-only, disabled by default**.
 Do not register it in the public gateway's `ALLOWED_TOOLS`, do not add it to
@@ -67,7 +69,11 @@ repo_test_status(job_id: 32 lowercase hex)
 The disposable container must have ALL of these constraints, enforced by the
 host-side broker (not by arguments the caller can change):
 
-- `--network none` and no host, Docker or control-socket mount; no
+- `--network none` and no arbitrary host-directory, Docker or control-socket
+  mount. The **sole host bind** is one immutable-snapshot staging **tar file**,
+  mounted read-only at `/input/source.tar` from a private generated scratch
+  directory. This narrowly scoped mount is necessary to transfer code; no
+  checkout, control directory or credential file is mounted. No
   `DOCKER_HOST`, container engine API endpoint, Cloudflare credentials, DPAPI
   material, SSH agent, Git credentials, user profile, or other secrets.
 - Non-root UID/GID, `--read-only`, `--cap-drop ALL`,
@@ -76,7 +82,7 @@ host-side broker (not by arguments the caller can change):
 - A fixed-size writable `tmpfs` for isolated test scratch only; hard CPU,
   memory, PID, archive-size and file/output bounds. No persistent container,
   named volume or network access.
-- A wall-clock timeout (e.g. 10 minutes for the present regression suite).
+- A wall-clock timeout (10 minutes for the present regression suite).
   On timeout or cancellation forcibly remove **only the generated job
   container**, without touching other Docker resources.
 - Package the Git archive without sharing the working checkout. Transport
