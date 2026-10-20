@@ -117,7 +117,9 @@ def collect_bounded(docker: str, container_id: str) -> dict:
         if reader.is_alive() or io_failed or overflow or deadline or proc.returncode != 0:
             return unavailable
         return summarize(bytes(read_buffer))
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except Exception:
+        # Advisory diagnostics must never turn a real FAILED test into a
+        # REJECTED worker result, and raw exceptions must not be exposed.
         return unavailable
     finally:
         if proc is not None and proc.poll() is None:
