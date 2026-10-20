@@ -18,6 +18,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from safe_test_diagnostics import collect_bounded as _collect_bounded_failure_hints
+
 SHA = re.compile(r"^[0-9a-f]{40}$")
 JOB = re.compile(r"^[0-9a-f]{32}$")
 IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -195,6 +197,7 @@ def status(job_id: str) -> dict:
                         "elapsed_seconds": data.get("elapsed_seconds"),
                         "phase": data.get("phase"),
                         "failure_code": data.get("failure_code"),
+                        "test_diagnostics": data.get("test_diagnostics"),
                     } if state is None else {})}
     return {"job_id": job_id, "status": "UNKNOWN"}
 
@@ -288,7 +291,7 @@ def _job_container_metadata(docker: str, name: str, job_id: str):
     return info
 
 
-def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
+def _docker_job(config: dict, job_id: str, tar: Path, *, diagnostics: dict | None = None) -> tuple[str, int | None]:
     docker = config["docker_executable"]
     if not JOB.fullmatch(job_id):
         raise ValueError("Invalid disposable container ID")
@@ -369,6 +372,12 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
         if not re.fullmatch(r"[0-9]{1,3}", value):
             raise RuntimeError("Invalid sandbox exit status")
         code = int(value)
+        if code != 0 and diagnostics is not None:
+            # Collect failure hints before deleting only our verified container.
+            # This does not change execution status and never publishes raw logs.
+            # Use a small Docker log tail with a timeout and bounded parsed output.
+            # Host subprocess output is untrusted, including counterfeit test names.
+            diagnostics.update(_collect_bounded_failure_hints(docker, created_id))
         return ("PASSED" if code == 0 else "FAILED"), code
     finally:
         if attempted:
@@ -413,6 +422,7 @@ def work_once() -> dict:
         os.replace(source, r / "running" / source.name)
         start = time.monotonic()
         state, exit_code = "REJECTED", None
+        test_diagnostics = {}
         cleanup_failed, phase, failure_code = False, "PREPARE", None
         try:
             with tempfile.TemporaryDirectory(prefix="sandbox-" + source.stem + "-", dir=r / "scratch") as tmp:
@@ -420,7 +430,9 @@ def work_once() -> dict:
                 phase = "SNAPSHOT"
                 _snapshot(config, request["commit_sha"], tar)
                 phase = "SANDBOX"
-                state, exit_code = _docker_job(config, source.stem, tar)
+                state, exit_code = _docker_job(
+                    config, source.stem, tar, diagnostics=test_diagnostics
+                )
                 phase = "FINISHED"
         except SandboxCleanupFailure as error:
             state, cleanup_failed = "REJECTED", True
@@ -430,7 +442,8 @@ def work_once() -> dict:
             failure_code = _failure_code(error)
         result = {**request, "status": state, "exit_code": exit_code,
                   "phase": phase, "failure_code": failure_code,
-                  "elapsed_seconds": round(time.monotonic() - start, 1)}
+                  "elapsed_seconds": round(time.monotonic() - start, 1),
+                  "test_diagnostics": test_diagnostics if state == "FAILED" else None}
         _atomic_write(r / "results" / source.name, result)
         if not cleanup_failed:
             (r / "running" / source.name).unlink()

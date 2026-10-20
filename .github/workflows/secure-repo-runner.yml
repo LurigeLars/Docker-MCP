@@ -9,6 +9,7 @@ on:
       - "tests/test_repo_runner_exposure_guard.py"
       - "tests/test_offline_stage_installer.py"
       - "tests/test_pr180_one_shot.py"
+      - "tests/test_safe_test_diagnostics.py"
       - "scripts/windows/run-trade-spine-pr180-once.ps1"
       - "scripts/windows/stage-secure-test-runner.ps1"
       - ".github/workflows/secure-repo-runner.yml"
@@ -36,6 +37,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p "test_offline_stage_installer.py" -v
       - name: Verify fixed-commit single-use PR180 broker workflow (mocked)
         run: python3 -m unittest discover -s tests -p "test_pr180_one_shot.py" -v
+      - name: Assert bounded sanitized failing-test diagnostics
+        run: python3 -m unittest discover -s tests -p "test_safe_test_diagnostics.py" -v
       - name: Exercise authenticated public gateway negative calls (offline synthetic JWT)
         run: node tests/repo_runner_gateway_denial.mjs
 
@@ -54,6 +57,9 @@ jobs:
       - name: Validate one-shot private queue teardown on Windows
         shell: pwsh
         run: python -m unittest discover -s tests -p "test_pr180_one_shot.py" -v
+      - name: Validate bounded test diagnostics on Windows
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_safe_test_diagnostics.py" -v
 
   actual-docker-sandbox:
     name: Disposable Docker isolation smoke
