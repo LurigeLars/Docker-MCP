@@ -32,11 +32,13 @@ from Git are hostile code and run exclusively inside the short-lived sandbox.
    environment. Connect `local_mcp.py` via a **local stdio configuration only**.
    This process has no network listener; do not expose through a tunnel,
    public MCP profile, webhook or web server.
-4. Run the allowlisted worker as a separately managed local host task:
-   `python secure_test_runner.py worker-once`. It processes at most one
-   queued request then terminates. If scheduling worker runs later, use a
-   separately reviewed fixed scheduled-task definition, not a model-supplied
-   command. The worker must **not** run repository scripts on Windows.
+4. Run the allowlisted worker locally as `python secure_test_runner.py
+   worker-once` for one queued request. Once host security smoke tests have
+   passed, a manually reviewed login task may run `pythonw.exe
+   secure_test_runner.py worker-loop` invisibly, polling once per 30 seconds.
+   Register any startup task separately with a fixed binary/script path,
+   under the current standard Windows user; do not grant administrator rights.
+   The worker must **not** run repository scripts on Windows.
 5. The supported test entrypoint is an immutable image-owned unittest
    discovery script. It reads a sanitized `git archive` at an exact commit
    with no checkout or secret bind mounts and no runtime package installs.
@@ -50,6 +52,8 @@ from Git are hostile code and run exclusively inside the short-lived sandbox.
   bounded tmpfs, 10-minute maximum execution.
 - Bounded archive: <=40MiB, <=5000 regular files/directories, no links.
 - Result contains PASSED/FAILED/REJECTED/TIMED_OUT and exit code only.
+  A Docker cleanup failure retains a running-job sentinel and blocks further
+  requests until manual investigation.
   Raw logs are *not* returned via MCP.
 - A stale worker lock or in-progress record blocks subsequent execution
   pending local investigation; it must not auto-bypass a safety stop.
@@ -58,7 +62,8 @@ from Git are hostile code and run exclusively inside the short-lived sandbox.
 
 ## Release blockers
 
-No real host/container sandbox execution has been verified by merely merging
-the source. Run the negative host tests, hostile fixture tests, pinned-image
-verification, full local Docker smoke tests, public tool-discovery/call denial,
-and required security gates listed in the contract before enabling.
+GitHub-hosted Linux Docker smoke and mocked input-negative tests exist, but
+**this does not prove the Windows Docker Desktop deployment**. Run the negative
+Windows host tests, exact pinned-image verification, full local Docker smoke,
+public tool-discovery/call denial, and required security gates listed in the
+contract before enabling. No public deployment or automatic activation.
