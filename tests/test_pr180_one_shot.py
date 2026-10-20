@@ -121,7 +121,7 @@ class OneShotPR180Tests(unittest.TestCase):
         calls = []
         def fake_run(argv, **kwargs):
             calls.append((argv, kwargs))
-            return CompletedProcess(argv, 0, b"ok\\n", b"")
+            return CompletedProcess(argv, 0, b"ok", b"")
         with patch.object(one.subprocess, "run", side_effect=fake_run):
             self.assertEqual(
                 one._command("C:/Git/git.exe", ["-C", "repo", "fetch", "origin"],
