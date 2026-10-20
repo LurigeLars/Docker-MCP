@@ -116,7 +116,7 @@ class BoundedDiagnostics(unittest.TestCase):
     def test_log_probe_failure_cannot_prevent_owned_container_cleanup(self):
         source = (Path(__file__).resolve().parents[1] /
                   "local-test-runner" / "secure_test_runner.py").read_text()
-        self.assertIn('["logs", "--tail"', source)
+        self.assertIn('[docker, "logs", "--tail"', source)
         self.assertIn('except (OSError, subprocess.TimeoutExpired)', source)
         self.assertIn('["rm", "--force", owned_id]', source)
 
