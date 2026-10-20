@@ -218,6 +218,13 @@ class SecureRunnerTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertIn("info", calls[0])
 
+    def test_diagnostics_never_echo_raw_provider_errors(self):
+        self.assertEqual("SANDBOX_MOUNT_MISMATCH",
+                         runner._failure_code(RuntimeError("Unexpected container mount")))
+        self.assertEqual("INTERNAL_FAILURE",
+                         runner._failure_code(RuntimeError("password=hunter2 host-path=/secret")))
+        self.assertNotIn("hunter2", runner._failure_code(RuntimeError("password=hunter2")))
+
     def test_sha_only_export_does_not_use_checkout_scripts(self):
         values = iter([
             self.config["origin_url"], "main", "", SHA, ""
