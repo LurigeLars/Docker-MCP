@@ -47,6 +47,29 @@ class OfflineStageInstallerTests(unittest.TestCase):
         ):
             self.assertIn(required, self.code)
 
+    def test_docker_binary_is_resolved_and_verified_before_execution(self):
+        # The Docker install root is not necessarily in ProgramFiles.
+        # Accept discovery only after Authenticode verification, then pin
+        # the verified absolute file path into the private config.
+        required = (
+            "Get-Command docker.exe -CommandType Application",
+            "$dockerExe = $dockerCommand.Source",
+            "Get-AuthenticodeSignature -FilePath $dockerExe",
+            "$dockerSignature.Status -ne 'Valid'",
+            "$dockerSignature.SignerCertificate.Subject -notmatch '(?i)Docker'",
+            "throw 'Docker CLI signature or publisher is unverified.",
+            "docker_executable = $dockerExe",
+        )
+        for expression in required:
+            self.assertIn(expression, self.code)
+        assert_ordered = (
+            self.code.index("Get-Command docker.exe"),
+            self.code.index("Get-AuthenticodeSignature -FilePath $dockerExe"),
+            self.code.index("$daemonOs = (& $dockerExe info"),
+        )
+        self.assertEqual(assert_ordered, tuple(sorted(assert_ordered)))
+        self.assertNotIn("dockerExe = Join-Path $env:ProgramFiles", self.code)
+
     def test_all_git_commands_use_pinned_binary(self):
         self.assertNotIn("& git -C", self.code)
         self.assertIn("& $gitExe -C", self.code)
