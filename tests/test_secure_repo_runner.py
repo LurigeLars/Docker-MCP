@@ -161,6 +161,30 @@ class SecureRunnerTests(unittest.TestCase):
         self.assertFalse(any("start" in cmd for cmd in calls))
         self.assertTrue(any("rm" in cmd for cmd in calls))
 
+    def test_cleanup_failure_locks_down_future_jobs(self):
+        runner.submit("trade-spine", SHA)
+        with patch.object(runner, "_snapshot"):
+            with patch.object(runner, "_docker_job", side_effect=runner.SandboxCleanupFailure("cleanup uncertain")):
+                result = runner.work_once()
+        self.assertEqual("REJECTED", result["status"])
+        self.assertEqual(1, len(list((self.root / "running").glob("*.json"))))
+        with self.assertRaises(RuntimeError):
+            runner.submit("trade-spine", SHA)
+        with self.assertRaises(RuntimeError):
+            runner.work_once()
+
+    def test_daemon_without_seccomp_rejected_before_create(self):
+        calls = []
+        def fake_run(argv, **_):
+            calls.append(argv)
+            return type("Result", (), {"returncode": 0, "stdout": b"[]"})()
+        with patch.object(runner.shutil, "which", return_value="/mock/docker"):
+            with patch.object(runner, "_run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "seccomp policy is missing"):
+                    runner._docker_job(self.config, "b" * 32, self.root / "source.tar")
+        self.assertEqual(1, len(calls))
+        self.assertIn("info", calls[0])
+
     def test_sha_only_export_does_not_use_checkout_scripts(self):
         values = iter([
             self.config["origin_url"], "main", "", SHA, ""
