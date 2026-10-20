@@ -5,6 +5,8 @@ Output may be spoofed by untrusted tests; only names of known repo test modules
 and narrow exception categories are admitted as non-authoritative hints.
 """
 import re
+import subprocess
+import threading
 
 # Fixed, reviewed test module identifiers from the approved Trade Spine repo.
 _MODULES = frozenset({
@@ -61,3 +63,66 @@ def summarize(raw: bytes) -> dict:
         "skipped": totals["skipped"],
         "summary_found": bool(ran or failure),
     }
+
+
+_LOG_LIMIT_BYTES = 48 * 1024
+_LOG_TIMEOUT_SECONDS = 15
+
+def collect_bounded(docker: str, container_id: str) -> dict:
+    """Read fixed Docker log tail with strict host byte/time caps.
+
+    The caller has already verified container ownership, label and full ID.
+    This helper never runs a shell and never returns raw bytes or a traceback.
+    A log timeout/overflow is advisory unavailable, NOT a different test result.
+    """
+    unavailable = {"advisory_only": True, "summary_found": False}
+    if not re.fullmatch(r"[a-f0-9]{64}", container_id):
+        return unavailable
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [docker, "logs", "--tail", "160", container_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=False,
+        )
+        read_buffer = bytearray()
+        io_failed = []
+        def bounded_reader():
+            try:
+                while len(read_buffer) <= _LOG_LIMIT_BYTES:
+                    size = min(4096, _LOG_LIMIT_BYTES + 1 - len(read_buffer))
+                    chunk = proc.stdout.read(size)
+                    if not chunk:
+                        break
+                    read_buffer.extend(chunk)
+            except (OSError, ValueError):
+                io_failed.append(True)
+        reader = threading.Thread(target=bounded_reader, daemon=True)
+        reader.start()
+        reader.join(timeout=_LOG_TIMEOUT_SECONDS)
+        overflow = len(read_buffer) > _LOG_LIMIT_BYTES
+        deadline = reader.is_alive()
+        if overflow or deadline:
+            proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        reader.join(timeout=2)
+        if reader.is_alive() or io_failed or overflow or deadline or proc.returncode != 0:
+            return unavailable
+        return summarize(bytes(read_buffer))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return unavailable
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
