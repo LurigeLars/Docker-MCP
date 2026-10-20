@@ -32,6 +32,46 @@ TIME_LIMIT_SECONDS = 600
 class SandboxCleanupFailure(RuntimeError):
     """Container may remain running; block all future jobs until inspected."""
 
+
+# Only constants owned by this code are eligible for external diagnostics.
+# Never return exception strings, repository output or Docker stderr via MCP.
+SAFE_FAILURE_CODES = {
+    "Repository origin changed": "ORIGIN_MISMATCH",
+    "Runtime checkout is not on main": "WRONG_BRANCH",
+    "Runtime checkout is dirty": "DIRTY_CHECKOUT",
+    "Requested object is not a commit": "UNVERIFIED_COMMIT",
+    "Git validation or export failed": "GIT_COMMAND_REJECTED",
+    "Snapshot export failed": "SNAPSHOT_EXPORT_FAILED",
+    "Snapshot archive is too large": "SNAPSHOT_TOO_LARGE",
+    "Snapshot contains too many entries": "SNAPSHOT_TOO_MANY_FILES",
+    "Unsafe archive member": "UNSAFE_ARCHIVE_MEMBER",
+    "Docker security options unavailable": "DOCKER_SECURITY_UNAVAILABLE",
+    "Docker daemon seccomp policy is missing": "SECCOMP_UNAVAILABLE",
+    "Configured immutable runner image unavailable": "IMAGE_MISSING",
+    "Sandbox create refused": "SANDBOX_CREATE_FAILED",
+    "Docker create returned an invalid container ID": "CONTAINER_ID_INVALID",
+    "Created container identity/image mismatch": "CONTAINER_IDENTITY_MISMATCH",
+    "Container isolation mismatch": "CONTAINER_ISOLATION_MISMATCH",
+    "Unexpected container writable filesystem": "SANDBOX_TMPFS_MISMATCH",
+    "Untrusted sandbox image entrypoint or identity": "SANDBOX_ENTRYPOINT_MISMATCH",
+    "Unexpected container mount": "SANDBOX_MOUNT_MISMATCH",
+    "Sandbox start refused": "SANDBOX_START_FAILED",
+    "Sandbox wait failed": "SANDBOX_WAIT_FAILED",
+    "Invalid sandbox exit status": "SANDBOX_WAIT_INVALID",
+    "Cannot verify disposable container identity": "CONTAINER_IDENTITY_UNKNOWN",
+    "Container ownership mismatch": "CONTAINER_NOT_OWNED",
+    "Malformed Docker container identity": "CONTAINER_METADATA_INVALID",
+    "Created container vanished before cleanup": "CONTAINER_VANISHED",
+    "Created container changed identity": "CONTAINER_IDENTITY_CHANGED",
+    "Disposable container removal failed": "CLEANUP_FAILED",
+    "Sandbox cleanup could not be verified": "CLEANUP_UNVERIFIED",
+}
+
+
+def _failure_code(error: Exception) -> str:
+    return SAFE_FAILURE_CODES.get(str(error), "INTERNAL_FAILURE")
+
+
 def root() -> Path:
     base = os.environ.get(ROOT_ENV)
     if not base:
@@ -152,7 +192,9 @@ def status(job_id: str) -> dict:
             return {"job_id": job_id, "repo": ALIAS, "commit_sha": data["commit_sha"],
                     "status": state or data["status"], **({
                         "exit_code": data.get("exit_code"),
-                        "elapsed_seconds": data.get("elapsed_seconds")
+                        "elapsed_seconds": data.get("elapsed_seconds"),
+                        "phase": data.get("phase"),
+                        "failure_code": data.get("failure_code"),
                     } if state is None else {})}
     return {"job_id": job_id, "status": "UNKNOWN"}
 
@@ -371,24 +413,31 @@ def work_once() -> dict:
         os.replace(source, r / "running" / source.name)
         start = time.monotonic()
         state, exit_code = "REJECTED", None
-        cleanup_failed = False
+        cleanup_failed, phase, failure_code = False, "PREPARE", None
         try:
             with tempfile.TemporaryDirectory(prefix="sandbox-" + source.stem + "-", dir=r / "scratch") as tmp:
                 tar = Path(tmp) / "source.tar"
+                phase = "SNAPSHOT"
                 _snapshot(config, request["commit_sha"], tar)
+                phase = "SANDBOX"
                 state, exit_code = _docker_job(config, source.stem, tar)
-        except SandboxCleanupFailure:
+                phase = "FINISHED"
+        except SandboxCleanupFailure as error:
             state, cleanup_failed = "REJECTED", True
-        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            failure_code = _failure_code(error)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
             state = "REJECTED"
+            failure_code = _failure_code(error)
         result = {**request, "status": state, "exit_code": exit_code,
+                  "phase": phase, "failure_code": failure_code,
                   "elapsed_seconds": round(time.monotonic() - start, 1)}
         _atomic_write(r / "results" / source.name, result)
         if not cleanup_failed:
             (r / "running" / source.name).unlink()
         # Keep the running sentinel if Docker cleanup could not be verified.
         # The next worker and any submitter then fail closed.
-        return {"job_id": source.stem, "status": state}
+        return {"job_id": source.stem, "status": state,
+                "phase": phase, "failure_code": failure_code}
 
 if __name__ == "__main__":
     import sys
