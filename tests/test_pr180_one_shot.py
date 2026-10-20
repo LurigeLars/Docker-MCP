@@ -150,6 +150,28 @@ class OneShotPR180Tests(unittest.TestCase):
         self.assertEqual(fetch_options["stdout"], one.subprocess.PIPE)
         self.assertEqual(fetch_options["stderr"], one.subprocess.PIPE)
 
+    def test_windows_credential_store_folders_only_pass_to_approved_fetch(self):
+        from subprocess import CompletedProcess
+        captures = []
+        def runner(argv, **kwargs):
+            captures.append(kwargs["env"])
+            return CompletedProcess(argv, 0, b"", b"")
+        variables = {
+            "USERPROFILE": r"C:\\Users\\Operator",
+            "LOCALAPPDATA": r"C:\\Users\\Operator\\AppData\\Local",
+            "APPDATA": r"C:\\Users\\Operator\\AppData\\Roaming",
+            "UNRELATED_SECRET": "must-not-be-inherited",
+        }
+        with patch.dict(os.environ, variables), \\
+             patch.object(one.subprocess, "run", side_effect=runner):
+            one._command("git", ["fetch", "origin"], git=True, stage="GIT_FETCH")
+            one._command("git", ["status"], git=True, stage="GIT_STATUS")
+        for k in ("USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+            self.assertEqual(captures[0][k], variables[k])
+            self.assertNotIn(k, captures[1])
+        self.assertNotIn("UNRELATED_SECRET", captures[0])
+        self.assertNotIn("UNRELATED_SECRET", captures[1])
+
     def test_non_fetch_git_never_uses_gcm(self):
         from subprocess import CompletedProcess
         with patch.object(one.subprocess, "run",
