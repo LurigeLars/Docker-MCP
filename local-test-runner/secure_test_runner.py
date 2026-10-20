@@ -18,7 +18,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from safe_test_diagnostics import summarize as _sanitize_test_output
+from safe_test_diagnostics import collect_bounded as _collect_bounded_failure_hints
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 JOB = re.compile(r"^[0-9a-f]{32}$")
@@ -377,21 +377,7 @@ def _docker_job(config: dict, job_id: str, tar: Path, *, diagnostics: dict | Non
             # This does not change execution status and never publishes raw logs.
             # Use a small Docker log tail with a timeout and bounded parsed output.
             # Host subprocess output is untrusted, including counterfeit test names.
-            try:
-                logs = _run([docker, "logs", "--tail", "160", created_id], timeout=15)
-                if logs.returncode == 0:
-                    # Docker stdout/stderr are both untrusted. Only parse into
-                    # a fixed schema of known test modules and exception types.
-                    diagnostics.update(_sanitize_test_output(
-                        (logs.stdout or b"")[-24576:] + b"\n" +
-                        (logs.stderr or b"")[-24576:]
-                    ))
-                else:
-                    diagnostics["advisory_only"] = True
-                    diagnostics["summary_found"] = False
-            except (OSError, subprocess.TimeoutExpired):
-                diagnostics["advisory_only"] = True
-                diagnostics["summary_found"] = False
+            diagnostics.update(_collect_bounded_failure_hints(docker, created_id))
         return ("PASSED" if code == 0 else "FAILED"), code
     finally:
         if attempted:
