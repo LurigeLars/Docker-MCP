@@ -312,6 +312,14 @@ def work_once() -> dict:
 
 if __name__ == "__main__":
     import sys
-    if sys.argv[1:] != ["worker-once"]:
-        raise SystemExit("Only worker-once is supported")
-    print(json.dumps(work_once()))
+    if sys.argv[1:] == ["worker-once"]:
+        print(json.dumps(work_once()))
+    elif sys.argv[1:] == ["worker-loop"]:
+        # Dedicated long-lived LOCAL process: fixed 30-second queue polling.
+        # No network listener, dynamic commands or external schedule inputs.
+        # Any unexpected failure terminates the worker (fail closed).
+        while True:
+            work_once()
+            time.sleep(30)
+    else:
+        raise SystemExit("Only worker-once and worker-loop are supported")
