@@ -1,0 +1,30 @@
+name: Secure local regression runner tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "local-test-runner/**"
+      - "tests/test_secure_repo_runner.py"
+      - "tests/test_repo_runner_exposure_guard.py"
+      - ".github/workflows/secure-repo-runner.yml"
+      - "compose.public.yaml"
+      - "public/gateway/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  broker-security-tests:
+    name: Offline broker security tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse standalone runner code
+        run: python3 -m compileall -q local-test-runner
+      - name: Exercise malicious inputs and Docker isolation checks (mocked)
+        run: python3 -m unittest discover -s tests -p "test_secure_repo_runner.py" -v
+      - name: Check remote execution denial policy
+        run: python3 -m unittest discover -s tests -p "test_repo_runner_exposure_guard.py" -v
