@@ -3,6 +3,8 @@
 No Docker commands or Git fetches are actually executed.
 """
 import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -113,6 +115,53 @@ class OneShotPR180Tests(unittest.TestCase):
         self.assertIn("$pyVersion.Trim() -ne '3.12'", script)
         self.assertLess(script.index("$pyVersion = & $python -I"),
                         script.index("& $python -E -s"))
+
+    def test_diagnostic_failures_expose_stage_not_subprocess_stderr(self):
+        from subprocess import CompletedProcess
+
+        cases = [
+            ("GIT_ORIGIN", b"fatal: detected dubious ownership in repository /private/path",
+             "PRECHECK_GIT_ORIGIN_EXIT_128_GIT_UNSAFE_OWNERSHIP"),
+            ("GIT_FETCH", b"fatal: could not resolve host: secret.example.test",
+             "PRECHECK_GIT_FETCH_EXIT_128_NETWORK_DNS"),
+            ("IMAGE_ID", b"Error: No such image: operator-private-path",
+             "PRECHECK_IMAGE_ID_EXIT_128_IMAGE_NOT_FOUND"),
+        ]
+        for stage, stderr, expected in cases:
+            with self.subTest(stage=stage):
+                response = CompletedProcess(args=[], returncode=128,
+                                            stdout=b"secret stdout", stderr=stderr)
+                with patch.object(one.subprocess, "run", return_value=response):
+                    with self.assertRaisesRegex(RuntimeError, "^" + expected + "$") as caught:
+                        one._command("stub", ["fixed"], stage=stage)
+                self.assertNotIn("private", str(caught.exception))
+                self.assertNotIn("secret", str(caught.exception))
+
+    def test_preflight_only_never_starts_test_or_mutates_config(self):
+        root = self.base / "DockerLocalRegression"
+        root.mkdir()
+        raw = json.dumps(self.config, sort_keys=True).encode()
+        (root / "config.json").write_bytes(raw)
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.base)}), \
+             patch.object(sys, "argv", ["one_shot_pr180.py", "--preflight-only"]), \
+             patch.object(one, "_preflight", return_value=None) as checked, \
+             patch.object(one, "_execute_one_job") as forbidden, \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(0, one.main())
+        checked.assert_called_once()
+        forbidden.assert_not_called()
+        self.assertEqual((root / "config.json").read_bytes(), raw)
+        self.assertEqual(list(root.glob("one-shot-pr180-*")), [])
+        self.assertIn("NO_TEST_JOB_STARTED", output.getvalue())
+
+    def test_powershell_preflight_mode_is_separate_from_run(self):
+        script = (ROOT / "scripts/windows/run-trade-spine-pr180-once.ps1").read_text()
+        self.assertIn("[switch]$PreflightOnly", script)
+        self.assertIn("'--preflight-only'", script)
+        self.assertIn("PR180_PREFLIGHT_NOT_PASSED", script)
+        self.assertLess(script.index("if ($PreflightOnly)"),
+                        script.index("START PR180: fixed commit"))
 
     def test_powershell_wrapper_cannot_accept_dynamic_pr_or_commands(self):
         script = (ROOT / "scripts/windows/run-trade-spine-pr180-once.ps1").read_text()
