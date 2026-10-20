@@ -28,6 +28,10 @@ MAX_FILES = 5000
 DAY_LIMIT = 4
 TIME_LIMIT_SECONDS = 600
 
+
+class SandboxCleanupFailure(RuntimeError):
+    """Container may remain running; block all future jobs until inspected."""
+
 def root() -> Path:
     base = os.environ.get(ROOT_ENV)
     if not base:
@@ -263,7 +267,7 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
             # Name is constructed from a validated random 128-bit identifier.
             removed = _run([docker, "rm", "--force", name], timeout=30)
             if removed.returncode:
-                raise RuntimeError("Sandbox cleanup failed; manual intervention required")
+                raise SandboxCleanupFailure("Sandbox cleanup failed; manual intervention required")
 
 def work_once() -> dict:
     config = _config()
@@ -287,17 +291,23 @@ def work_once() -> dict:
         os.replace(source, r / "running" / source.name)
         start = time.monotonic()
         state, exit_code = "REJECTED", None
+        cleanup_failed = False
         try:
             with tempfile.TemporaryDirectory(prefix="sandbox-" + source.stem + "-", dir=r / "scratch") as tmp:
                 tar = Path(tmp) / "source.tar"
                 _snapshot(config, request["commit_sha"], tar)
                 state, exit_code = _docker_job(config, source.stem, tar)
+        except SandboxCleanupFailure:
+            state, cleanup_failed = "REJECTED", True
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             state = "REJECTED"
         result = {**request, "status": state, "exit_code": exit_code,
                   "elapsed_seconds": round(time.monotonic() - start, 1)}
         _atomic_write(r / "results" / source.name, result)
-        (r / "running" / source.name).unlink()
+        if not cleanup_failed:
+            (r / "running" / source.name).unlink()
+        # Keep the running sentinel if Docker cleanup could not be verified.
+        # The next worker and any submitter then fail closed.
         return {"job_id": source.stem, "status": state}
 
 if __name__ == "__main__":
