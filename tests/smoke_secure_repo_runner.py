@@ -7,6 +7,7 @@ accessible to the test container. The Git checkout is synthetic.
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,8 @@ class Sandbox(unittest.TestCase):
             "origin_url": "https://github.com/LurigeLars/trade-spine.git",
             "allowed_ref": "refs/remotes/origin/security-fixture",
             "image_id": image,
+            "git_executable": str(Path(shutil.which("git")).resolve()),
+            "docker_executable": str(Path(shutil.which("docker")).resolve()),
         }
         (job_root / "config.json").write_text(json.dumps(config), encoding="utf-8")
         os.environ[runner.ROOT_ENV] = str(job_root)
