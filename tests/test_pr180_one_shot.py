@@ -99,6 +99,21 @@ class OneShotPR180Tests(unittest.TestCase):
         self.assertEqual(len(list((dirs[0] / "running").glob("*.json"))), 1)
         self.assertNotIn(one.broker.ROOT_ENV, os.environ)
 
+    def test_powershell_chooses_exactly_one_reviewed_python312(self):
+        script = (ROOT / "scripts/windows/run-trade-spine-pr180-once.ps1").read_text()
+        # Windows can return multiple python.exe entries, including the
+        # WindowsApps placeholder; never pass a list to PowerShell call operator.
+        self.assertNotIn("(Get-Command python.exe", script)
+        self.assertIn(
+            "$python = Join-Path $env:LOCALAPPDATA 'Programs\\Python\\Python312\\python.exe'",
+            script,
+        )
+        self.assertIn("Test-Path -LiteralPath $python -PathType Leaf", script)
+        self.assertIn("sys.version_info.major", script)
+        self.assertIn("$pyVersion.Trim() -ne '3.12'", script)
+        self.assertLess(script.index("$pyVersion = & $python -I"),
+                        script.index("& $python -E -s"))
+
     def test_powershell_wrapper_cannot_accept_dynamic_pr_or_commands(self):
         script = (ROOT / "scripts/windows/run-trade-spine-pr180-once.ps1").read_text()
         self.assertIn("ExpectedDockerMcpHead", script)
