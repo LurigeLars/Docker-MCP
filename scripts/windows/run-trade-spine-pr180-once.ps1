@@ -40,7 +40,19 @@ if (@(& $git -C $repo status --porcelain).Count -gt 0 -or $LASTEXITCODE -ne 0) {
 if ((& $git -C $repo remote get-url origin).Trim() -ne 'https://github.com/LurigeLars/Docker-MCP.git' -or $LASTEXITCODE -ne 0) {
     throw 'Unexpected Docker-MCP origin.'
 }
-$python = (Get-Command python.exe -CommandType Application -ErrorAction Stop).Source
+# There may be several python.exe applications on PATH (e.g. an actual
+# Python 3.12 installation and the WindowsApps Store alias). Never coerce
+# multiple Get-Command results into one executable string, and do not run an
+# arbitrary PATH-selected Python for this security-sensitive broker.
+$python = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw 'Reviewed Python 3.12 interpreter not found in LocalAppData.'
+}
+$pyVersion = & $python -I -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+if ($LASTEXITCODE -ne 0 -or @($pyVersion).Count -ne 1 -or
+    $pyVersion.Trim() -ne '3.12') {
+    throw 'Expected a working Python 3.12 interpreter.'
+}
 Write-Host 'START PR180: fixed commit, one disposable offline Docker regression run.'
 & $python -E -s (Join-Path $repo 'local-test-runner\one_shot_pr180.py')
 $runCode = $LASTEXITCODE
