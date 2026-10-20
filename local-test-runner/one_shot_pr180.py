@@ -44,6 +44,12 @@ def _command(executable: str, args: list[str], *, stage: str,
             # Manager helper for this one approved fetch. The empty helper
             # clears untrusted repo-local helpers; no global config is enabled.
             # GCM may read cached Windows credentials but MUST NOT prompt.
+            # GCM may locate its already-encrypted Windows credential
+            # store via these known-folder variables. Provide them only to
+            # the fetch subprocess; never expose full inherited environment.
+            for key in ("USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+                if key in os.environ:
+                    env[key] = os.environ[key]
             env["GCM_INTERACTIVE"] = "0"
             args = ["-c", "credential.helper=", "-c",
                     "credential.helper=manager",
