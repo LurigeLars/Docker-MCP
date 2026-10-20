@@ -305,11 +305,12 @@ def work_once() -> dict:
     r = root()
     _paths(r)
     with _locked(r, "worker.lock"):
+        # Never report IDLE while an orphaned or uncertain container may remain.
+        if list((r / "running").glob("*.json")):
+            raise RuntimeError("Stale running job exists; manual investigation required")
         jobs = sorted((r / "requests").glob("*.json"))
         if not jobs:
             return {"status": "IDLE"}
-        if list((r / "running").glob("*.json")):
-            raise RuntimeError("Stale running job exists; manual investigation required")
         source = jobs[0]
         if not JOB.fullmatch(source.stem) or source.is_symlink():
             raise ValueError("Unsafe queued job")
