@@ -49,6 +49,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Build the reviewed disposable test image
         run: docker build -t dockerlocal-regression-sandbox:review local-test-runner
+      - name: Verify local stdio tool registration with reviewed pinned MCP SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            --mount "type=bind,source=${PWD}/local-test-runner,target=/review,readonly" \
+            --entrypoint python dockerlocal-regression-sandbox:review \
+            -c "import sys; sys.path.insert(0, '/review'); import local_mcp; assert local_mcp.mcp is not None"
       - name: Verify offline sandbox from a synthetic Git commit
         run: python3 tests/smoke_secure_repo_runner.py
       - name: Generate complete image SBOM
