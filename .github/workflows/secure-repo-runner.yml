@@ -28,6 +28,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p "test_secure_repo_runner.py" -v
       - name: Check remote execution denial policy
         run: python3 -m unittest discover -s tests -p "test_repo_runner_exposure_guard.py" -v
+      - name: Exercise authenticated public gateway negative calls (offline synthetic JWT)
+        run: node tests/repo_runner_gateway_denial.mjs
 
   windows-offline-contract:
     name: Windows broker input validation
