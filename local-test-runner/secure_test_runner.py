@@ -1,0 +1,280 @@
+"""Local-only, fail-closed regression job broker.
+
+This module NEVER runs repository code on the host. Execution is delegated
+to a pinned, disposable Docker image. No network listener or Docker-MCP
+public gateway route is defined here.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import time
+import uuid
+from datetime import datetime, timezone
+
+SHA = re.compile(r"^[0-9a-f]{40}$")
+JOB = re.compile(r"^[0-9a-f]{32}$")
+IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ROOT_ENV = "DOCKERLOCAL_TEST_RUNNER_ROOT"
+ALIAS = "trade-spine"
+MAX_ARCHIVE = 40 * 1024 * 1024
+MAX_FILES = 5000
+DAY_LIMIT = 4
+TIME_LIMIT_SECONDS = 600
+
+def root() -> Path:
+    base = os.environ.get(ROOT_ENV)
+    if not base:
+        raise RuntimeError("Local private test runner root not configured")
+    target = Path(base)
+    if not target.is_absolute() or target.is_symlink():
+        raise ValueError("Private job root must be an absolute, non-symlink path")
+    return target
+
+def _config():
+    r = root()
+    path = r / "config.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("enabled") is not True or set(data) != {
+        "enabled", "repo_path", "origin_url", "allowed_ref", "image_id"
+    }:
+        raise RuntimeError("Local test runner is not operator-enabled")
+    repo = Path(data["repo_path"])
+    if not repo.is_absolute() or repo.is_symlink() or repo.resolve(strict=True) != repo.absolute():
+        raise ValueError("Repository checkout must be an exact real absolute path")
+    if not (isinstance(data["origin_url"], str) and
+            data["origin_url"] == "https://github.com/LurigeLars/trade-spine.git"):
+        raise ValueError("Unapproved repository remote")
+    if not re.fullmatch(r"refs/remotes/origin/[A-Za-z0-9._/-]{1,100}", str(data["allowed_ref"])):
+        raise ValueError("Unapproved origin tracking reference")
+    if not IMAGE.fullmatch(str(data["image_id"])):
+        raise ValueError("Runner image must be an exact local image ID")
+    return data
+
+def _atomic_write(path: Path, obj: dict) -> None:
+    tmp = path.with_name("." + uuid.uuid4().hex + ".tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as f:
+            json.dump(obj, f, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+def _locked(root_path: Path, name: str):
+    """Atomic, fail-closed lock; stale locks require local manual recovery."""
+    class Lock:
+        def __enter__(self):
+            self.path = root_path / name
+            self.path.mkdir()
+            return self
+        def __exit__(self, *_):
+            self.path.rmdir()
+    return Lock()
+
+def _paths(r: Path):
+    for item in ("requests", "running", "results", "scratch"):
+        (r / item).mkdir(parents=True, exist_ok=True)
+
+def _validate_input(repo: str, commit_sha: str) -> None:
+    if repo != ALIAS or not isinstance(commit_sha, str) or not SHA.fullmatch(commit_sha):
+        raise ValueError("Only trade-spine and a full lowercase commit SHA are accepted")
+
+def submit(repo: str, commit_sha: str) -> dict:
+    _validate_input(repo, commit_sha)
+    config = _config()
+    r = root()
+    _paths(r)
+    with _locked(r, "submit.lock"):
+        now = int(time.time())
+        day = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
+        existing = list((r / "requests").glob("*.json")) + list((r / "running").glob("*.json"))
+        if existing:
+            raise RuntimeError("A test job is already queued or running")
+        records = list((r / "results").glob("*.json"))
+        count = 0
+        for item in records:
+            try:
+                saved = json.loads(item.read_text(encoding="utf-8"))
+                count += saved.get("day") == day
+            except (ValueError, OSError):
+                raise RuntimeError("Unknown job history; fail closed")
+        if count >= DAY_LIMIT:
+            raise RuntimeError("Daily test job limit reached")
+        job_id = uuid.uuid4().hex
+        _atomic_write(r / "requests" / (job_id + ".json"), {
+            "job_id": job_id, "repo": ALIAS, "commit_sha": commit_sha,
+            "day": day, "created_unix": now,
+        })
+    return {"job_id": job_id, "status": "QUEUED", "repo": ALIAS, "commit_sha": commit_sha}
+
+def status(job_id: str) -> dict:
+    if not isinstance(job_id, str) or not JOB.fullmatch(job_id):
+        raise ValueError("Invalid job ID")
+    _config()
+    r = root()
+    for directory, state in (("results", None), ("running", "RUNNING"), ("requests", "QUEUED")):
+        candidate = r / directory / (job_id + ".json")
+        if candidate.is_file() and not candidate.is_symlink():
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+            if data.get("job_id") != job_id or data.get("repo") != ALIAS or not SHA.fullmatch(str(data.get("commit_sha", ""))):
+                raise ValueError("Invalid job record")
+            return {"job_id": job_id, "repo": ALIAS, "commit_sha": data["commit_sha"],
+                    "status": state or data["status"], **({
+                        "exit_code": data.get("exit_code"),
+                        "elapsed_seconds": data.get("elapsed_seconds")
+                    } if state is None else {})}
+    return {"job_id": job_id, "status": "UNKNOWN"}
+
+def _run(argv: list[str], *, timeout: int = 30, cwd: Path | None = None,
+         environment: dict | None = None) -> subprocess.CompletedProcess:
+    # No shell, no interpolation, no caller command or arguments.
+    return subprocess.run(argv, cwd=cwd, env=environment,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=timeout, check=False)
+
+def _git(args: list[str], checkout: Path, *, timeout: int = 30):
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("Git executable unavailable")
+    env = {k: os.environ[k] for k in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP") if k in os.environ}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
+    command = [git, "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false",
+               "-C", str(checkout), *args]
+    result = _run(command, timeout=timeout, environment=env)
+    if result.returncode:
+        raise RuntimeError("Git validation or export failed")
+    return result.stdout.decode("utf-8", "replace").strip()
+
+def _verify_archive(archive_path: Path):
+    if archive_path.stat().st_size > MAX_ARCHIVE:
+        raise ValueError("Snapshot archive is too large")
+    names = set()
+    with tarfile.open(archive_path, mode="r:") as tar:
+        members = tar.getmembers()
+        if len(members) > MAX_FILES:
+            raise ValueError("Snapshot contains too many entries")
+        for member in members:
+            name = member.name
+            parts = name.rstrip("/").split("/")
+            if (name.startswith("/") or "\\" in name or ":" in name or
+                    any(x in ("", ".", "..") for x in parts) or
+                    any(x.casefold() in (".git", ".env", ".ssh", ".aws") for x in parts) or
+                    name in names or not (member.isfile() or member.isdir()) or
+                    member.size > MAX_ARCHIVE or member.mode & 0o6000):
+                raise ValueError("Unsafe archive member")
+            names.add(name)
+
+def _snapshot(config: dict, commit_sha: str, target: Path):
+    checkout = Path(config["repo_path"])
+    if _git(["remote", "get-url", "origin"], checkout) != config["origin_url"]:
+        raise ValueError("Repository origin changed")
+    if _git(["symbolic-ref", "--short", "HEAD"], checkout) != "main":
+        raise ValueError("Runtime checkout is not on main")
+    if _git(["status", "--porcelain=v1", "--untracked-files=normal"], checkout):
+        raise ValueError("Runtime checkout is dirty")
+    if _git(["rev-parse", "--verify", commit_sha + "^{commit}"], checkout) != commit_sha:
+        raise ValueError("Requested object is not a commit")
+    _git(["merge-base", "--is-ancestor", commit_sha, config["allowed_ref"]], checkout)
+    git = shutil.which("git")
+    env = {k: os.environ[k] for k in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP") if k in os.environ}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
+    output = _run([git, "-c", "core.fsmonitor=false", "-C", str(checkout),
+                   "archive", "--format=tar", "--output=" + str(target), commit_sha],
+                  timeout=45, environment=env)
+    if output.returncode:
+        raise RuntimeError("Snapshot export failed")
+    _verify_archive(target)
+
+def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
+    docker = shutil.which("docker")
+    if not docker:
+        raise RuntimeError("Docker executable unavailable")
+    name = "dl-regression-" + job_id
+    image_id = config["image_id"]
+    inspect = _run([docker, "image", "inspect", "--format", "{{.Id}}", image_id])
+    if inspect.returncode or inspect.stdout.decode().strip() != image_id:
+        raise RuntimeError("Configured immutable runner image unavailable")
+    args = [docker, "create", "--name", name, "--network", "none", "--read-only",
+            "--user", "65532:65532", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--pids-limit", "64",
+            "--memory", "1024m", "--cpus", "1", "--init=false",
+            "--tmpfs", "/workspace:rw,nosuid,nodev,size=256m,uid=65532,gid=65532,mode=0700",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m,uid=65532,gid=65532,mode=1777",
+            "--mount", "type=bind,source=" + str(tar) + ",target=/input/source.tar,readonly",
+            "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
+            "--label", "dockerlocal.test-job=" + job_id, image_id]
+    created = False
+    try:
+        out = _run(args, timeout=30)
+        if out.returncode:
+            raise RuntimeError("Sandbox create refused")
+        created = True
+        started = _run([docker, "start", name], timeout=30)
+        if started.returncode:
+            raise RuntimeError("Sandbox start refused")
+        try:
+            waited = _run([docker, "wait", name], timeout=TIME_LIMIT_SECONDS + 5)
+        except subprocess.TimeoutExpired:
+            return "TIMED_OUT", None
+        if waited.returncode:
+            raise RuntimeError("Sandbox wait failed")
+        value = waited.stdout.decode("ascii", "replace").strip()
+        if not re.fullmatch(r"[0-9]{1,3}", value):
+            raise RuntimeError("Invalid sandbox exit status")
+        code = int(value)
+        return ("PASSED" if code == 0 else "FAILED"), code
+    finally:
+        if created:
+            # Name is constructed from a validated random 128-bit identifier.
+            _run([docker, "rm", "--force", name], timeout=30)
+
+def work_once() -> dict:
+    config = _config()
+    r = root()
+    _paths(r)
+    with _locked(r, "worker.lock"):
+        jobs = sorted((r / "requests").glob("*.json"))
+        if not jobs:
+            return {"status": "IDLE"}
+        if list((r / "running").glob("*.json")):
+            raise RuntimeError("Stale running job exists; manual investigation required")
+        source = jobs[0]
+        if not JOB.fullmatch(source.stem) or source.is_symlink():
+            raise ValueError("Unsafe queued job")
+        request = json.loads(source.read_text(encoding="utf-8"))
+        _validate_input(request.get("repo"), request.get("commit_sha"))
+        if request.get("job_id") != source.stem or set(request) != {
+            "job_id", "repo", "commit_sha", "day", "created_unix"
+        }:
+            raise ValueError("Malformed queued job")
+        os.replace(source, r / "running" / source.name)
+        start = time.monotonic()
+        state, exit_code = "REJECTED", None
+        try:
+            with tempfile.TemporaryDirectory(prefix="sandbox-" + source.stem + "-", dir=r / "scratch") as tmp:
+                tar = Path(tmp) / "source.tar"
+                _snapshot(config, request["commit_sha"], tar)
+                state, exit_code = _docker_job(config, source.stem, tar)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            state = "REJECTED"
+        result = {**request, "status": state, "exit_code": exit_code,
+                  "elapsed_seconds": round(time.monotonic() - start, 1)}
+        _atomic_write(r / "results" / source.name, result)
+        (r / "running" / source.name).unlink()
+        return {"job_id": source.stem, "status": state}
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:] != ["worker-once"]:
+        raise SystemExit("Only worker-once is supported")
+    print(json.dumps(work_once()))
