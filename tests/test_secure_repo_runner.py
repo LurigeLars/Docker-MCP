@@ -133,6 +133,11 @@ class SecureRunnerTests(unittest.TestCase):
         calls = []
         def fake_run(argv, **_kwargs):
             calls.append(argv)
+            if "info" in argv:
+                return type("Result", (), {
+                    "returncode": 0,
+                    "stdout": json.dumps(["name=seccomp,profile=builtin"]).encode(),
+                })()
             if "image" in argv and "inspect" in argv:
                 return type("Result", (), {"returncode": 0, "stdout": IMAGE.encode()})()
             if "create" in argv:
