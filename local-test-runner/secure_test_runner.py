@@ -33,13 +33,17 @@ def root() -> Path:
     if not base:
         raise RuntimeError("Local private test runner root not configured")
     target = Path(base)
-    if not target.is_absolute() or target.is_symlink():
+    if not target.is_absolute() or target.is_symlink() or (
+        target.exists() and target.resolve(strict=True) != target.absolute()
+    ):
         raise ValueError("Private job root must be an absolute, non-symlink path")
     return target
 
 def _config():
     r = root()
     path = r / "config.json"
+    if path.is_symlink():
+        raise ValueError("Symlinked operator configuration is not allowed")
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("enabled") is not True or set(data) != {
         "enabled", "repo_path", "origin_url", "allowed_ref", "image_id"
@@ -81,7 +85,10 @@ def _locked(root_path: Path, name: str):
 
 def _paths(r: Path):
     for item in ("requests", "running", "results", "scratch"):
-        (r / item).mkdir(parents=True, exist_ok=True)
+        directory = r / item
+        directory.mkdir(parents=True, exist_ok=True)
+        if directory.is_symlink() or directory.resolve(strict=True) != directory.absolute():
+            raise ValueError("Private job directory redirects outside runner root")
 
 def _validate_input(repo: str, commit_sha: str) -> None:
     if repo != ALIAS or not isinstance(commit_sha, str) or not SHA.fullmatch(commit_sha):
@@ -219,6 +226,24 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
         if out.returncode:
             raise RuntimeError("Sandbox create refused")
         created = True
+        # Independently check the runtime security boundary before starting.
+        state = _run([docker, "inspect", "--format", "{{json .HostConfig}}", name], timeout=30)
+        if state.returncode:
+            raise RuntimeError("Container isolation inspection failed")
+        host = json.loads(state.stdout.decode("utf-8", "replace"))
+        if (host.get("NetworkMode") != "none" or host.get("ReadonlyRootfs") is not True
+                or host.get("Privileged") is not False
+                or "ALL" not in (host.get("CapDrop") or [])
+                or "no-new-privileges" not in (host.get("SecurityOpt") or [])
+                or host.get("PidsLimit") != 64
+                or host.get("Memory", 0) > 1024 * 1024 * 1024
+                or host.get("Memory", 0) <= 0):
+            raise RuntimeError("Container isolation mismatch")
+        mounts = host.get("Mounts") or []
+        if (len(mounts) != 1 or mounts[0].get("Type") != "bind"
+                or mounts[0].get("Target") != "/input/source.tar"
+                or mounts[0].get("ReadOnly") is not True):
+            raise RuntimeError("Unexpected container mount")
         started = _run([docker, "start", name], timeout=30)
         if started.returncode:
             raise RuntimeError("Sandbox start refused")
@@ -236,7 +261,9 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
     finally:
         if created:
             # Name is constructed from a validated random 128-bit identifier.
-            _run([docker, "rm", "--force", name], timeout=30)
+            removed = _run([docker, "rm", "--force", name], timeout=30)
+            if removed.returncode:
+                raise RuntimeError("Sandbox cleanup failed; manual intervention required")
 
 def work_once() -> dict:
     config = _config()
