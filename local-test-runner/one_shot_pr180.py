@@ -22,8 +22,15 @@ EXPECTED_IMAGE = "sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd893
 APPROVED_ORIGIN = "https://github.com/LurigeLars/trade-spine.git"
 APPROVED_CHECKOUT = r"C:\ClaudeCode\trade-spine"
 
-def _command(executable: str, args: list[str], *, git: bool = False, timeout: int = 90) -> str:
-    """Fixed argv; no shell, stdout/stderr or paths returned to model."""
+def _command(executable: str, args: list[str], *, stage: str,
+             git: bool = False, timeout: int = 90) -> str:
+    """Fixed argv and bounded phase codes; never expose untrusted subprocess output."""
+    allowed_stages = {
+        "GIT_ORIGIN", "GIT_BRANCH", "GIT_STATUS", "GIT_FETCH",
+        "GIT_REF", "GIT_POST_FETCH_STATUS", "IMAGE_ID",
+    }
+    if stage not in allowed_stages:
+        raise RuntimeError("PRECHECK_INVALID_STAGE")
     env = None
     if git:
         env = {k: os.environ[k] for k in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP")
@@ -31,11 +38,36 @@ def _command(executable: str, args: list[str], *, git: bool = False, timeout: in
         env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
                     "GIT_LFS_SKIP_SMUDGE": "1"})
-    result = subprocess.run([executable, *args], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            check=False, timeout=timeout, env=env)
+    try:
+        result = subprocess.run([executable, *args], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                check=False, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("PRECHECK_" + stage + "_TIMEOUT") from exc
+    except OSError as exc:
+        raise RuntimeError("PRECHECK_" + stage + "_EXEC_FAILED") from exc
     if result.returncode:
-        raise RuntimeError("APPROVED_COMMAND_FAILED")
+        # Classify only recognizable conditions. No stderr/stdout, source,
+        # URLs, credentials, local paths or untrusted text are ever printed.
+        error = result.stderr.decode("utf-8", "replace").casefold()
+        reason = "UNKNOWN"
+        if "dubious ownership" in error or "safe.directory" in error:
+            reason = "GIT_UNSAFE_OWNERSHIP"
+        elif "could not read username" in error or "authentication failed" in error:
+            reason = "AUTH_REQUIRED"
+        elif "could not resolve host" in error or "name or service not known" in error:
+            reason = "NETWORK_DNS"
+        elif "ssl certificate problem" in error or "certificate verify failed" in error:
+            reason = "NETWORK_TLS"
+        elif "couldn't find remote ref" in error or "remote ref does not exist" in error:
+            reason = "REF_NOT_FOUND"
+        elif "not a git repository" in error:
+            reason = "NOT_A_REPOSITORY"
+        elif "no such image" in error:
+            reason = "IMAGE_NOT_FOUND"
+        returncode = result.returncode
+        rc = str(returncode) if isinstance(returncode, int) and 0 < returncode <= 255 else "OTHER"
+        raise RuntimeError("PRECHECK_" + stage + "_EXIT_" + rc + "_" + reason)
     return result.stdout.decode("utf-8", "replace").strip()
 
 def _preflight(original: dict) -> None:
@@ -57,24 +89,31 @@ def _preflight(original: dict) -> None:
     prefix = [ "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false",
                "-C", str(repo) ]
 
-    def query(*args: str, timeout: int = 30) -> str:
-        return _command(git, [*prefix, *args], git=True, timeout=timeout)
+    def query(*args: str, stage: str, timeout: int = 30) -> str:
+        return _command(git, [*prefix, *args], git=True, stage=stage,
+                        timeout=timeout)
 
-    if (query("remote", "get-url", "origin") != APPROVED_ORIGIN
-            or query("symbolic-ref", "--short", "HEAD") != "main"
-            or query("status", "--porcelain=v1", "--untracked-files=normal")):
-        raise RuntimeError("TRADE_SPINE_CHECKOUT_NOT_APPROVED")
+    if query("remote", "get-url", "origin", stage="GIT_ORIGIN") != APPROVED_ORIGIN:
+        raise RuntimeError("TRADE_SPINE_ORIGIN_CHANGED")
+    if query("symbolic-ref", "--short", "HEAD", stage="GIT_BRANCH") != "main":
+        raise RuntimeError("TRADE_SPINE_WRONG_BRANCH")
+    if query("status", "--porcelain=v1", "--untracked-files=normal",
+             stage="GIT_STATUS"):
+        raise RuntimeError("TRADE_SPINE_CHECKOUT_DIRTY")
 
     # Update only the explicitly approved remote-tracking ref; no checkout,
     # merge, reset, branch switch, submodule fetch or repository scripts.
     query("fetch", "--no-tags", "--no-recurse-submodules", "origin",
-          "+refs/heads/" + SOURCE_BRANCH + ":" + REF, timeout=90)
-    if query("rev-parse", "--verify", REF + "^{commit}") != TARGET_SHA:
+          "+refs/heads/" + SOURCE_BRANCH + ":" + REF,
+          stage="GIT_FETCH", timeout=90)
+    if query("rev-parse", "--verify", REF + "^{commit}",
+             stage="GIT_REF") != TARGET_SHA:
         raise RuntimeError("PR180_HEAD_CHANGED")
-    if query("status", "--porcelain=v1", "--untracked-files=normal"):
+    if query("status", "--porcelain=v1", "--untracked-files=normal",
+             stage="GIT_POST_FETCH_STATUS"):
         raise RuntimeError("TRADE_SPINE_CHECKOUT_DIRTY_AFTER_FETCH")
     if _command(docker, ["image", "inspect", "--format", "{{.Id}}",
-                          EXPECTED_IMAGE], timeout=30) != EXPECTED_IMAGE:
+                         EXPECTED_IMAGE], stage="IMAGE_ID", timeout=30) != EXPECTED_IMAGE:
         raise RuntimeError("PINNED_IMAGE_NOT_FOUND")
 
 def _execute_one_job(original: dict, base: Path) -> dict:
@@ -111,9 +150,10 @@ def _execute_one_job(original: dict, base: Path) -> dict:
             shutil.rmtree(temp)
 
 def main() -> int:
-    if len(sys.argv) != 1:
+    if sys.argv[1:] not in ([], ["--preflight-only"]):
         print("PR180_ONE_SHOT_ABORTED code=ARGUMENTS_NOT_ALLOWED")
         return 2
+    preflight_only = sys.argv[1:] == ["--preflight-only"]
     try:
         local = os.environ.get("LOCALAPPDATA")
         if not local:
@@ -125,6 +165,12 @@ def main() -> int:
         original_bytes = (base / "config.json").read_bytes()
         original = json.loads(original_bytes)
         _preflight(original)
+        if preflight_only:
+            if (base / "config.json").read_bytes() != original_bytes:
+                raise RuntimeError("PERSISTENT_CONFIG_CHANGED")
+            print("PR180_PREFLIGHT status=PASSED target_sha_verified=true image_verified=true")
+            print("NO_TEST_JOB_STARTED persistent_enabled=false")
+            return 0
         result = _execute_one_job(original, base)
         if (base / "config.json").read_bytes() != original_bytes:
             raise RuntimeError("PERSISTENT_CONFIG_CHANGED")

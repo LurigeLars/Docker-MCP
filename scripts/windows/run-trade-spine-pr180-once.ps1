@@ -5,7 +5,8 @@
 param(
     [Parameter(Mandatory=$true)]
     [ValidatePattern('^[0-9a-f]{40}$')]
-    [string]$ExpectedDockerMcpHead
+    [string]$ExpectedDockerMcpHead,
+    [switch]$PreflightOnly
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
@@ -53,8 +54,19 @@ if ($LASTEXITCODE -ne 0 -or @($pyVersion).Count -ne 1 -or
     $pyVersion.Trim() -ne '3.12') {
     throw 'Expected a working Python 3.12 interpreter.'
 }
+$runner = Join-Path $repo 'local-test-runner\one_shot_pr180.py'
+if ($PreflightOnly) {
+    Write-Host 'PR180 PREFLIGHT ONLY: approved Git ref + Docker image; no test job.'
+    & $python -E -s $runner '--preflight-only'
+    $preflightCode = $LASTEXITCODE
+    if ($preflightCode -ne 0) {
+        throw "PR180_PREFLIGHT_NOT_PASSED exit_code=$preflightCode"
+    }
+    Write-Host 'PR180 PREFLIGHT COMPLETE: persistent disabled state unchanged.'
+    return
+}
 Write-Host 'START PR180: fixed commit, one disposable offline Docker regression run.'
-& $python -E -s (Join-Path $repo 'local-test-runner\one_shot_pr180.py')
+& $python -E -s $runner
 $runCode = $LASTEXITCODE
 # No persistent config modified; Python's private ephemeral queue is disabled
 # and removed on normal cleanup, preserved as disabled evidence if uncertain.
