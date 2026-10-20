@@ -15,13 +15,28 @@ $private = Join-Path $env:LOCALAPPDATA 'DockerLocalRegression'
 $imageTag = 'dockerlocal-regression-sandbox:staged'
 # Fixed trusted executables, never resolve an untrusted PATH entry.
 $gitExe = Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
-$dockerExe = Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe'
+# Docker Desktop's CLI location varies across installation channels.
+# Resolve it using the same Windows command lookup as maintenance-runner.ps1,
+# then require an authentic Docker-signed executable before invoking it.
+# Never accept a caller-provided binary, path override or arbitrary command.
 if (-not (Test-Path -LiteralPath $gitExe -PathType Leaf)) {
     throw 'Expected Git executable is missing.'
 }
-if (-not (Test-Path -LiteralPath $dockerExe -PathType Leaf)) {
-    throw 'Expected Docker executable is missing.'
+$dockerCommand = Get-Command docker.exe -CommandType Application -ErrorAction Stop
+$dockerExe = $dockerCommand.Source
+if (-not $dockerExe -or -not (Test-Path -LiteralPath $dockerExe -PathType Leaf)) {
+    throw 'Docker CLI could not be resolved to an existing executable.'
 }
+if ((Get-Item -LiteralPath $dockerExe -ErrorAction Stop).Attributes -band
+    [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Docker CLI may not be a symlink or reparse point.'
+}
+$dockerSignature = Get-AuthenticodeSignature -FilePath $dockerExe -ErrorAction Stop
+if ($dockerSignature.Status -ne 'Valid' -or
+    $dockerSignature.SignerCertificate.Subject -notmatch '(?i)Docker') {
+    throw 'Docker CLI signature or publisher is unverified. No executable was run.'
+}
+$dockerExe = (Resolve-Path -LiteralPath $dockerExe).Path
 
 # No model-provided repository path, image, command, registry or destination.
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is missing.' }
