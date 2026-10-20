@@ -1,7 +1,6 @@
 """AIRSEA report boundary: fixed host path, aggregate-only and no model SQL access."""
 import importlib.util
 import json
-import os
 import sqlite3
 import sys
 import tempfile
