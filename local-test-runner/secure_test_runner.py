@@ -212,6 +212,17 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
         raise RuntimeError("Docker executable unavailable")
     name = "dl-regression-" + job_id
     image_id = config["image_id"]
+    # Require a real seccomp-isolated Linux Docker daemon, rather than
+    # trusting implicit daemon defaults that an administrator may disable.
+    daemon = _run([docker, "info", "--format", "{{json .SecurityOptions}}"])
+    if daemon.returncode:
+        raise RuntimeError("Docker security options unavailable")
+    options = json.loads(daemon.stdout.decode("utf-8", "replace"))
+    if not isinstance(options, list) or not any(
+        isinstance(x, str) and x.startswith("name=seccomp,") and
+        "unconfined" not in x for x in options
+    ):
+        raise RuntimeError("Docker daemon seccomp policy is missing")
     inspect = _run([docker, "image", "inspect", "--format", "{{.Id}}", image_id])
     if inspect.returncode or inspect.stdout.decode().strip() != image_id:
         raise RuntimeError("Configured immutable runner image unavailable")
@@ -240,9 +251,21 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
                 or "ALL" not in (host.get("CapDrop") or [])
                 or "no-new-privileges" not in (host.get("SecurityOpt") or [])
                 or host.get("PidsLimit") != 64
-                or host.get("Memory", 0) > 1024 * 1024 * 1024
-                or host.get("Memory", 0) <= 0):
+                or host.get("NanoCpus") != 1_000_000_000
+                or host.get("Memory") != 1024 * 1024 * 1024):
             raise RuntimeError("Container isolation mismatch")
+        scratch = host.get("Tmpfs") or {}
+        if set(scratch) != {"/workspace", "/tmp"}:
+            raise RuntimeError("Unexpected container writable filesystem")
+        configuration = _run([docker, "inspect", "--format", "{{json .Config}}", name], timeout=30)
+        if configuration.returncode:
+            raise RuntimeError("Container configuration inspection failed")
+        container_cfg = json.loads(configuration.stdout.decode("utf-8", "replace"))
+        if (container_cfg.get("User") != "65532:65532"
+                or container_cfg.get("Entrypoint") !=
+                    ["python", "-I", "/runner/container_entrypoint.py"]
+                or container_cfg.get("Volumes")):
+            raise RuntimeError("Untrusted sandbox image entrypoint or identity")
         mounts = host.get("Mounts") or []
         if (len(mounts) != 1 or mounts[0].get("Type") != "bind"
                 or mounts[0].get("Target") != "/input/source.tar"
