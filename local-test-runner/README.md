@@ -61,6 +61,20 @@ from Git are hostile code and run exclusively inside the short-lived sandbox.
 - Existing DockerLocal/public gateway, Maintenance Runner, socket proxy,
   Cloudflare and live Trade Spine installation remain unchanged.
 
+## One-time Windows acceptance (does not enable anything)
+
+After reviewing PR #91, attach the PR branch in a **separate worktree**
+without changing the canonical Docker-MCP `main` checkout. From that worktree,
+run `scripts/windows/verify-secure-test-runner.ps1` once. The script
+requires Linux Docker Desktop with seccomp, a clean exact review branch and
+the pinned Python base digest. It refuses to overwrite an existing acceptance
+image, runs a synthetic no-network sandbox smoke and removes only the image
+tag it built. It never creates a service, modifies credentials, or registers a
+scheduled task. Treat ANY failure as a release blocker requiring review.
+
+This independent host acceptance is required even if GitHub's Windows
+input-validation tests and Linux Docker smoke pass.
+
 ## Release blockers
 
 GitHub-hosted Linux Docker smoke and mocked input-negative tests exist, but
