@@ -75,9 +75,14 @@ class Sandbox(unittest.TestCase):
         os.environ[runner.ROOT_ENV] = str(job_root)
         queued = runner.submit("trade-spine", sha)
         result = runner.work_once()
-        if result["status"] != "PASSED":
-            raise RuntimeError("The isolated smoke test did not pass")
         completed = runner.status(queued["job_id"])
+        # Safe, bounded diagnostics only: never print Docker/Git stderr, source,
+        # credentials or raw test output.
+        if result["status"] != "PASSED":
+            print("SANDBOX_SMOKE_FAILED phase=" + str(completed.get("phase")) +
+                  " code=" + str(completed.get("failure_code")) +
+                  " status=" + str(completed.get("status")))
+            raise RuntimeError("The isolated smoke test did not pass")
         if completed["status"] != "PASSED" or completed["exit_code"] != 0:
             raise RuntimeError("Untrustworthy sandbox result")
         jobs = fixed(["docker", "ps", "-a", "--filter",
