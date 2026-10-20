@@ -206,6 +206,47 @@ class SecureRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             runner.work_once()
 
+    def test_fixture_line_endings_match_sanitized_git_on_windows(self):
+        # Reproduce a Windows user profile whose global Git autocrlf differs
+        # from the deliberately isolated broker Git environment.
+        if os.name != "nt":
+            self.skipTest("Windows Git line-ending validation only")
+        git = self.config["git_executable"]
+        checkout = self.root / "fixture-windows"
+        checkout.mkdir()
+        local = self.root / "global-gitconfig"
+        local.write_text("[core]\\n\\tautocrlf = true\\n", encoding="utf-8")
+        env = os.environ.copy()
+        env["GIT_CONFIG_GLOBAL"] = str(local)
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        def run(*args):
+            result = runner.subprocess.run(
+                [git, "-C", str(checkout), *args],
+                env=env, capture_output=True, timeout=15, check=False,
+            )
+            self.assertEqual(0, result.returncode, "Synthetic Git setup failed")
+        run("init", "-b", "main")
+        run("config", "user.name", "Fixture")
+        run("config", "user.email", "fixture@example.invalid")
+        run("config", "--local", "core.autocrlf", "false")
+        run("config", "--local", "core.filemode", "false")
+        (checkout / "tests").mkdir()
+        (checkout / "tests" / "test_fixture.py").write_text(
+            "import unittest\\nclass Smoke(unittest.TestCase):\\n    pass\\n",
+            encoding="utf-8",
+        )
+        run("add", "tests/test_fixture.py")
+        run("commit", "-m", "Fixture")
+        self.config["repo_path"] = str(checkout)
+        self.save_config()
+        with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(local)}):
+            self.assertEqual(
+                "",
+                runner._git(
+                    ["status", "--porcelain=v1", "--untracked-files=normal"], checkout
+                ),
+            )
+
     def test_daemon_without_seccomp_rejected_before_create(self):
         calls = []
         def fake_run(argv, **_):
