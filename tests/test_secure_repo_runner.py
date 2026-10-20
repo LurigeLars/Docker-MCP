@@ -215,7 +215,7 @@ class SecureRunnerTests(unittest.TestCase):
         checkout = self.root / "fixture-windows"
         checkout.mkdir()
         local = self.root / "global-gitconfig"
-        local.write_text("[core]\\n\\tautocrlf = true\\n", encoding="utf-8")
+        local.write_text("[core]\n\tautocrlf = true\n", encoding="utf-8")
         env = os.environ.copy()
         env["GIT_CONFIG_GLOBAL"] = str(local)
         env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -232,7 +232,7 @@ class SecureRunnerTests(unittest.TestCase):
         run("config", "--local", "core.filemode", "false")
         (checkout / "tests").mkdir()
         (checkout / "tests" / "test_fixture.py").write_text(
-            "import unittest\\nclass Smoke(unittest.TestCase):\\n    pass\\n",
+            "import unittest\nclass Smoke(unittest.TestCase):\n    pass\n",
             encoding="utf-8",
         )
         run("add", "tests/test_fixture.py")
