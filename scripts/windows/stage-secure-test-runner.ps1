@@ -13,34 +13,43 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $tradeRepo = 'C:\ClaudeCode\trade-spine'
 $private = Join-Path $env:LOCALAPPDATA 'DockerLocalRegression'
 $imageTag = 'dockerlocal-regression-sandbox:staged'
+# Fixed trusted executables, never resolve an untrusted PATH entry.
+$gitExe = Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
+$dockerExe = Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe'
+if (-not (Test-Path -LiteralPath $gitExe -PathType Leaf)) {
+    throw 'Expected Git executable is missing.'
+}
+if (-not (Test-Path -LiteralPath $dockerExe -PathType Leaf)) {
+    throw 'Expected Docker executable is missing.'
+}
 
 # No model-provided repository path, image, command, registry or destination.
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is missing.' }
 if ($repoRoot -ne 'C:\ClaudeCode\Docker-MCP') {
     throw 'Run only from the canonical Docker-MCP repository.'
 }
-if ((& git -C $repoRoot branch --show-current).Trim() -ne 'main' -or $LASTEXITCODE -ne 0) {
+if ((& $gitExe -C $repoRoot branch --show-current).Trim() -ne 'main' -or $LASTEXITCODE -ne 0) {
     throw 'The canonical Docker-MCP checkout must be on main.'
 }
-if ((& git -C $repoRoot rev-parse HEAD).Trim() -ne $ExpectedRepoHead -or $LASTEXITCODE -ne 0) {
+if ((& $gitExe -C $repoRoot rev-parse HEAD).Trim() -ne $ExpectedRepoHead -or $LASTEXITCODE -ne 0) {
     throw 'Docker-MCP HEAD does not match the explicitly reviewed commit.'
 }
-if (@(& git -C $repoRoot status --porcelain).Count -ne 0 -or $LASTEXITCODE -ne 0) {
+if (@(& $gitExe -C $repoRoot status --porcelain).Count -ne 0 -or $LASTEXITCODE -ne 0) {
     throw 'Docker-MCP checkout must be clean.'
 }
-if ((& git -C $repoRoot remote get-url origin).Trim() -ne 'https://github.com/LurigeLars/Docker-MCP.git' -or $LASTEXITCODE -ne 0) {
+if ((& $gitExe -C $repoRoot remote get-url origin).Trim() -ne 'https://github.com/LurigeLars/Docker-MCP.git' -or $LASTEXITCODE -ne 0) {
     throw 'Docker-MCP origin is not approved.'
 }
 if (-not (Test-Path -LiteralPath $tradeRepo -PathType Container)) {
     throw 'Trade Spine checkout does not exist at its approved canonical path.'
 }
-if ((& git -C $tradeRepo branch --show-current).Trim() -ne 'main' -or $LASTEXITCODE -ne 0) {
+if ((& $gitExe -C $tradeRepo branch --show-current).Trim() -ne 'main' -or $LASTEXITCODE -ne 0) {
     throw 'Trade Spine checkout must be on main.'
 }
-if (@(& git -C $tradeRepo status --porcelain).Count -ne 0 -or $LASTEXITCODE -ne 0) {
+if (@(& $gitExe -C $tradeRepo status --porcelain).Count -ne 0 -or $LASTEXITCODE -ne 0) {
     throw 'Trade Spine checkout must be clean.'
 }
-if ((& git -C $tradeRepo remote get-url origin).Trim() -ne 'https://github.com/LurigeLars/trade-spine.git' -or $LASTEXITCODE -ne 0) {
+if ((& $gitExe -C $tradeRepo remote get-url origin).Trim() -ne 'https://github.com/LurigeLars/trade-spine.git' -or $LASTEXITCODE -ne 0) {
     throw 'Trade Spine origin is not approved.'
 }
 if (-not (Test-Path -LiteralPath $private -PathType Container) -and (Test-Path -LiteralPath $private)) {
@@ -50,15 +59,6 @@ if (Test-Path -LiteralPath $private) {
     throw 'A private staging directory already exists. Refusing to overwrite it.'
 }
 
-# Fixed executable locations, not caller-provided PATH search results.
-$gitExe = Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
-$dockerExe = Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe'
-if (-not (Test-Path -LiteralPath $gitExe -PathType Leaf)) {
-    throw 'Expected Git executable is missing.'
-}
-if (-not (Test-Path -LiteralPath $dockerExe -PathType Leaf)) {
-    throw 'Expected Docker executable is missing.'
-}
 $daemonOs = (& $dockerExe info --format '{{.OSType}}').Trim()
 if ($LASTEXITCODE -ne 0 -or $daemonOs -ne 'linux') {
     throw 'Requires Linux Docker Desktop daemon.'
