@@ -1,0 +1,113 @@
+"""Offline security tests for exact Trade Spine PR180 one-shot execution.
+
+No Docker commands or Git fetches are actually executed.
+"""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+APP = ROOT / "local-test-runner"
+import sys
+sys.path.insert(0, str(APP))
+import one_shot_pr180 as one
+
+
+class OneShotPR180Tests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.config = {
+            "enabled": False,
+            "repo_path": one.APPROVED_CHECKOUT,
+            "origin_url": one.APPROVED_ORIGIN,
+            "allowed_ref": one.REF,
+            "image_id": one.EXPECTED_IMAGE,
+            "git_executable": "C:\\Program Files\\Git\\cmd\\git.exe",
+            "docker_executable": "C:\\Users\\test\\Programs\\Docker\\docker.exe",
+        }
+        self.orig_env = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.orig_env)
+        self.temp.cleanup()
+
+    def test_target_is_exact_sha_and_only_approved_branch(self):
+        self.assertEqual(one.TARGET_SHA, "3757b05887a89f3927495f1edaaefe75769a1362")
+        self.assertEqual(one.REF, "refs/remotes/origin/disable/official-tradingview-20261020")
+        self.assertEqual(one.EXPECTED_IMAGE,
+                         "sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd89351510cc10")
+
+    def test_preflight_denies_enabled_or_altered_policy_before_git(self):
+        for field, value in (
+            ("enabled", True),
+            ("origin_url", "https://example.org/repo.git"),
+            ("allowed_ref", "refs/remotes/origin/main"),
+            ("image_id", "sha256:" + "a" * 64),
+            ("repo_path", r"C:\Unapproved"),
+        ):
+            wrong = dict(self.config)
+            wrong[field] = value
+            with self.subTest(field=field), patch.object(one, "_command") as cmd:
+                with self.assertRaises(RuntimeError):
+                    one._preflight(wrong)
+                cmd.assert_not_called()
+
+    def test_success_does_not_change_persistent_config_or_register_worker(self):
+        persistent = self.base / "config.json"
+        raw = json.dumps(self.config)
+        persistent.write_text(raw, encoding="utf-8")
+        seen = []
+        def submit(repo, sha):
+            seen.append((repo, sha, os.environ.get(one.broker.ROOT_ENV)))
+            cfg = json.loads((Path(seen[-1][2]) / "config.json").read_text())
+            self.assertIs(cfg["enabled"], True)
+            return {"job_id": "a" * 32}
+        with patch.object(one.broker, "_config", return_value=self.config), \
+             patch.object(one.broker, "submit", side_effect=submit), \
+             patch.object(one.broker, "work_once", return_value={"status": "PASSED"}), \
+             patch.object(one.broker, "status", return_value={
+                "status": "PASSED", "exit_code": 0, "phase": "FINISHED", "failure_code": None
+             }):
+            res = one._execute_one_job(self.config, self.base)
+        self.assertEqual(res["status"], "PASSED")
+        self.assertEqual(seen[0][:2], ("trade-spine", one.TARGET_SHA))
+        self.assertEqual(persistent.read_text(), raw)
+        self.assertNotIn(one.broker.ROOT_ENV, os.environ)
+        self.assertEqual(list(self.base.glob("one-shot-pr180-*")), [])
+
+    def test_uncertain_cleanup_preserves_disabled_evidence(self):
+        def work():
+            ephemeral = Path(os.environ[one.broker.ROOT_ENV])
+            (ephemeral / "running").mkdir()
+            (ephemeral / "running" / ("a" * 32 + ".json")).write_text("{}")
+            raise one.broker.SandboxCleanupFailure("CLEANUP_UNVERIFIED")
+        with patch.object(one.broker, "_config", return_value=self.config), \
+             patch.object(one.broker, "submit", return_value={"job_id": "a" * 32}), \
+             patch.object(one.broker, "work_once", side_effect=work):
+            with self.assertRaises(one.broker.SandboxCleanupFailure):
+                one._execute_one_job(self.config, self.base)
+        dirs = list(self.base.glob("one-shot-pr180-*"))
+        self.assertEqual(len(dirs), 1)
+        self.assertIs(json.loads((dirs[0] / "config.json").read_text())["enabled"], False)
+        self.assertEqual(len(list((dirs[0] / "running").glob("*.json"))), 1)
+        self.assertNotIn(one.broker.ROOT_ENV, os.environ)
+
+    def test_powershell_wrapper_cannot_accept_dynamic_pr_or_commands(self):
+        script = (ROOT / "scripts/windows/run-trade-spine-pr180-once.ps1").read_text()
+        self.assertIn("ExpectedDockerMcpHead", script)
+        self.assertIn("one_shot_pr180.py", script)
+        for denied in ("Invoke-Expression", "Register-ScheduledTask", "New-Service",
+                       "ALLOWED_TOOLS", "docker run", "docker exec",
+                       "Start-Service", "Start-ScheduledTask"):
+            self.assertNotIn(denied, script)
+
+
+if __name__ == "__main__":
+    unittest.main()
