@@ -37,11 +37,11 @@ def root() -> Path:
     if not base:
         raise RuntimeError("Local private test runner root not configured")
     target = Path(base)
-    if not target.is_absolute() or target.is_symlink() or (
-        target.exists() and target.resolve(strict=True) != target.absolute()
-    ):
-        raise ValueError("Private job root must be an absolute, non-symlink path")
-    return target
+    if not target.is_absolute() or target.is_symlink() or not target.is_dir():
+        raise ValueError("Private job root must be an existing absolute, non-symlink directory")
+    # Resolve Windows junctions in inherited parent directories once, then
+    # restrict every subsequent file operation to this canonical root.
+    return target.resolve(strict=True)
 
 def _config():
     r = root()
@@ -55,8 +55,9 @@ def _config():
     }:
         raise RuntimeError("Local test runner is not operator-enabled")
     repo = Path(data["repo_path"])
-    if not repo.is_absolute() or repo.is_symlink() or repo.resolve(strict=True) != repo.absolute():
-        raise ValueError("Repository checkout must be an exact real absolute path")
+    if not repo.is_absolute() or repo.is_symlink() or not repo.is_dir():
+        raise ValueError("Repository checkout must be a real absolute directory")
+    data["repo_path"] = str(repo.resolve(strict=True))
     if not (isinstance(data["origin_url"], str) and
             data["origin_url"] == "https://github.com/LurigeLars/trade-spine.git"):
         raise ValueError("Unapproved repository remote")
