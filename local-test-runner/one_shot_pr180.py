@@ -197,6 +197,14 @@ def main() -> int:
         failure = result.get("failure_code")
         print("PR180_ONE_SHOT status=" + status + " phase=" + str(phase) +
               " code=" + str(failure) + " exit_code=" + str(exitcode))
+        if status == "FAILED":
+            hints = result.get("test_diagnostics")
+            if isinstance(hints, dict):
+                # Broker returned ONLY allowlisted, bounded diagnostic fields.
+                # Never disclose raw unittest stdout/stderr from the container.
+                print("PR180_TEST_HINTS " + json.dumps(hints, separators=(",", ":")))
+            else:
+                print("PR180_TEST_HINTS unavailable")
         print("PERSISTENT_RUNNER_CONFIG enabled=false (unchanged)")
         return 0 if status == "PASSED" else 1
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
