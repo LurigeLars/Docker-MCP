@@ -28,3 +28,14 @@ jobs:
         run: python3 -m unittest discover -s tests -p "test_secure_repo_runner.py" -v
       - name: Check remote execution denial policy
         run: python3 -m unittest discover -s tests -p "test_repo_runner_exposure_guard.py" -v
+
+  actual-docker-sandbox:
+    name: Disposable Docker isolation smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build the reviewed disposable test image
+        run: docker build -t dockerlocal-regression-sandbox:review local-test-runner
+      - name: Verify offline sandbox from a synthetic Git commit
+        run: python3 tests/smoke_secure_repo_runner.py
