@@ -215,12 +215,44 @@ def _snapshot(config: dict, commit_sha: str, target: Path):
         raise RuntimeError("Snapshot export failed")
     _verify_archive(target)
 
+CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _job_container_metadata(docker: str, name: str, job_id: str):
+    """Verify ownership BEFORE touching an existing container.
+
+    Return None only for a proven absent container; unknown Docker errors
+    never authorize cleanup. A name collision must never delete another
+    workload, even when the original create failed or timed out.
+    """
+    found = _run([docker, "inspect", "--format", "{{json .}}", name], timeout=30)
+    if found.returncode:
+        msg = found.stderr.decode("utf-8", "replace").casefold()
+        if "no such object" in msg or "no such container" in msg:
+            return None
+        raise SandboxCleanupFailure("Cannot verify disposable container identity")
+    try:
+        info = json.loads(found.stdout.decode("utf-8", "replace"))
+        cid = info.get("Id")
+        cfg = info.get("Config") or {}
+        labels = cfg.get("Labels") or {}
+        if (not isinstance(cid, str) or not CONTAINER_ID.fullmatch(cid)
+                or info.get("Name") != "/" + name
+                or labels.get("dockerlocal.test-job") != job_id):
+            raise SandboxCleanupFailure("Container ownership mismatch")
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise SandboxCleanupFailure("Malformed Docker container identity") from exc
+    return info
+
+
 def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
     docker = config["docker_executable"]
+    if not JOB.fullmatch(job_id):
+        raise ValueError("Invalid disposable container ID")
     name = "dl-regression-" + job_id
     image_id = config["image_id"]
-    # Require a real seccomp-isolated Linux Docker daemon, rather than
-    # trusting implicit daemon defaults that an administrator may disable.
+
+    # Test only on a Docker Linux daemon with an active seccomp policy.
     daemon = _run([docker, "info", "--format", "{{json .SecurityOptions}}"])
     if daemon.returncode:
         raise RuntimeError("Docker security options unavailable")
@@ -230,9 +262,10 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
         "unconfined" not in x for x in options
     ):
         raise RuntimeError("Docker daemon seccomp policy is missing")
-    inspect = _run([docker, "image", "inspect", "--format", "{{.Id}}", image_id])
-    if inspect.returncode or inspect.stdout.decode().strip() != image_id:
+    inspected_image = _run([docker, "image", "inspect", "--format", "{{.Id}}", image_id])
+    if inspected_image.returncode or inspected_image.stdout.decode().strip() != image_id:
         raise RuntimeError("Configured immutable runner image unavailable")
+
     args = [docker, "create", "--name", name, "--network", "none", "--read-only",
             "--user", "65532:65532", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--pids-limit", "64",
@@ -242,17 +275,21 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
             "--mount", "type=bind,source=" + str(tar) + ",target=/input/source.tar,readonly",
             "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
             "--label", "dockerlocal.test-job=" + job_id, image_id]
-    create_attempted = False
+
+    attempted, created_id = False, None
     try:
-        create_attempted = True
-        out = _run(args, timeout=30)
-        if out.returncode:
+        attempted = True
+        creation = _run(args, timeout=30)
+        if creation.returncode:
             raise RuntimeError("Sandbox create refused")
-        # Independently check the runtime security boundary before starting.
-        state = _run([docker, "inspect", "--format", "{{json .HostConfig}}", name], timeout=30)
-        if state.returncode:
-            raise RuntimeError("Container isolation inspection failed")
-        host = json.loads(state.stdout.decode("utf-8", "replace"))
+        created_id = creation.stdout.decode("ascii", "replace").strip()
+        if not CONTAINER_ID.fullmatch(created_id):
+            raise SandboxCleanupFailure("Docker create returned an invalid container ID")
+
+        info = _job_container_metadata(docker, name, job_id)
+        if not info or info["Id"] != created_id or info.get("Image") != image_id:
+            raise SandboxCleanupFailure("Created container identity/image mismatch")
+        host = info.get("HostConfig") or {}
         if (host.get("NetworkMode") != "none" or host.get("ReadonlyRootfs") is not True
                 or host.get("Privileged") is not False
                 or "ALL" not in (host.get("CapDrop") or [])
@@ -264,25 +301,23 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
         scratch = host.get("Tmpfs") or {}
         if set(scratch) != {"/workspace", "/tmp"}:
             raise RuntimeError("Unexpected container writable filesystem")
-        configuration = _run([docker, "inspect", "--format", "{{json .Config}}", name], timeout=30)
-        if configuration.returncode:
-            raise RuntimeError("Container configuration inspection failed")
-        container_cfg = json.loads(configuration.stdout.decode("utf-8", "replace"))
-        if (container_cfg.get("User") != "65532:65532"
-                or container_cfg.get("Entrypoint") !=
-                    ["python", "-I", "/runner/container_entrypoint.py"]
-                or container_cfg.get("Volumes")):
+        cfg = info.get("Config") or {}
+        if (cfg.get("User") != "65532:65532"
+                or cfg.get("Entrypoint") != ["python", "-I", "/runner/container_entrypoint.py"]
+                or cfg.get("Volumes")):
             raise RuntimeError("Untrusted sandbox image entrypoint or identity")
         mounts = host.get("Mounts") or []
         if (len(mounts) != 1 or mounts[0].get("Type") != "bind"
                 or mounts[0].get("Target") != "/input/source.tar"
-                or mounts[0].get("ReadOnly") is not True):
+                or mounts[0].get("ReadOnly") is not True
+                or Path(mounts[0].get("Source") or "") != tar):
             raise RuntimeError("Unexpected container mount")
-        started = _run([docker, "start", name], timeout=30)
+
+        started = _run([docker, "start", created_id], timeout=30)
         if started.returncode:
             raise RuntimeError("Sandbox start refused")
         try:
-            waited = _run([docker, "wait", name], timeout=TIME_LIMIT_SECONDS + 5)
+            waited = _run([docker, "wait", created_id], timeout=TIME_LIMIT_SECONDS + 5)
         except subprocess.TimeoutExpired:
             return "TIMED_OUT", None
         if waited.returncode:
@@ -293,19 +328,24 @@ def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
         code = int(value)
         return ("PASSED" if code == 0 else "FAILED"), code
     finally:
-        if create_attempted:
-            # Even a timed-out or failed 'docker create' can leave a container.
-            # The name uses a fresh 128-bit local ID, never a caller value.
-            try:
-                removed = _run([docker, "rm", "--force", name], timeout=30)
-                if removed.returncode:
-                    # The only permitted nonzero cleanup result is a proven
-                    # "No such container" from Docker; all others halt the queue.
-                    message = removed.stderr.decode("utf-8", "replace").casefold()
-                    if "no such container" not in message and "no such object" not in message:
-                        raise SandboxCleanupFailure("Unable to prove container cleanup")
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise SandboxCleanupFailure("Sandbox cleanup could not be verified") from error
+        if attempted:
+            # Docker create may have timed out after creating the container.
+            # Never remove by name or assume that a conflicting name is ours.
+            info = _job_container_metadata(docker, name, job_id)
+            if info is None:
+                if created_id is not None:
+                    raise SandboxCleanupFailure("Created container vanished before cleanup")
+            else:
+                owned_id = info["Id"]
+                if created_id is not None and owned_id != created_id:
+                    raise SandboxCleanupFailure("Created container changed identity")
+                try:
+                    removed = _run([docker, "rm", "--force", owned_id], timeout=30)
+                    if removed.returncode:
+                        raise SandboxCleanupFailure("Disposable container removal failed")
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    raise SandboxCleanupFailure("Sandbox cleanup could not be verified") from error
+
 
 def work_once() -> dict:
     config = _config()
