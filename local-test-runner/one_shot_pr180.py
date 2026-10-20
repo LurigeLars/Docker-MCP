@@ -38,6 +38,23 @@ def _command(executable: str, args: list[str], *, stage: str,
         env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                     "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
                     "GIT_LFS_SKIP_SMUDGE": "1"})
+        if stage == "GIT_FETCH":
+            # Disabling system/global Git config also disabled the Git for
+            # Windows credential helper. Permit ONLY the known Git Credential
+            # Manager helper for this one approved fetch. The empty helper
+            # clears untrusted repo-local helpers; no global config is enabled.
+            # GCM may read cached Windows credentials but MUST NOT prompt.
+            # GCM may locate its already-encrypted Windows credential
+            # store via these known-folder variables. Provide them only to
+            # the fetch subprocess; never expose full inherited environment.
+            for key in ("USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+                if key in os.environ:
+                    env[key] = os.environ[key]
+            env["GCM_INTERACTIVE"] = "0"
+            args = ["-c", "credential.helper=", "-c",
+                    "credential.helper=manager",
+                    "-c", "credential.interactive=false",
+                    *args]
     try:
         result = subprocess.run([executable, *args], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -116,6 +116,73 @@ class OneShotPR180Tests(unittest.TestCase):
         self.assertLess(script.index("$pyVersion = & $python -I"),
                         script.index("& $python -E -s"))
 
+    def test_git_fetch_only_uses_scoped_noninteractive_gcm(self):
+        from subprocess import CompletedProcess
+        calls = []
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return CompletedProcess(argv, 0, b"ok", b"")
+        with patch.object(one.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(
+                one._command("C:/Git/git.exe", ["-C", "repo", "fetch", "origin"],
+                             git=True, stage="GIT_FETCH"),
+                "ok",
+            )
+            self.assertEqual(
+                one._command("C:/Git/git.exe", ["-C", "repo", "status"],
+                             git=True, stage="GIT_STATUS"),
+                "ok",
+            )
+        fetch_argv, fetch_options = calls[0]
+        other_argv, other_options = calls[1]
+        self.assertEqual(
+            fetch_argv[1:7],
+            ["-c", "credential.helper=", "-c", "credential.helper=manager",
+             "-c", "credential.interactive=false"],
+        )
+        self.assertEqual(fetch_options["env"]["GCM_INTERACTIVE"], "0")
+        self.assertEqual(fetch_options["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(fetch_options["env"]["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(fetch_options["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertFalse(any("credential.helper" in arg for arg in other_argv))
+        self.assertNotIn("GCM_INTERACTIVE", other_options["env"])
+        self.assertEqual(fetch_options["stdin"], one.subprocess.DEVNULL)
+        self.assertEqual(fetch_options["stdout"], one.subprocess.PIPE)
+        self.assertEqual(fetch_options["stderr"], one.subprocess.PIPE)
+
+    def test_windows_credential_store_folders_only_pass_to_approved_fetch(self):
+        from subprocess import CompletedProcess
+        captures = []
+        def runner(argv, **kwargs):
+            captures.append(kwargs["env"])
+            return CompletedProcess(argv, 0, b"", b"")
+        variables = {
+            "USERPROFILE": r"C:\\Users\\Operator",
+            "LOCALAPPDATA": r"C:\\Users\\Operator\\AppData\\Local",
+            "APPDATA": r"C:\\Users\\Operator\\AppData\\Roaming",
+            "UNRELATED_SECRET": "must-not-be-inherited",
+        }
+        with (patch.dict(os.environ, variables),
+              patch.object(one.subprocess, "run", side_effect=runner)):
+            one._command("git", ["fetch", "origin"], git=True, stage="GIT_FETCH")
+            one._command("git", ["status"], git=True, stage="GIT_STATUS")
+        for k in ("USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+            self.assertEqual(captures[0][k], variables[k])
+            self.assertNotIn(k, captures[1])
+        self.assertNotIn("UNRELATED_SECRET", captures[0])
+        self.assertNotIn("UNRELATED_SECRET", captures[1])
+
+    def test_non_fetch_git_never_uses_gcm(self):
+        from subprocess import CompletedProcess
+        with patch.object(one.subprocess, "run",
+                          return_value=CompletedProcess([], 0, b"", b"")) as mock_run:
+            for stage in ("GIT_ORIGIN", "GIT_BRANCH", "GIT_REF",
+                          "GIT_STATUS", "GIT_POST_FETCH_STATUS"):
+                one._command("git", ["status"], git=True, stage=stage)
+        for call in mock_run.call_args_list:
+            self.assertNotIn("credential.helper=manager", call.args[0])
+            self.assertNotIn("GCM_INTERACTIVE", call.kwargs["env"])
+
     def test_diagnostic_failures_expose_stage_not_subprocess_stderr(self):
         from subprocess import CompletedProcess
 
