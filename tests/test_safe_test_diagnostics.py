@@ -159,7 +159,7 @@ class BoundedDiagnostics(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] /
                   "local-test-runner" / "secure_test_runner.py").read_text()
         self.assertIn("_collect_bounded_failure_hints(docker, created_id)", source)
-        self.assertIn('["rm", "--force", owned_id]', source)
+        self.assertIn('[docker, "rm", "--force", owned_id]', source)
         self.assertNotIn('["logs", "--tail"', source)
         self.assertEqual(
             {"advisory_only": True, "summary_found": False},
