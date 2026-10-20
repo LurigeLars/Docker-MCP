@@ -34,6 +34,12 @@ def main():
         fixed(["git", "init", "-b", "main"], checkout)
         fixed(["git", "config", "user.email", "ci-fixture@example.invalid"], checkout)
         fixed(["git", "config", "user.name", "CI Fixture"], checkout)
+        # Windows Git commonly enables core.autocrlf globally. The broker
+        # intentionally disables global Git configuration for security, so
+        # fixture creation must use deterministic repo-local text handling.
+        # Otherwise status may change between fixture-commit and broker-check.
+        fixed(["git", "config", "--local", "core.autocrlf", "false"], checkout)
+        fixed(["git", "config", "--local", "core.filemode", "false"], checkout)
         fixtures = checkout / "tests"
         fixtures.mkdir()
         (fixtures / "test_sandbox.py").write_text('''
@@ -73,6 +79,11 @@ class Sandbox(unittest.TestCase):
         }
         (job_root / "config.json").write_text(json.dumps(config), encoding="utf-8")
         os.environ[runner.ROOT_ENV] = str(job_root)
+        # Verify with the *same* sanitized Git configuration the broker uses.
+        # Never bypass DIRTY_CHECKOUT on a real checkout.
+        if runner._git(["status", "--porcelain=v1", "--untracked-files=normal"], checkout):
+            print("SANDBOX_SMOKE_FAILED phase=FIXTURE code=FIXTURE_NOT_CLEAN")
+            raise RuntimeError("Synthetic Git test fixture is not clean")
         queued = runner.submit("trade-spine", sha)
         result = runner.work_once()
         completed = runner.status(queued["job_id"])
