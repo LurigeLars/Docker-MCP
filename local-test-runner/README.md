@@ -24,8 +24,9 @@ from Git are hostile code and run exclusively inside the short-lived sandbox.
    `docker image inspect --format "{{.Id}}" <built-image-tag>`.
 2. Choose a private, access-controlled directory **outside all Docker-MCP
    control mounts** (e.g. under the user's LocalAppData). Copy
-   `config.local.example.json` to `config.json`, edit exact repo and
-   allowed remote ref, insert the image ID, and set `enabled: true` **only
+   `config.local.example.json` to `config.json`, edit exact repo,
+   allowed remote ref and exact trusted Git/Docker executable paths,
+   insert the image ID, and set `enabled: true` **only
    after** all acceptance tests pass. Set `DOCKERLOCAL_TEST_RUNNER_ROOT`
    to this directory in the **separate local** MCP and worker processes.
 3. Install `fastmcp` for the host-local Python process in an isolated Python
