@@ -45,7 +45,7 @@ def main():
         "TMPDIR": "/tmp",
     }
     proc = subprocess.run(
-        [sys.executable, "-I", "-m", "unittest", "discover",
+        [sys.executable, "-m", "unittest", "discover",
          "-s", "tests", "-p", "test_*.py"],
         cwd=WORK, env=env, check=False
     )
