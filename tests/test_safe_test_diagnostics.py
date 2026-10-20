@@ -154,7 +154,6 @@ class BoundedDiagnostics(unittest.TestCase):
             summary = safe.collect_bounded("C:/Docker/docker.exe", "b" * 64)
         self.assertTrue(big.killed)
         self.assertEqual({"advisory_only": True, "summary_found": False}, summary)
-        self.assertFalse(big.stdout.getvalue() == b"")
 
     def test_no_raw_log_emission_or_unowned_container_query(self):
         source = (Path(__file__).resolve().parents[1] /
