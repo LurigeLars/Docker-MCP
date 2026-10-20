@@ -162,8 +162,8 @@ class OneShotPR180Tests(unittest.TestCase):
             "APPDATA": r"C:\\Users\\Operator\\AppData\\Roaming",
             "UNRELATED_SECRET": "must-not-be-inherited",
         }
-        with patch.dict(os.environ, variables), \\
-             patch.object(one.subprocess, "run", side_effect=runner):
+        with (patch.dict(os.environ, variables),
+              patch.object(one.subprocess, "run", side_effect=runner)):
             one._command("git", ["fetch", "origin"], git=True, stage="GIT_FETCH")
             one._command("git", ["status"], git=True, stage="GIT_STATUS")
         for k in ("USERPROFILE", "LOCALAPPDATA", "APPDATA"):
