@@ -1,4 +1,5 @@
 """Security regression tests: never return raw hostile unittest logs."""
+import io
 import json
 from pathlib import Path
 import sys
@@ -96,15 +97,22 @@ class BoundedDiagnostics(unittest.TestCase):
                 if command == "wait":
                     return result(stdout=b"1\n")
                 if command == "logs":
-                    self.assertEqual(["--tail", "160", cid], argv[2:])
-                    return result(stdout=b"ERROR: test_a (test_mcp.Server.test_a)\n"
-                                          b"AssertionError: raw=password\n"
-                                          b"Ran 1 test in 0.1s\nFAILED (errors=1)\n")
+                    raise AssertionError("Log collection bypassed bounded reader")
                 if command in ("start", "rm"):
                     return result()
                 raise AssertionError("Unexpected fixed Docker operation")
             diag = {}
-            with patch.object(broker, "_run", side_effect=fake_run):
+            def fake_bounded(docker, container_id):
+                history.append("logs")
+                self.assertEqual("/operator/docker", docker)
+                self.assertEqual(cid, container_id)
+                return safe.summarize(
+                    b"ERROR: test_a (test_mcp.Server.test_a)\n"
+                    b"AssertionError: raw=password\n"
+                    b"Ran 1 test in 0.1s\nFAILED (errors=1)\n")
+            with (patch.object(broker, "_run", side_effect=fake_run),
+                  patch.object(broker, "_collect_bounded_failure_hints",
+                               side_effect=fake_bounded)):
                 outcome = broker._docker_job(cfg, job, archive, diagnostics=diag)
             self.assertEqual(("FAILED", 1), outcome)
             self.assertEqual(["test_mcp:test_a"], diag["cases"])
@@ -113,12 +121,52 @@ class BoundedDiagnostics(unittest.TestCase):
             self.assertLess(history.index("logs"), history.index("rm"))
             self.assertNotIn("password", json.dumps(diag))
 
-    def test_log_probe_failure_cannot_prevent_owned_container_cleanup(self):
+    def test_log_probe_is_bounded_before_memory_allocation(self):
+        class DummyProc:
+            def __init__(self, data):
+                self.stdout = io.BytesIO(data)
+                self.returncode = 0
+                self.killed = False
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+            def wait(self, timeout=None):
+                return self.returncode
+            def poll(self):
+                return self.returncode
+
+        data = (b"ERROR: test_a (test_mcp.Server.test_a)\n"
+                b"RuntimeError: private-data-here\n"
+                b"Ran 1 test in 0.1s\nFAILED (errors=1)\n")
+        proc = DummyProc(data)
+        with patch.object(safe.subprocess, "Popen", return_value=proc) as popen:
+            hints = safe.collect_bounded("C:/Docker/docker.exe", "a" * 64)
+        self.assertEqual(["test_mcp:test_a"], hints["cases"])
+        self.assertNotIn("private-data", json.dumps(hints))
+        self.assertFalse(proc.killed)
+        self.assertEqual(
+            ["C:/Docker/docker.exe", "logs", "--tail", "160", "a" * 64],
+            popen.call_args.args[0],
+        )
+        self.assertEqual(False, popen.call_args.kwargs["shell"])
+        big = DummyProc(b"X" * (safe._LOG_LIMIT_BYTES + 1500))
+        with patch.object(safe.subprocess, "Popen", return_value=big):
+            summary = safe.collect_bounded("C:/Docker/docker.exe", "b" * 64)
+        self.assertTrue(big.killed)
+        self.assertEqual({"advisory_only": True, "summary_found": False}, summary)
+        self.assertFalse(big.stdout.getvalue() == b"")
+
+    def test_no_raw_log_emission_or_unowned_container_query(self):
         source = (Path(__file__).resolve().parents[1] /
                   "local-test-runner" / "secure_test_runner.py").read_text()
-        self.assertIn('[docker, "logs", "--tail"', source)
-        self.assertIn('except (OSError, subprocess.TimeoutExpired)', source)
+        self.assertIn("_collect_bounded_failure_hints(docker, created_id)", source)
         self.assertIn('["rm", "--force", owned_id]', source)
+        self.assertNotIn('["logs", "--tail"', source)
+        self.assertEqual(
+            {"advisory_only": True, "summary_found": False},
+            safe.collect_bounded("ignored", "../bad"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
