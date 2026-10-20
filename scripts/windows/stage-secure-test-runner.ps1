@@ -100,7 +100,7 @@ $null = New-Item -ItemType Directory -Path $private -ErrorAction Stop
 $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $adminsSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-$acl = [System.Security.AccessControl.DirectorySecurity]::new()
+$acl = Get-Acl -LiteralPath $private -ErrorAction Stop
 $acl.SetAccessRuleProtection($true, $false)
 $inherited = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
 foreach ($sid in @($userSid, $systemSid, $adminsSid)) {
