@@ -65,7 +65,7 @@ from Git are hostile code and run exclusively inside the short-lived sandbox.
 
 After reviewing PR #91, attach the PR branch in a **separate worktree**
 without changing the canonical Docker-MCP `main` checkout. From that worktree,
-run `scripts/windows/verify-secure-test-runner.ps1` once. The script
+run `scripts/windows/verify-secure-test-runner.ps1 -ExpectedCommit <full-reviewed-PR-HEAD-SHA>` once. The script
 requires Linux Docker Desktop with seccomp, a clean exact review branch and
 the pinned Python base digest. It refuses to overwrite an existing acceptance
 image, runs a synthetic no-network sandbox smoke and removes only the image
