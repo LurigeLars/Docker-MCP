@@ -29,7 +29,7 @@ from Git are hostile code and run exclusively inside the short-lived sandbox.
    insert the image ID, and set `enabled: true` **only
    after** all acceptance tests pass. Set `DOCKERLOCAL_TEST_RUNNER_ROOT`
    to this directory in the **separate local** MCP and worker processes.
-3. Install `fastmcp` for the host-local Python process in an isolated Python
+3. Install the reviewed, version-pinned `mcp==2.3.0` for the host-local Python process in an isolated Python
    environment. Connect `local_mcp.py` via a **local stdio configuration only**.
    This process has no network listener; do not expose through a tunnel,
    public MCP profile, webhook or web server.
