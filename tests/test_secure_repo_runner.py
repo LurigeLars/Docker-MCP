@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -33,6 +34,8 @@ class SecureRunnerTests(unittest.TestCase):
             "origin_url": "https://github.com/LurigeLars/trade-spine.git",
             "allowed_ref": "refs/remotes/origin/review-safe",
             "image_id": IMAGE,
+            "git_executable": str(Path(shutil.which("git")).resolve()),
+            "docker_executable": str(Path(shutil.which("docker")).resolve()),
         }
         self.save_config()
     def tearDown(self):
