@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "repo_path": "C:\\ClaudeCode\\trade-spine",
+  "origin_url": "https://github.com/LurigeLars/trade-spine.git",
+  "allowed_ref": "refs/remotes/origin/disable/official-tradingview-20261020",
+  "image_id": "sha256:REPLACE_WITH_EXACT_64_HEX_DIGIT_LOCAL_IMAGE_ID"
+}
