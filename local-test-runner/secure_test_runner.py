@@ -50,7 +50,8 @@ def _config():
         raise ValueError("Symlinked operator configuration is not allowed")
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("enabled") is not True or set(data) != {
-        "enabled", "repo_path", "origin_url", "allowed_ref", "image_id"
+        "enabled", "repo_path", "origin_url", "allowed_ref", "image_id",
+        "git_executable", "docker_executable"
     }:
         raise RuntimeError("Local test runner is not operator-enabled")
     repo = Path(data["repo_path"])
@@ -63,6 +64,16 @@ def _config():
         raise ValueError("Unapproved origin tracking reference")
     if not IMAGE.fullmatch(str(data["image_id"])):
         raise ValueError("Runner image must be an exact local image ID")
+    for binary in ("git_executable", "docker_executable"):
+        path = Path(data[binary])
+        if (not path.is_absolute() or not path.is_file() or path.is_symlink()
+                or path.resolve(strict=True) != path.absolute()):
+            raise ValueError("Executable must be an exact operator-pinned local path")
+        if path.name.casefold() not in (
+            {"git.exe", "git"} if binary == "git_executable"
+            else {"docker.exe", "docker"}
+        ):
+            raise ValueError("Wrong executable name in operator configuration")
     return data
 
 def _atomic_write(path: Path, obj: dict) -> None:
@@ -152,9 +163,7 @@ def _run(argv: list[str], *, timeout: int = 30, cwd: Path | None = None,
                           timeout=timeout, check=False)
 
 def _git(args: list[str], checkout: Path, *, timeout: int = 30):
-    git = shutil.which("git")
-    if not git:
-        raise RuntimeError("Git executable unavailable")
+    git = _config()["git_executable"]
     env = {k: os.environ[k] for k in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP") if k in os.environ}
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
@@ -195,7 +204,7 @@ def _snapshot(config: dict, commit_sha: str, target: Path):
     if _git(["rev-parse", "--verify", commit_sha + "^{commit}"], checkout) != commit_sha:
         raise ValueError("Requested object is not a commit")
     _git(["merge-base", "--is-ancestor", commit_sha, config["allowed_ref"]], checkout)
-    git = shutil.which("git")
+    git = config["git_executable"]
     env = {k: os.environ[k] for k in ("PATH", "SystemRoot", "WINDIR", "TEMP", "TMP") if k in os.environ}
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
@@ -207,9 +216,7 @@ def _snapshot(config: dict, commit_sha: str, target: Path):
     _verify_archive(target)
 
 def _docker_job(config: dict, job_id: str, tar: Path) -> tuple[str, int | None]:
-    docker = shutil.which("docker")
-    if not docker:
-        raise RuntimeError("Docker executable unavailable")
+    docker = config["docker_executable"]
     name = "dl-regression-" + job_id
     image_id = config["image_id"]
     # Require a real seccomp-isolated Linux Docker daemon, rather than
