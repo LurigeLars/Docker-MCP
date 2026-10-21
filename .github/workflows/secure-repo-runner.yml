@@ -1,0 +1,112 @@
+name: Secure local regression runner tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "local-test-runner/**"
+      - "tests/test_secure_repo_runner.py"
+      - "tests/test_repo_runner_exposure_guard.py"
+      - "tests/test_offline_stage_installer.py"
+      - "tests/test_pr180_one_shot.py"
+      - "tests/test_safe_test_diagnostics.py"
+      - "scripts/windows/run-trade-spine-pr180-once.ps1"
+      - "scripts/windows/stage-secure-test-runner.ps1"
+      - ".github/workflows/secure-repo-runner.yml"
+      - "compose.public.yaml"
+      - "public/gateway/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  broker-security-tests:
+    name: Offline broker security tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Parse standalone runner code
+        run: python3 -m compileall -q local-test-runner
+      - name: Exercise malicious inputs and Docker isolation checks (mocked)
+        run: python3 -m unittest discover -s tests -p "test_secure_repo_runner.py" -v
+      - name: Check remote execution denial policy
+        run: python3 -m unittest discover -s tests -p "test_repo_runner_exposure_guard.py" -v
+      - name: Enforce disabled-only Windows image staging contract
+        run: python3 -m unittest discover -s tests -p "test_offline_stage_installer.py" -v
+      - name: Verify fixed-commit single-use PR180 broker workflow (mocked)
+        run: python3 -m unittest discover -s tests -p "test_pr180_one_shot.py" -v
+      - name: Assert bounded sanitized failing-test diagnostics
+        run: python3 -m unittest discover -s tests -p "test_safe_test_diagnostics.py" -v
+      - name: Exercise authenticated public gateway negative calls (offline synthetic JWT)
+        run: node tests/repo_runner_gateway_denial.mjs
+
+  windows-offline-contract:
+    name: Windows broker input validation
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate Windows-local path and input handling without Docker execution
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_secure_repo_runner.py" -v
+      - name: Verify disabled-only staging contract on Windows
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_offline_stage_installer.py" -v
+      - name: Validate one-shot private queue teardown on Windows
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_pr180_one_shot.py" -v
+      - name: Validate bounded test diagnostics on Windows
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_safe_test_diagnostics.py" -v
+
+  actual-docker-sandbox:
+    name: Disposable Docker isolation smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build the reviewed disposable test image
+        run: docker build -t dockerlocal-regression-sandbox:review local-test-runner
+      - name: Verify local stdio tool registration with reviewed pinned MCP SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            --mount "type=bind,source=${PWD}/local-test-runner,target=/review,readonly" \
+            --entrypoint python dockerlocal-regression-sandbox:review \
+            -c "import sys; sys.path.insert(0, '/review'); import local_mcp; assert local_mcp.mcp is not None"
+      - name: Verify offline sandbox from a synthetic Git commit
+        run: python3 tests/smoke_secure_repo_runner.py
+      - name: Generate complete image SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: dockerlocal-regression-sandbox:review
+          format: cyclonedx
+          output: image-sbom.cdx.json
+          exit-code: "0"
+          cache: "false"
+      - name: Enforce no HIGH or CRITICAL vulnerabilities in image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: dockerlocal-regression-sandbox:review
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          scanners: vuln
+          ignore-unfixed: "false"
+          exit-code: "1"
+          format: table
+          cache: "false"
+      - name: Preserve reviewed SBOM for audit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secure-test-runner-sbom
+          path: image-sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "repo_path": "<ABSOLUTE_PATH_TO_LOCAL_TRADE_SPINE_CHECKOUT>",
+  "origin_url": "https://github.com/LurigeLars/trade-spine.git",
+  "allowed_ref": "refs/remotes/origin/disable/official-tradingview-20261020",
+  "image_id": "sha256:REPLACE_WITH_EXACT_64_HEX_DIGIT_LOCAL_IMAGE_ID",
+  "git_executable": "C:\\Program Files\\Git\\cmd\\git.exe",
+  "docker_executable": "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe"
+}
