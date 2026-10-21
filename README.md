@@ -87,6 +87,15 @@ example because credentials live only in tmpfs — an optional event-driven runt
 supervisor can invoke **preconfigured local recovery scripts**. The supervisor itself is
 not exposed as a generic MCP command surface.
 
+## Proposed secure repository tests (not enabled)
+
+A future fixed-profile regression-test tool must not become generic command
+execution. Its threat model, local-only default, sandbox requirements,
+source/commit allowlist and negative test gates are specified in
+[the secure test-runner contract](docs/SECURE-REPO-TEST-RUNNER.md).
+The current server still has **no** `repo_run_tests` tool. The public
+MCP gateway must continue to reject any test-execution tool.
+
 ## What it deliberately does not expose
 
 The following are intentionally outside the MCP contract:

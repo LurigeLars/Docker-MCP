@@ -1218,6 +1218,30 @@ function Get-ComposeFileState {
         # container, verify the rendered service config against the immutable
         # config hash embedded in the container. Matching hashes are
         # informational mtime-only changes, not deployment drift.
+        # If verification is impossible, keep the warning and explain WHY.
+        # Do not include Docker stderr, Compose variable values, or secrets.
+        $HashVerificationReason = $null
+        $HashCommandExitCode = $null
+        if ($HasNewer) {
+            if ($HasMissing) {
+                $HashVerificationReason = "compose_file_missing"
+            }
+            elseif ($ResolvedFiles.Count -eq 0) {
+                $HashVerificationReason = "compose_files_unresolved"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($WorkingDir)) {
+                $HashVerificationReason = "working_directory_label_missing"
+            }
+            elseif (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+                $HashVerificationReason = "working_directory_unavailable"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($RunningConfigHash)) {
+                $HashVerificationReason = "running_config_hash_label_missing"
+            }
+            else {
+                $HashVerificationReason = "verification_not_completed"
+            }
+        }
         if (
             $HasNewer -and
             -not $HasMissing -and
@@ -1231,8 +1255,14 @@ function Get-ComposeFileState {
                 $HashArgs += @("-f", $ResolvedFile)
             }
 
-            $HashRun = Invoke-DockerText -Arguments ($HashArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
-            if ([int]$HashRun.exit_code -eq 0) {
+            $HashRun = $null
+            try {
+                $HashRun = Invoke-DockerText -Arguments ($HashArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            }
+            catch {
+                $HashVerificationReason = "compose_hash_invocation_failed"
+            }
+            if ($null -ne $HashRun -and [int]$HashRun.exit_code -eq 0) {
                 $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
                 $DesiredConfigHash = if ($Tokens.Count -gt 0) { [string]$Tokens[-1] } else { "" }
 
@@ -1240,6 +1270,7 @@ function Get-ComposeFileState {
                     -not [string]::IsNullOrWhiteSpace($DesiredConfigHash) -and
                     $DesiredConfigHash -eq $RunningConfigHash
                 ) {
+                    $HashVerificationReason = "service_hash_verified_match"
                     foreach ($Entry in $ContainerFiles) {
                         if ([string]$Entry.status -eq "newer_than_container") {
                             $Entry.status = "mtime_only"
@@ -1248,12 +1279,31 @@ function Get-ComposeFileState {
                     }
                 }
                 elseif (-not [string]::IsNullOrWhiteSpace($DesiredConfigHash)) {
+                    $HashVerificationReason = "service_hash_verified_mismatch"
                     foreach ($Entry in $ContainerFiles) {
                         if ([string]$Entry.status -eq "newer_than_container") {
                             $Entry.status = "config_hash_mismatch"
                             $Entry.running_config_hash = $RunningConfigHash
                             $Entry.desired_config_hash = $DesiredConfigHash
                         }
+                    }
+                }
+                else {
+                    $HashVerificationReason = "compose_hash_output_empty"
+                }
+            }
+            elseif ($null -ne $HashRun) {
+                $HashVerificationReason = "compose_hash_command_failed"
+                $HashCommandExitCode = [int]$HashRun.exit_code
+            }
+        }
+
+        if ($HasNewer) {
+            foreach ($Entry in $ContainerFiles) {
+                if ([string]$Entry.status -in @("newer_than_container", "mtime_only", "config_hash_mismatch")) {
+                    $Entry.hash_verification_reason = $HashVerificationReason
+                    if ($null -ne $HashCommandExitCode) {
+                        $Entry.hash_command_exit_code = $HashCommandExitCode
                     }
                 }
             }
