@@ -5,7 +5,6 @@ single read-only host staging file and extracted only into container tmpfs.
 """
 from pathlib import Path
 import os
-import re
 import subprocess
 import tarfile
 import sys
