@@ -230,8 +230,9 @@ jobs:
           import asyncio
           import server
           async def check():
-              tools = await server.mcp.get_tools()
+              tools = await server.mcp.list_tools()
+              names = {tool.name for tool in tools}
               for name in ("scout_cves", "mcp_deployment_audit", "compose_redeploy"):
-                  assert name in tools, f"Missing runtime tool: {name}"
+                  assert name in names, f"Missing runtime tool: {name}"
           asyncio.run(check())
           PY
