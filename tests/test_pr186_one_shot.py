@@ -39,7 +39,7 @@ class OneShotPR186Tests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_target_is_exact_sha_and_only_approved_branch(self):
-        self.assertEqual(one.TARGET_SHA, "7e4192e5a09dff8adaca8d46fb55dc1b56a909d0")
+        self.assertEqual(one.TARGET_SHA, "7279f863a69c73ef14b598dff06ac2e58034f5e1")
         self.assertEqual(one.REF, "refs/remotes/origin/fix/compact-mcp-tool-budget-20261023")
         self.assertEqual(one.STAGED_REF, "refs/remotes/origin/disable/official-tradingview-20261020")
         self.assertEqual(one.EXPECTED_IMAGE,
