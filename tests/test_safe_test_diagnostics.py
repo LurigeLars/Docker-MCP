@@ -49,6 +49,29 @@ class BoundedDiagnostics(unittest.TestCase):
         self.assertTrue(all(x.startswith("test_mcp:") for x in result["cases"]))
         self.assertNotIn("SECRET_MARKER", json.dumps(result))
 
+    def test_failing_case_before_old_24k_boundary_is_preserved(self):
+        # The bounded log may contain a large assertion diff. Do not lose
+        # allowlisted failure names outside the former 24 KiB suffix.
+        prefix = (
+            b"FAIL: test_compacted_read_views_preserve_stats_and_news_cursor "
+            b"(test_mcp.Server.test_compacted_read_views_preserve_stats_and_news_cursor)\n"
+        )
+        raw = (prefix + b"DO_NOT_ECHO_TOKEN" * 1900
+               + b"\nAssertionError: internal=HIDDEN_SECRET\n"
+               + b"Ran 387 tests in 3.42s\n"
+               + b"FAILED (failures=1)\n")
+        self.assertLess(len(raw), safe._LOG_LIMIT_BYTES)
+        self.assertGreater(len(raw), 24576)
+        info = safe.summarize(raw)
+        self.assertEqual(
+            ["test_mcp:test_compacted_read_views_preserve_stats_and_news_cursor"],
+            info["cases"],
+        )
+        self.assertEqual(387, info["tests_run"])
+        self.assertEqual(1, info["failures"])
+        self.assertNotIn("HIDDEN_SECRET", json.dumps(info))
+        self.assertNotIn("DO_NOT_ECHO_TOKEN", json.dumps(info))
+
     def test_docker_logs_captured_before_cleanup_and_never_control_exit(self):
         job = "a" * 32
         cid = "b" * 64
