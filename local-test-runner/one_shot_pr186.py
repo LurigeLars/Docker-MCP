@@ -21,7 +21,7 @@ SOURCE_BRANCH = "fix/compact-mcp-tool-budget-20261023"
 REF = "refs/remotes/origin/" + SOURCE_BRANCH
 # The operator-owned persistent staging config remains disabled and unchanged.
 STAGED_REF = "refs/remotes/origin/disable/official-tradingview-20261020"
-TARGET_SHA = "7e4192e5a09dff8adaca8d46fb55dc1b56a909d0"
+TARGET_SHA = "7279f863a69c73ef14b598dff06ac2e58034f5e1"
 EXPECTED_IMAGE = "sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd89351510cc10"
 APPROVED_ORIGIN = "https://github.com/LurigeLars/trade-spine.git"
 APPROVED_CHECKOUT = r"C:\ClaudeCode\trade-spine"
