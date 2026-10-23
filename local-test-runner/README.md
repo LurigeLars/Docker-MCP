@@ -82,3 +82,41 @@ GitHub-hosted Linux Docker smoke and mocked input-negative tests exist, but
 Windows host tests, exact pinned-image verification, full local Docker smoke,
 public tool-discovery/call denial, and required security gates listed in the
 contract before enabling. No public deployment or automatic activation.
+
+
+## GEX PR #183: locked one-shot test (staged, not run)
+
+A PR #183-specific one-shot adapts the previously reviewed PR #180 pattern.
+It uses the **existing staged image** `sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd89351510cc10`
+and tests only the exact Trade Spine commit
+`8628ba3d2853a8cab165dc75ed2f1cef2fd8ce68`, reachable from
+`refs/remotes/origin/feature/gex-research-pilot-20261023`.
+
+It requires the existing owner-controlled `%LOCALAPPDATA%\DockerLocalRegression\config.json`
+to remain `enabled:false`, pinned to the reviewed image above and the
+**original** PR #180 staging ref
+`refs/remotes/origin/disable/official-tradingview-20261020`.
+It does **not** change that persistent config. Only an ephemeral private queue
+switches its allowed ref to PR #183 for a single bounded Docker sandbox test.
+If the private staging does not match these conditions, stop; do not overwrite
+it or loosen validation.
+
+After security review and checkout of an **approved Docker-MCP revision** on
+canonical clean `main`, the operator may invoke on Windows:
+
+```powershell
+.\scripts\windows\run-trade-spine-pr183-once.ps1 -ExpectedDockerMcpHead <exact-reviewed-40-hex-HEAD> -PreflightOnly
+.\scripts\windows\run-trade-spine-pr183-once.ps1 -ExpectedDockerMcpHead <exact-reviewed-40-hex-HEAD>
+```
+
+First invocation checks ref, image, clean worktrees, pinned binaries and
+private config but does not queue a test. The second queues exactly one
+no-network disposable image-owned `unittest discover` job. It never runs
+the Trade Spine tests on the Windows host and never registers a worker, MCP
+connector, scheduled task, network listener or public gateway tool.
+The one-shot prints bounded success/failure codes and no untrusted test logs.
+
+This is **not** a general PR runner and cannot be used for any other SHA.
+A new Trade Spine commit must be separately reviewed and repinned.
+The code-only PR does not authorize runtime invocation, merging Trade Spine
+PR #183 or enabling a permanent remote test bridge.
