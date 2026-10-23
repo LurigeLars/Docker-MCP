@@ -120,3 +120,28 @@ This is **not** a general PR runner and cannot be used for any other SHA.
 A new Trade Spine commit must be separately reviewed and repinned.
 The code-only PR does not authorize runtime invocation, merging Trade Spine
 PR #183 or enabling a permanent remote test bridge.
+
+
+## Trade Spine PR #186: exact one-shot budget regression (code staged only)
+
+This extra profile is fixed to the reviewed Trade Spine commit
+`7e4192e5a09dff8adaca8d46fb55dc1b56a909d0` on branch
+`fix/compact-mcp-tool-budget-20261023`. It uses the **existing** pinned,
+previously staged offline sandbox image
+`sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd89351510cc10`
+with NO new Docker image build, remote MCP, task registration, public gateway
+change, production restart, or persistent `enabled=true` configuration.
+
+After the PR is security-reviewed, merged and fast-forwarded to the clean
+canonical Docker-MCP checkout, run locally:
+
+```powershell
+.\scripts\windows\run-trade-spine-pr186-once.ps1 -ExpectedDockerMcpHead <reviewed-merge-sha> -PreflightOnly
+.\scripts\windows\run-trade-spine-pr186-once.ps1 -ExpectedDockerMcpHead <reviewed-merge-sha>
+```
+
+The first command verifies the pinned commit, ref, image, executable paths and
+private disabled configuration, without queuing execution. The second runs
+exactly one isolated archive-owned unittest profile. It cannot choose another
+SHA, repository, command or image. Errors are returned as bounded diagnostics;
+full logs are not exported. On uncertain cleanup, preserve evidence and stop.
