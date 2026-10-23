@@ -21,7 +21,7 @@ SOURCE_BRANCH = "feature/gex-research-pilot-20261023"
 REF = "refs/remotes/origin/" + SOURCE_BRANCH
 # The operator-owned persistent staging config remains disabled and unchanged.
 STAGED_REF = "refs/remotes/origin/disable/official-tradingview-20261020"
-TARGET_SHA = "8628ba3d2853a8cab165dc75ed2f1cef2fd8ce68"
+TARGET_SHA = "8441ff0eb538732432e027eb076a2629338b7ff4"
 EXPECTED_IMAGE = "sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd89351510cc10"
 APPROVED_ORIGIN = "https://github.com/LurigeLars/trade-spine.git"
 APPROVED_CHECKOUT = r"C:\ClaudeCode\trade-spine"
