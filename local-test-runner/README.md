@@ -89,7 +89,7 @@ contract before enabling. No public deployment or automatic activation.
 A PR #183-specific one-shot adapts the previously reviewed PR #180 pattern.
 It uses the **existing staged image** `sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd89351510cc10`
 and tests only the exact Trade Spine commit
-`8628ba3d2853a8cab165dc75ed2f1cef2fd8ce68`, reachable from
+`8441ff0eb538732432e027eb076a2629338b7ff4`, reachable from
 `refs/remotes/origin/feature/gex-research-pilot-20261023`.
 
 It requires the existing owner-controlled `%LOCALAPPDATA%\DockerLocalRegression\config.json`
