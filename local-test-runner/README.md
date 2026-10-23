@@ -125,7 +125,7 @@ PR #183 or enabling a permanent remote test bridge.
 ## Trade Spine PR #186: exact one-shot budget regression (code staged only)
 
 This extra profile is fixed to the reviewed Trade Spine commit
-`7279f863a69c73ef14b598dff06ac2e58034f5e1` on branch
+`5dfd0700e2b36355d9c1b419c82382d4a24d5acb` on branch
 `fix/compact-mcp-tool-budget-20261023`. It uses the **existing** pinned,
 previously staged offline sandbox image
 `sha256:2296bc87afa5123a933771eac82c6aede05b939692fd3746a4bd89351510cc10`
