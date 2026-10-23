@@ -34,8 +34,8 @@ _FAILED = re.compile(r"^FAILED \(([^)\r\n]{0,150})\)$", re.MULTILINE)
 _KIND = re.compile(r"^([A-Za-z]{1,45}(?:Error|Exception))(?::|$)", re.MULTILINE)
 
 def summarize(raw: bytes) -> dict:
-    """Parse at most the last 24KiB. Never return source or traceback text."""
-    text = raw[-24576:].decode("utf-8", "replace")
+    """Parse the already host-bounded 48KiB tail; never emit raw logs."""
+    text = raw[-_LOG_LIMIT_BYTES:].decode("utf-8", "replace")
     matches = _CASE.findall(text)
     safe_cases = []
     for name, module in matches:
