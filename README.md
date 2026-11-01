@@ -235,6 +235,39 @@ One-time local opt-in for an existing Firecrawl script-backed project (no Git sh
 
 This adds only `sync_upstream: ["-Action", "sync-upstream"]` to the host-only allowlist and refreshes the Maintenance Runner. The caller can then invoke `compose_redeploy(project="firecrawl", operation="sync_upstream", services=[])`; the existing Firecrawl launcher performs all pin, origin and dirty-tree checks. The operation never calls Compose or restarts Firecrawl. If the host project is not script-backed or its handler lacks a fixed sync action, the opt-in fails closed.
 
+**Opt-in isolated staged builds and deployment (script-backed projects only):**
+
+`compose_redeploy(project="firecrawl", operation="build_only", services=[])`
+queues the reviewed `fc.ps1 build-mcp` action. It builds **only** the Firecrawl
+MCP image, verifies its immutable image ID and runs Docker Scout's
+critical/high vulnerability gate before writing a short-lived local receipt.
+Builds do **not** recreate containers.
+
+`compose_redeploy(project="firecrawl", operation="deploy_staged", services=[])`
+queues the reviewed `fc.ps1 redeploy-mcp` action, which fails closed unless
+the exact image has a fresh (24-hour) scan receipt, reviewed source file hashes
+still match, and a second critical/high scan passes. It preserves the previous
+image for rollback, recreates **only** the MCP service with
+`--no-deps --no-build --force-recreate`, verifies its image/running state,
+and attempts an MCP-only rollback if verification fails.
+
+Neither new operation accepts caller-supplied service names, image references,
+shell commands, paths, branches or Compose files. **No project receives these
+permissions by default.** For the existing reviewed Firecrawl script-backed
+project, enable the exact two mappings once on Windows after refreshing the
+DockerLocal runtime and updating the Firecrawl wrapper:
+
+```powershell
+cd C:\ClaudeCode\Docker-MCP
+.\refresh-public-runtime.ps1 -Apply
+.\enable-project-staged-rollout.ps1 -Project firecrawl
+```
+
+This updates the host-only allowlist and runner, but **does not** build or deploy
+a Firecrawl image. The old whole-stack `rebuild_and_redeploy` remains separate
+and is not used for a scoped MCP patch. Docker Scout must be available on the
+Windows host; a scan error, High/Critical CVE or missing receipt blocks release.
+
 - `scheduled_task_status` — state for one allowlisted Windows Scheduled Task alias
 - `scheduled_task_control` — start/stop/restart one allowlisted Windows Scheduled Task alias
 - `image_pull`

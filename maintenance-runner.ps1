@@ -87,16 +87,21 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
 
             $OperationConfig = $OperationsProperty.Value
             $Operations = @{}
-            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy", "sync_upstream")) {
+            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged")) {
                 $OperationProperty = $OperationConfig.PSObject.Properties[$OperationName]
                 if ($null -ne $OperationProperty) {
                     $Arguments = @($OperationProperty.Value | ForEach-Object { [string]$_ })
-                    # Upstream sync must be separately opted in by local admin,
-                    # and may only invoke an exact script action with no input refs.
-                    if ($OperationName -eq "sync_upstream" -and
+                    # Restricted script actions are separately opted in by a local
+                    # administrator, always with an exact reviewed action name.
+                    $FixedScriptActions = @{
+                        sync_upstream = "sync-upstream"
+                        build_only = "build-mcp"
+                        deploy_staged = "redeploy-mcp"
+                    }
+                    if ($FixedScriptActions.ContainsKey($OperationName) -and
                         ($Arguments.Count -ne 2 -or $Arguments[0] -cne "-Action" -or
-                         $Arguments[1] -cne "sync-upstream")) {
-                        throw "sync_upstream handler must be exactly -Action sync-upstream."
+                         $Arguments[1] -cne $FixedScriptActions[$OperationName])) {
+                        throw "$OperationName handler must use its exact reviewed -Action."
                     }
                     $Operations[$OperationName] = $Arguments
                 }
@@ -1428,11 +1433,11 @@ function Run-ProjectRedeploy {
     }
 
     $Operation = [string]$Job.operation
-    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream")) {
+    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged")) {
         throw "Operation is not allowlisted: $Operation"
     }
-    if ($Operation -eq "sync_upstream" -and [string]$Cfg.Mode -ne "script") {
-        throw "Upstream sync is never available to plain Compose projects."
+    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged") -and [string]$Cfg.Mode -ne "script") {
+        throw "Restricted actions are never available to plain Compose projects."
     }
 
     $Requested = @($Job.services | ForEach-Object { [string]$_ })
@@ -1451,10 +1456,15 @@ function Run-ProjectRedeploy {
         }
 
         $HandlerArgs = @($Cfg.Operations[$Operation] | ForEach-Object { [string]$_ })
-        if ($Operation -eq "sync_upstream" -and
+        $ExpectedAction = @{
+            sync_upstream = "sync-upstream"
+            build_only = "build-mcp"
+            deploy_staged = "redeploy-mcp"
+        }
+        if ($ExpectedAction.ContainsKey($Operation) -and
             ($HandlerArgs.Count -ne 2 -or $HandlerArgs[0] -cne "-Action" -or
-             $HandlerArgs[1] -cne "sync-upstream")) {
-            throw "Configured upstream sync action is invalid."
+             $HandlerArgs[1] -cne $ExpectedAction[$Operation])) {
+            throw "Configured $Operation action is invalid."
         }
         $HandlerRun = Invoke-ScriptHandler `
             -JobId ([string]$Job.job_id) `
