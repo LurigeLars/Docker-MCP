@@ -224,6 +224,17 @@ Narrow maintenance:
 
 - `repo_status` — HEAD/branch/clean/conflict/origin eligibility for one local allowlisted repository alias
 - `repo_pull_ff` — exact `git pull --ff-only origin main` semantics for a clean allowlisted main checkout
+- `compose_redeploy(project, operation="sync_upstream")` — generic **script-backed only** action for a separately allowlisted pinned-upstream sync; never calls Docker Compose, does not rebuild or restart anything. The operator must configure `handler.operations.sync_upstream: ["-Action", "sync-upstream"]` for that project in the host-only `maintenance-projects.local.json`. For Firecrawl the pre-existing `fc.ps1 sync-upstream` independently validates a clean checkout, official origin and exact reviewed tag/SHA from `upstream/firecrawl.json`. No client-supplied tag, branch, Git command, path or script is accepted.
+
+One-time local opt-in for an existing Firecrawl script-backed project (no Git shell access or open-ended command parameters):
+
+```powershell
+# From the Docker-MCP repository after the reviewed update is installed:
+.\enable-project-upstream-sync.ps1 -Project firecrawl
+```
+
+This adds only `sync_upstream: ["-Action", "sync-upstream"]` to the host-only allowlist and refreshes the Maintenance Runner. The caller can then invoke `compose_redeploy(project="firecrawl", operation="sync_upstream", services=[])`; the existing Firecrawl launcher performs all pin, origin and dirty-tree checks. The operation never calls Compose or restarts Firecrawl. If the host project is not script-backed or its handler lacks a fixed sync action, the opt-in fails closed.
+
 - `scheduled_task_status` — state for one allowlisted Windows Scheduled Task alias
 - `scheduled_task_control` — start/stop/restart one allowlisted Windows Scheduled Task alias
 - `image_pull`

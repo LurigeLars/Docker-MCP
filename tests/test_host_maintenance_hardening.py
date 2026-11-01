@@ -26,6 +26,38 @@ import server
 
 
 class HostMaintenanceBoundaryTests(unittest.TestCase):
+    def test_upstream_sync_reuses_fixed_script_handler_without_client_commands(self):
+        with unittest.mock.patch.object(server, "_write_job", return_value="a" * 32) as enqueue:
+            result = json.loads(server.compose_redeploy("firecrawl", operation="sync_upstream"))
+        self.assertEqual(result["operation"], "sync_upstream")
+        enqueue.assert_called_once_with({
+            "action": "compose_redeploy",
+            "project": "firecrawl",
+            "services": [],
+            "operation": "sync_upstream",
+        })
+
+        with unittest.mock.patch.object(server, "_write_job") as enqueue:
+            with self.assertRaises(ValueError):
+                server.compose_redeploy(
+                    "firecrawl", services=["api"], operation="sync_upstream"
+                )
+            with self.assertRaises(ValueError):
+                server.compose_redeploy(
+                    "../firecrawl", operation="sync_upstream"
+                )
+        enqueue.assert_not_called()
+
+    def test_runner_forbids_compose_upstream_sync_and_requires_explicit_handler(self):
+        from pathlib import Path
+        runner = (Path(__file__).resolve().parents[1] / "maintenance-runner.ps1").read_text()
+        self.assertIn('($Arguments.Count -ne 2', runner)
+        self.assertIn('($HandlerArgs.Count -ne 2', runner)
+        self.assertIn('Upstream sync is never available to plain Compose projects.', runner)
+        self.assertIn('"-Action"', runner)
+        self.assertIn('"sync-upstream"', runner)
+        self.assertNotIn('git reset --hard', runner)
+
     def test_repo_status_uses_alias_only_and_compacts_result(self):
         raw = {
             "job_id": "a" * 32,
