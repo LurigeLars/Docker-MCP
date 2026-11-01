@@ -1,4 +1,4 @@
-FROM docker/scout-cli:1.26 AS scout
+FROM docker/scout-cli:1.29 AS scout
 
 FROM python:3.12.15-slim
 
