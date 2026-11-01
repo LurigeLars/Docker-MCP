@@ -46,6 +46,24 @@ updates:
     commit-message:
       prefix: "deps-edge-watch"
 
+  # The isolated local-test-runner Dockerfile uses a separately reviewed,
+  # SHA-pinned Python base image; proposals are not applied automatically.
+  - package-ecosystem: "docker"
+    directory: "/local-test-runner"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:25"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 2
+    groups:
+      test-runner-base-minor-patch:
+        applies-to: "version-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:
