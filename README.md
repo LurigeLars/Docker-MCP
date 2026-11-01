@@ -224,6 +224,7 @@ Narrow maintenance:
 
 - `repo_status` — HEAD/branch/clean/conflict/origin eligibility for one local allowlisted repository alias
 - `repo_pull_ff` — exact `git pull --ff-only origin main` semantics for a clean allowlisted main checkout
+- `compose_redeploy(project, operation="sync_upstream")` — generic **script-backed only** action for a separately allowlisted pinned-upstream sync; never calls Docker Compose, does not rebuild or restart anything. The operator must configure `handler.operations.sync_upstream: ["-Action", "sync-upstream"]` for that project in the host-only `maintenance-projects.local.json`. For Firecrawl the pre-existing `fc.ps1 sync-upstream` independently validates a clean checkout, official origin and exact reviewed tag/SHA from `upstream/firecrawl.json`. No client-supplied tag, branch, Git command, path or script is accepted.
 - `scheduled_task_status` — state for one allowlisted Windows Scheduled Task alias
 - `scheduled_task_control` — start/stop/restart one allowlisted Windows Scheduled Task alias
 - `image_pull`
