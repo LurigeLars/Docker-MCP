@@ -87,12 +87,18 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
 
             $OperationConfig = $OperationsProperty.Value
             $Operations = @{}
-            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy")) {
+            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy", "sync_upstream")) {
                 $OperationProperty = $OperationConfig.PSObject.Properties[$OperationName]
                 if ($null -ne $OperationProperty) {
-                    $Operations[$OperationName] = @(
-                        $OperationProperty.Value | ForEach-Object { [string]$_ }
-                    )
+                    $Arguments = @($OperationProperty.Value | ForEach-Object { [string]$_ })
+                    # Upstream sync must be separately opted in by local admin,
+                    # and may only invoke an exact script action with no input refs.
+                    if ($OperationName -eq "sync_upstream" -and
+                        ($Arguments.Count -ne 2 -or $Arguments[0] -cne "-Action" -or
+                         $Arguments[1] -cne "sync-upstream")) {
+                        throw "sync_upstream handler must be exactly -Action sync-upstream."
+                    }
+                    $Operations[$OperationName] = $Arguments
                 }
             }
             if ($Operations.Count -eq 0) {
@@ -1422,15 +1428,18 @@ function Run-ProjectRedeploy {
     }
 
     $Operation = [string]$Job.operation
-    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy")) {
+    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream")) {
         throw "Operation is not allowlisted: $Operation"
+    }
+    if ($Operation -eq "sync_upstream" -and [string]$Cfg.Mode -ne "script") {
+        throw "Upstream sync is never available to plain Compose projects."
     }
 
     $Requested = @($Job.services | ForEach-Object { [string]$_ })
 
     if ([string]$Cfg.Mode -eq "script") {
         if ($Requested.Count -gt 0) {
-            throw "Script-backed project $Project only supports whole-project redeploy; omit services."
+            throw "Script-backed project $Project only supports whole-project actions; omit services."
         }
         if (-not $Cfg.Operations.ContainsKey($Operation)) {
             throw "Operation is not configured for $($Project): $Operation"
@@ -1442,6 +1451,11 @@ function Run-ProjectRedeploy {
         }
 
         $HandlerArgs = @($Cfg.Operations[$Operation] | ForEach-Object { [string]$_ })
+        if ($Operation -eq "sync_upstream" -and
+            ($HandlerArgs.Count -ne 2 -or $HandlerArgs[0] -cne "-Action" -or
+             $HandlerArgs[1] -cne "sync-upstream")) {
+            throw "Configured upstream sync action is invalid."
+        }
         $HandlerRun = Invoke-ScriptHandler `
             -JobId ([string]$Job.job_id) `
             -Project $Project `
