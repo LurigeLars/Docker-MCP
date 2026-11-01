@@ -252,10 +252,9 @@ class SecureRunnerTests(unittest.TestCase):
         def fake_run(argv, **_):
             calls.append(argv)
             return type("Result", (), {"returncode": 0, "stdout": b"[]"})()
-        with patch.object(runner.shutil, "which", return_value="/mock/docker"):
-            with patch.object(runner, "_run", side_effect=fake_run):
-                with self.assertRaisesRegex(RuntimeError, "seccomp policy is missing"):
-                    runner._docker_job(self.config, "b" * 32, self.root / "source.tar")
+        with patch.object(runner, "_run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "seccomp policy is missing"):
+                runner._docker_job(self.config, "b" * 32, self.root / "source.tar")
         self.assertEqual(1, len(calls))
         self.assertIn("info", calls[0])
 
@@ -282,8 +281,7 @@ class SecureRunnerTests(unittest.TestCase):
             return type("Result", (), {"returncode": 0, "stdout": b""})()
         with patch.object(runner, "_git", side_effect=fake_git):
             with patch.object(runner, "_run", side_effect=fake_run):
-                with patch.object(runner.shutil, "which", return_value="git"):
-                    runner._snapshot(self.config, SHA, self.root / "source.tar")
+                runner._snapshot(self.config, SHA, self.root / "source.tar")
         self.assertIn(["merge-base", "--is-ancestor", SHA, self.config["allowed_ref"]], commands)
         self.assertNotIn(["fetch"], commands)
 

@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -154,7 +153,7 @@ def _validate_input(repo: str, commit_sha: str) -> None:
 
 def submit(repo: str, commit_sha: str) -> dict:
     _validate_input(repo, commit_sha)
-    config = _config()
+    _config()  # Validate bounds and allowlisted runner settings before accepting work.
     r = root()
     _paths(r)
     with _locked(r, "submit.lock"):

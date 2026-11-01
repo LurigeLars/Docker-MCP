@@ -2,13 +2,11 @@
 
 No Docker commands or Git fetches are actually executed.
 """
-import importlib.util
 import contextlib
 import io
 import json
 import os
 from pathlib import Path
-import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
