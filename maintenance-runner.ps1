@@ -1562,7 +1562,7 @@ function Invoke-RunnerSelfTest {
     try {
         @'
 param(
-    [ValidateSet("Up", "Redeploy")]
+    [ValidateSet("Up", "Redeploy", "sync-upstream")]
     [string]$Action
 )
 Write-Output "ACTION=$Action"
@@ -1594,6 +1594,61 @@ Write-Host "HOST=$Action"
             [string]$Named.output -match '#< CLIXML'
         ) {
             throw "Named-parameter/text-output script invocation regression."
+        }
+
+        # Exercise the generic allowlisted script action end-to-end on a
+        # temporary handler without touching Docker or any real project.
+        $Projects["selftest-upstream"] = @{
+            Mode = "script"
+            WorkingDir = $TestRoot
+            Files = @()
+            Services = @("api")
+            Script = $TestScript
+            Operations = @{ sync_upstream = @("-Action", "sync-upstream") }
+        }
+        try {
+            $Sync = Run-ProjectRedeploy -Job @{
+                job_id = [Guid]::NewGuid().ToString("N")
+                project = "selftest-upstream"
+                operation = "sync_upstream"
+                services = @()
+            }
+            if ([int]$Sync.exit_code -ne 0 -or
+                [string]$Sync.output -notmatch 'ACTION=sync-upstream') {
+                throw "Pinned-upstream script handler regression."
+            }
+            $Projects["selftest-upstream"].Operations.Remove("sync_upstream")
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'Operation is not configured'
+            }
+            if (-not $Denied) { throw "Unconfigured upstream sync was not denied." }
+
+            $Projects["selftest-upstream"].Mode = "compose"
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'never available to plain Compose'
+            }
+            if (-not $Denied) { throw "Compose upstream sync was not denied." }
+        }
+        finally {
+            $Projects.Remove("selftest-upstream")
         }
 
         $Positional = Invoke-ScriptHandler `
