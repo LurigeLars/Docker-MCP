@@ -1,6 +1,6 @@
 FROM docker/scout-cli:1.29 AS scout
 
-FROM python:3.12.15-slim
+FROM python:3.15.0-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
