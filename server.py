@@ -832,9 +832,9 @@ def cleanup_superseded_images(image_refs: list[str]):
 def compose_redeploy(
     project: str,
     services: list[str] | None = None,
-    operation: Literal["redeploy_current", "rebuild_and_redeploy"] = "rebuild_and_redeploy",
+    operation: Literal["redeploy_current", "rebuild_and_redeploy", "sync_upstream"] = "rebuild_and_redeploy",
 ):
-    """Queue an allowlisted project redeploy using fixed Compose or local script-backed maintenance."""
+    """Queue an allowlisted Compose deploy or a configured script-only upstream sync."""
     project = _project(project)
     clean_services: list[str] = []
     for service in services or []:
@@ -842,8 +842,10 @@ def compose_redeploy(
             raise ValueError("Invalid service name")
         clean_services.append(service)
 
-    if operation not in {"redeploy_current", "rebuild_and_redeploy"}:
+    if operation not in {"redeploy_current", "rebuild_and_redeploy", "sync_upstream"}:
         raise ValueError("Unsupported maintenance operation")
+    if operation == "sync_upstream" and clean_services:
+        raise ValueError("Upstream sync is whole-project only; omit services")
 
     job_id = _write_job(
         {
