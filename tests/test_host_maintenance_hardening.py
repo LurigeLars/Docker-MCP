@@ -53,10 +53,41 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         runner = (Path(__file__).resolve().parents[1] / "maintenance-runner.ps1").read_text()
         self.assertIn('($Arguments.Count -ne 2', runner)
         self.assertIn('($HandlerArgs.Count -ne 2', runner)
-        self.assertIn('Upstream sync is never available to plain Compose projects.', runner)
+        self.assertIn('Restricted actions are never available to plain Compose projects.', runner)
         self.assertIn('"-Action"', runner)
         self.assertIn('"sync-upstream"', runner)
         self.assertNotIn('git reset --hard', runner)
+
+    def test_staged_image_operations_accept_only_a_fixed_project_action(self):
+        for operation in ("build_only", "deploy_staged"):
+            with self.subTest(operation=operation):
+                with unittest.mock.patch.object(server, "_write_job", return_value="b" * 32) as enqueue:
+                    result = json.loads(server.compose_redeploy("firecrawl", operation=operation))
+                self.assertEqual(result["operation"], operation)
+                enqueue.assert_called_once_with({
+                    "action": "compose_redeploy",
+                    "project": "firecrawl",
+                    "services": [],
+                    "operation": operation,
+                })
+                with unittest.mock.patch.object(server, "_write_job") as enqueue:
+                    with self.assertRaises(ValueError):
+                        server.compose_redeploy("firecrawl", services=["mcp"], operation=operation)
+                    with self.assertRaises(ValueError):
+                        server.compose_redeploy("../firecrawl", operation=operation)
+                enqueue.assert_not_called()
+
+    def test_runner_restricts_staging_to_fixed_script_backed_actions(self):
+        from pathlib import Path
+        runner = (Path(__file__).resolve().parents[1] / "maintenance-runner.ps1").read_text()
+        self.assertIn('"build_only"', runner)
+        self.assertIn('"deploy_staged"', runner)
+        self.assertIn('build_only = "build-mcp"', runner)
+        self.assertIn('deploy_staged = "redeploy-mcp"', runner)
+        self.assertIn('Restricted actions are never available to plain Compose projects.', runner)
+        self.assertIn('if ($Requested.Count -gt 0)', runner)
+        self.assertIn('if (-not $Cfg.Operations.ContainsKey($Operation))', runner)
+        self.assertNotIn('Invoke-Expression', runner)
 
     def test_repo_status_uses_alias_only_and_compacts_result(self):
         raw = {
