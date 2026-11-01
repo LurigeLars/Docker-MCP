@@ -212,3 +212,27 @@ jobs:
           test "$WORKFLOWS_RESULT" = "success"
           test "$POWERSHELL_RESULT" = "success"
           test "$DOCKERFILE_RESULT" = "success"
+
+  runtime-api-smoke:
+    name: FastMCP runtime API smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install exact runtime dependency set
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Import and enumerate read-only tool registrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q server.py
+          python - <<'PY'
+          import asyncio
+          import server
+          async def check():
+              tools = await server.mcp.list_tools()
+              names = {tool.name for tool in tools}
+              for name in ("scout_cves", "mcp_deployment_audit", "compose_redeploy"):
+                  assert name in names, f"Missing runtime tool: {name}"
+          asyncio.run(check())
+          PY
