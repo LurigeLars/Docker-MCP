@@ -20,6 +20,11 @@ updates:
 
   - package-ecosystem: "docker"
     directory: "/"
+    # Keep the reviewed Python 3.12 interpreter line; interpreter upgrades
+    # require a dedicated regression and image security review.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     schedule:
       interval: "weekly"
       day: "monday"
@@ -50,6 +55,11 @@ updates:
   # SHA-pinned Python base image; proposals are not applied automatically.
   - package-ecosystem: "docker"
     directory: "/local-test-runner"
+    # Keep the reviewed Python 3.12 interpreter line; interpreter upgrades
+    # require a dedicated regression and image security review.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     schedule:
       interval: "weekly"
       day: "monday"
