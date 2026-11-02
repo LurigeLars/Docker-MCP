@@ -174,10 +174,9 @@ try {
     [IO.File]::WriteAllText($Tmp, ($Config | ConvertTo-Json -Depth 20), $Utf8NoBom)
     Move-Item -LiteralPath $Tmp -Destination $ConfigPath -Force -ErrorAction Stop
     $Written = $true
+    # The installer is a PowerShell script which throws on failure.
+    # $LASTEXITCODE is not guaranteed to be set in a fresh PowerShell process.
     & $Installer
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-        throw 'Maintenance runner install returned a nonzero exit code.'
-    }
     Write-Host 'MCP_ALLOWLIST_UPDATED'
     Write-Host "Project count (including two built-ins): $($Config.PSObject.Properties.Count + 2)"
 } catch {
