@@ -65,3 +65,35 @@ def test_github_gateway_waits_for_docker_health_before_rollback():
     assert "Start-Sleep -Milliseconds 750" in PROMOTE
     assert "if (-not $Healthy)" in PROMOTE
     assert "GitHub MCP gateway did not become healthy within 45 seconds." in PROMOTE
+
+
+def test_dockerlocal_promotion_refreshes_existing_host_runner_without_new_permissions():
+    assert "Refresh-InstalledMaintenanceRunner" in PROMOTE
+    assert "MAINTENANCE_RUNNER_REFRESHED" in PROMOTE
+    assert "MAINTENANCE_RUNNER_ALREADY_CURRENT" in PROMOTE
+    assert "install-maintenance-runner.ps1" in PROMOTE
+    assert "Get-FileHash" in PROMOTE
+    assert "Assert-CleanSource -Path $SourceRoot -Repository 'Docker-MCP'" in PROMOTE
+    assert "active-worker.json" in PROMOTE
+    assert "runner-heartbeat.json" in PROMOTE
+    assert "dockerlocal-runtime-promotion" in PROMOTE
+    assert "Runner handoff refused: other operations remain queued or processing." in PROMOTE
+    assert "New maintenance runner did not take over the resident process." in PROMOTE
+    assert "Refresh-InstalledMaintenanceRunner\n" in PROMOTE
+
+
+def test_runner_only_refresh_is_idempotent_and_gateway_only():
+    assert "DOCKERLOCAL_GATEWAY_ALREADY_CURRENT" in PROMOTE
+    assert "$NeedsGatewayUpdate" in PROMOTE
+    assert "Get-FileHash -LiteralPath $SrcGateway" in PROMOTE
+    assert "Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')" in PROMOTE
+
+
+def test_self_refresh_has_preflight_backup_and_bounded_rollback():
+    assert "ParseFile(" in PROMOTE
+    assert "New-Backup 'maintenance-runner'" in PROMOTE
+    assert "Copy-Item -LiteralPath (Join-Path $Backup $Name)" in PROMOTE
+    assert "Get-Process -Id ([int]$Worker.pid)" in PROMOTE
+    assert "$ProcessFiles.Count -ne 1" in PROMOTE
+    assert "$OtherRequests.Count -gt 0" in PROMOTE
+    assert "Source repository origin does not match the reviewed GitHub repository." in PROMOTE
