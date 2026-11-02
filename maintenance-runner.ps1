@@ -93,7 +93,7 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
 
             $OperationConfig = $OperationsProperty.Value
             $Operations = @{}
-            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged")) {
+            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged")) {
                 $OperationProperty = $OperationConfig.PSObject.Properties[$OperationName]
                 if ($null -ne $OperationProperty) {
                     $Arguments = @($OperationProperty.Value | ForEach-Object { [string]$_ })
@@ -103,6 +103,8 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
                         sync_upstream = "sync-upstream"
                         build_only = "build-mcp"
                         deploy_staged = "redeploy-mcp"
+                        api_build_only = "stage-api"
+                        api_deploy_staged = "deploy-api"
                     }
                     if ($FixedScriptActions.ContainsKey($OperationName) -and
                         ($Arguments.Count -ne 2 -or $Arguments[0] -cne "-Action" -or
@@ -1549,10 +1551,10 @@ function Run-ProjectRedeploy {
     }
 
     $Operation = [string]$Job.operation
-    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged")) {
+    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged")) {
         throw "Operation is not allowlisted: $Operation"
     }
-    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged") -and [string]$Cfg.Mode -ne "script") {
+    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged") -and [string]$Cfg.Mode -ne "script") {
         throw "Restricted actions are never available to plain Compose projects."
     }
 
@@ -1576,6 +1578,8 @@ function Run-ProjectRedeploy {
             sync_upstream = "sync-upstream"
             build_only = "build-mcp"
             deploy_staged = "redeploy-mcp"
+                        api_build_only = "stage-api"
+                        api_deploy_staged = "deploy-api"
         }
         if ($ExpectedAction.ContainsKey($Operation) -and
             ($HandlerArgs.Count -ne 2 -or $HandlerArgs[0] -cne "-Action" -or
