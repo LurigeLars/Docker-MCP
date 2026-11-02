@@ -89,6 +89,26 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertIn('if (-not $Cfg.Operations.ContainsKey($Operation))', runner)
         self.assertNotIn('Invoke-Expression', runner)
 
+    def test_api_stage_has_own_exact_action_allowlist_and_no_service_arguments(self):
+        for operation, action in (("api_build_only", "stage-api"),
+                                  ("api_deploy_staged", "deploy-api")):
+            with self.subTest(operation=operation):
+                with unittest.mock.patch.object(server, "_write_job", return_value="a" * 32) as enqueue:
+                    result = json.loads(server.compose_redeploy("firecrawl", operation=operation))
+                self.assertEqual(result["operation"], operation)
+                enqueue.assert_called_once()
+                with unittest.mock.patch.object(server, "_write_job") as enqueue:
+                    with self.assertRaises(ValueError):
+                        server.compose_redeploy("firecrawl", services=["api"], operation=operation)
+                enqueue.assert_not_called()
+                from pathlib import Path
+                root = Path(__file__).resolve().parents[1]
+                runner = (root / "maintenance-runner.ps1").read_text()
+                optin = (root / "enable-project-staged-rollout.ps1").read_text()
+                self.assertIn(f'{operation} = "{action}"', runner)
+                self.assertIn(f'$Required["{operation}"] = "{action}"', optin)
+                self.assertIn('if ($Project -ceq "firecrawl")', optin)
+
     def test_repo_status_uses_alias_only_and_compacts_result(self):
         raw = {
             "job_id": "a" * 32,
