@@ -19,6 +19,10 @@ class FirecrawlEphemeralRefreshRegistrationTests(unittest.TestCase):
         self.assertIn("'security\\\\refresh-searxng.ps1'", PROMOTE)
         self.assertIn("Reviewed Firecrawl SearXNG refresh implementation not present.", PROMOTE)
 
+    def test_search_proxy_refresh_has_exact_host_alias(self):
+        self.assertIn("'firecrawl-search-proxy-refresh' = @('refresh-search-proxy','searxng-proxy')", PROMOTE)
+        self.assertIn("Reviewed Firecrawl internal SearXNG proxy refresh not present.", PROMOTE)
+
     def test_existing_stateless_allowlist_does_not_expand_to_data_services(self):
         self.assertIn('if ($Operation -eq "update_stateless")', RUNNER)
         self.assertIn('if ($Project -cne "firecrawl" -or', RUNNER)

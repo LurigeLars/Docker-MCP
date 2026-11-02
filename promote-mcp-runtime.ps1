@@ -170,7 +170,7 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
     # and no generic shell/build/restart privilege granted to the container.
     $FirecrawlRoot = 'C:\ClaudeCode\firecrawl-local'
     Assert-CleanSource -Path $FirecrawlRoot -Repository 'firecrawl-local-mcp'
-    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security','security\refresh-ephemeral.ps1','security\refresh-searxng.ps1')) {
+    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security','security\refresh-ephemeral.ps1','security\refresh-searxng.ps1','security\refresh-node-helpers.ps1')) {
         Require-File (Join-Path $FirecrawlRoot $Relative)
     }
     $FcText = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'fc.ps1') -Raw
@@ -186,6 +186,12 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         $SearchRefresh -notmatch 'scout cves --only-severity critical,high --only-fixed --exit-code') {
         throw 'Reviewed Firecrawl SearXNG refresh implementation not present.'
     }
+    $ProxyRefresh = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'security\refresh-node-helpers.ps1') -Raw
+    if ($ProxyRefresh -notmatch "ValidateSet\('searxng-proxy'\)" -or
+        $ProxyRefresh -notmatch 'scout cves --only-severity critical,high --only-fixed --exit-code' -or
+        $ProxyRefresh -notmatch '--no-deps --no-build --force-recreate') {
+        throw 'Reviewed Firecrawl internal SearXNG proxy refresh not present.'
+    }
     $ServiceMap = [ordered]@{
         'firecrawl-playwright-stage' = @('stage-playwright','playwright-service')
         'firecrawl-browser-stage' = @('stage-browser','browser-session-service')
@@ -196,6 +202,7 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         'firecrawl-redis-refresh' = @('refresh-redis','redis')
         'firecrawl-rabbitmq-refresh' = @('refresh-rabbitmq','rabbitmq')
         'firecrawl-searxng-refresh' = @('refresh-searxng','searxng')
+        'firecrawl-search-proxy-refresh' = @('refresh-search-proxy','searxng-proxy')
     }
     $ConfigPath = Join-Path $LocalRoot 'maintenance-projects.local.json'
     Require-File $ConfigPath
