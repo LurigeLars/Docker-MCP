@@ -178,7 +178,7 @@ try {
     # $LASTEXITCODE is not guaranteed to be set in a fresh PowerShell process.
     & $Installer
     Write-Host 'MCP_ALLOWLIST_UPDATED'
-    Write-Host "Project count (including two built-ins): $($Config.PSObject.Properties.Count + 2)"
+    Write-Host "Project count (including two built-ins): $($Added.Count + $Preserved.Count + 2)"
 } catch {
     if ($Written) {
         if ($null -ne $Original) {
