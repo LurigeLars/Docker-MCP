@@ -1,7 +1,7 @@
 # Build ONLY after security review of this directory and upstream image/deps.
 # For deployment, pin the resulting local image Id sha256:<64 hex> separately
 # in ignored Windows operator config; never use a mutable tag in runner config.
-FROM python:3.12.15-alpine3.24@sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d
+FROM python:3.12.16-alpine3.24@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8
 
 # Apply Alpine security package fixes (notably zlib CVE-2026-85091).
 # Runtime is subsequently offline; CI scans final OS + Python dependency closure.
