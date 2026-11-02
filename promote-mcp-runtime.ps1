@@ -465,5 +465,11 @@ switch ($Target) {
         Require-File $RetireScript
         & $RetireScript
         if (-not $?) { throw 'Reviewed GitHub stdio retirement verification failed.' }
+        # Install already-reviewed Python MCP lockfiles while their exact HTTP tasks
+        # are stopped. One-time marker prevents work in later normal promotions.
+        $PythonLockSync = Join-Path $SourceRoot 'sync-reviewed-python-mcp-locks.ps1'
+        Require-File $PythonLockSync
+        & $PythonLockSync
+        if (-not $?) { throw 'Reviewed Python MCP dependency sync failed.' }
     }
 }
