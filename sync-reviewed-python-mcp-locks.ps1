@@ -8,13 +8,21 @@ $Targets = @(
     @{ Name='avanza-mcp'; Path='C:\ClaudeCode\avanza-mcp'; Commit='d9dadc00f9b528d83f10ebce919e6c85979ab6e5'; Task='AvanzaMcpHttpServer'; Package='pydantic'; Version='2.14.2' },
     @{ Name='yfinance-mcp'; Path='C:\ClaudeCode\yfinance-mcp'; Commit='bd8b8209b4001ea98501248600146704cbc1757f'; Task='YFinanceMcpHttpServer'; Package='fastmcp'; Version='4.1.4' }
 )
+if (Test-Path -LiteralPath $Marker -PathType Leaf) {
+    $Prior = Get-Content -LiteralPath $Marker -Raw | ConvertFrom-Json
+    if ($Prior.avanza -ceq $Targets[0].Commit -and $Prior.yfinance -ceq $Targets[1].Commit) {
+        Write-Output 'PYTHON_MCP_LOCKS_ALREADY_APPLIED'
+        return
+    }
+    throw 'Unexpected existing Python MCP update state marker.'
+}
 $UvCmd = Get-Command uv.exe -ErrorAction Stop
 foreach ($Target in $Targets) {
     if (-not (Test-Path -LiteralPath $Target.Path -PathType Container)) { throw "Missing reviewed repo $($Target.Name)." }
     $GitHead = (& git -C $Target.Path rev-parse HEAD)
     if ($LASTEXITCODE -ne 0 -or [string]$GitHead -cne $Target.Commit) { throw "Unexpected Git revision for $($Target.Name)." }
     $Origin = (& git -C $Target.Path remote get-url origin)
-    if ($LASTEXITCODE -ne 0 -or [string]$Origin -cne "https://github.com/LurigeLars/$($Target.Name).git") {
+    if ($LASTEXITCODE -ne 0 -or [string]$Origin -cnotin @("https://github.com/LurigeLars/$($Target.Name).git","https://github.com/LurigeLars/$($Target.Name)")) {
         throw "Unexpected Git origin for $($Target.Name)."
     }
     $Dirty = @(& git -C $Target.Path status --porcelain)
@@ -22,15 +30,6 @@ foreach ($Target in $Targets) {
     $Task = Get-ScheduledTask -TaskName $Target.Task -ErrorAction Stop
     if ($Task.State -eq 'Running') { throw "Stop reviewed HTTP task before upgrading $($Target.Name)." }
     if (-not (Test-Path -LiteralPath (Join-Path $Target.Path 'uv.lock') -PathType Leaf)) { throw "Missing reviewed lockfile for $($Target.Name)." }
-}
-$Done = Test-Path -LiteralPath $Marker -PathType Leaf
-if ($Done) {
-    $Prior = Get-Content -LiteralPath $Marker -Raw | ConvertFrom-Json
-    if ($Prior.avanza -ceq $Targets[0].Commit -and $Prior.yfinance -ceq $Targets[1].Commit) {
-        Write-Output 'PYTHON_MCP_LOCKS_ALREADY_APPLIED'
-        return
-    }
-    throw 'Unexpected existing Python MCP update state marker.'
 }
 foreach ($Target in $Targets) {
     Push-Location -LiteralPath $Target.Path
