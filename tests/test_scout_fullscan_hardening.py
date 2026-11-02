@@ -234,6 +234,18 @@ class ScoutFullScanHardeningTests(unittest.TestCase):
             FULLSCAN,
         )
 
+
+    def test_gitlab_formatter_panic_can_only_produce_failed_diagnostics(self):
+        self.assertIn("internal/format/sbom/gitlab", FULLSCAN)
+        self.assertIn('$StartInfo.ArgumentList[3] = "markdown"', FULLSCAN)
+        self.assertIn('Markdown diagnostics only; scan NOT approved.', FULLSCAN)
+        self.assertIn('$Result.error_code = "SCAN_FAILED_FORMATTER"', FULLSCAN)
+        self.assertIn('$Result.scan_complete = $false', FULLSCAN)
+        self.assertIn('Get-BoundedScoutOutput -Text (', FULLSCAN)
+        self.assertIn('RedactValues @($ScoutUser, $ScoutPassword)', FULLSCAN)
+        self.assertIn('SCAN_TIMEOUT', FULLSCAN)
+        self.assertNotIn('$Result.status = "succeeded"\n            $Result.scan_complete = $false', FULLSCAN)
+
     def test_structured_parse_failure_is_fail_visible(self):
         self.assertIn('$Result.error_code = "SCAN_FAILED_PARSE"', FULLSCAN)
         self.assertIn('$Result.scan_complete = $false', FULLSCAN)

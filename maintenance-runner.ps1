@@ -715,6 +715,45 @@ function Invoke-ScoutFullScan {
         $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
         $Result.exit_code = [int]$Process.ExitCode
 
+        if ([int]$Process.ExitCode -ne 0 -and
+            $Combined -match 'internal/format/sbom/gitlab|gitlab\\.go:207') {
+            # Scout can panic inside its GitLab formatter *after* completing
+            # vulnerability detection. Diagnostic fallback is read-only.
+            # It never returns a successful scan or waives the CVE gate.
+            $OriginalFailure = [int]$Process.ExitCode
+            $Process.Dispose()
+            $Process = $null
+            $StartInfo.ArgumentList[3] = "markdown"
+            $Diagnostic = [Diagnostics.Process]::new()
+            $Diagnostic.StartInfo = $StartInfo
+            $Process = $Diagnostic
+            [void]$Process.Start()
+            $MarkdownOutTask = $Process.StandardOutput.ReadToEndAsync()
+            $MarkdownErrTask = $Process.StandardError.ReadToEndAsync()
+            while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+                Start-Sleep -Seconds 1
+                $Process.Refresh()
+            }
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+                try { $Process.WaitForExit(5000) | Out-Null } catch {}
+                $Result.error_code = "SCAN_TIMEOUT"
+                $Result.output = "Scout GitLab formatter crashed; Markdown diagnostic exceeded scan timeout."
+                return $Result
+            }
+            $Process.WaitForExit()
+            $MarkdownOut = [string]$MarkdownOutTask.GetAwaiter().GetResult()
+            $MarkdownErr = [string]$MarkdownErrTask.GetAwaiter().GetResult()
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_FORMATTER"
+            $Result.output = Get-BoundedScoutOutput -Text (
+                "GitLab formatter crashed (exit $OriginalFailure). Markdown diagnostics only; scan NOT approved." +
+                [Environment]::NewLine + $MarkdownOut + [Environment]::NewLine + $MarkdownErr
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
         if ([int]$Process.ExitCode -ne 0) {
             $Result.status = "failed"
             $Result.scan_complete = $false
