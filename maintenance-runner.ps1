@@ -1139,6 +1139,11 @@ function Get-ComposeFileState {
     $Containers = @()
     $Drift = @()
     $Errors = @()
+    # Compose container labels can point at a subdirectory while the reviewed
+    # allowlisted deployment uses a different project directory and .env file.
+    # Only use this fallback for exact matching Compose-file sets, and only
+    # when the label-based hash command itself failed. Never guess a match.
+    $AllowlistedDesired = $null
 
     $Ids = @(& $Docker ps -aq)
     if ($LASTEXITCODE -ne 0) {
@@ -1327,6 +1332,54 @@ function Get-ComposeFileState {
             elseif ($null -ne $HashRun) {
                 $HashVerificationReason = "compose_hash_command_failed"
                 $HashCommandExitCode = [int]$HashRun.exit_code
+
+                # Try the exact reviewed project allowlist if Docker's
+                # container-label working directory lacks required env context.
+                # Never let unrelated Compose-file sets claim a valid match.
+                if ($Projects.ContainsKey($Project)) {
+                    $Allowlisted = $Projects[$Project]
+                    $KnownFiles = @(
+                        $Allowlisted.Files | ForEach-Object {
+                            [IO.Path]::GetFullPath((Join-Path ([string]$Allowlisted.WorkingDir) ([string]$_))).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    $ContainerPaths = @(
+                        $ResolvedFiles | ForEach-Object {
+                            [IO.Path]::GetFullPath([string]$_).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    if ($KnownFiles.Count -gt 0 -and $KnownFiles.Count -eq $ContainerPaths.Count -and
+                        (@(Compare-Object -ReferenceObject $KnownFiles -DifferenceObject $ContainerPaths).Count -eq 0)) {
+                        if ($null -eq $AllowlistedDesired) {
+                            $AllowlistedDesired = Get-ComposeDesiredState
+                        }
+                        $DesiredProject = $AllowlistedDesired.projects[$Project]
+                        $DesiredService = if ($null -ne $DesiredProject) {
+                            $DesiredProject.services[$Service]
+                        } else { $null }
+                        $FallbackHash = if ($null -ne $DesiredService) {
+                            [string]$DesiredService.config_hash
+                        } else { "" }
+                        if (-not [string]::IsNullOrWhiteSpace($FallbackHash)) {
+                            $Match = ($FallbackHash -ceq $RunningConfigHash)
+                            $HashVerificationReason = if ($Match) {
+                                "service_hash_verified_match_via_allowlist"
+                            } else {
+                                "service_hash_verified_mismatch_via_allowlist"
+                            }
+                            foreach ($Entry in $ContainerFiles) {
+                                if ([string]$Entry.status -eq "newer_than_container") {
+                                    $Entry.status = if ($Match) { "mtime_only" } else { "config_hash_mismatch" }
+                                    $Entry.config_hash_verified = $true
+                                    if (-not $Match) {
+                                        $Entry.running_config_hash = $RunningConfigHash
+                                        $Entry.desired_config_hash = $FallbackHash
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2037,7 +2090,13 @@ try {
 
                 Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
                 if ($Action -in @("scout_full_scan", "compose_redeploy")) {
-                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project ([string]$Job.project)
+                    # Image scans are not associated with any Compose project.
+                    # PowerShell Mandatory string parameters reject an empty
+                    # value, so use a fixed telemetry-only name for scan jobs.
+                    $DispatchProject = if ($Action -eq "scout_full_scan") {
+                        "image-scan"
+                    } else { [string]$Job.project }
+                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project $DispatchProject
                     $ActiveLongJobId = $JobId
                     $ActiveLongStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                     $WorkerDispatched = $true
