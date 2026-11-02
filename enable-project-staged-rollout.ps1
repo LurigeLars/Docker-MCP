@@ -60,7 +60,20 @@ $Required = @{
     build_only = "build-mcp"
     deploy_staged = "redeploy-mcp"
 }
-foreach ($Name in @("build_only", "deploy_staged")) {
+# API rollout is a separate, explicitly reviewed action of Firecrawl only.
+# The current local config is preserved until this opt-in is run.
+if ($Project -ceq "firecrawl") {
+    $ApiStage = Join-Path $WorkingDir "security\staged-api-image.ps1"
+    if (-not (Test-Path -LiteralPath $ApiStage -PathType Leaf) -or
+        $ScriptSource -notmatch "'stage-api'\s*\{" -or
+        $ScriptSource -notmatch "'deploy-api'\s*\{" -or
+        $ScriptSource -notmatch "Invoke-ApiStage") {
+        throw "Firecrawl API-only staging handler is missing or unreviewed."
+    }
+    $Required["api_build_only"] = "stage-api"
+    $Required["api_deploy_staged"] = "deploy-api"
+}
+foreach ($Name in @($Required.Keys)) {
     $Expected = [string]$Required[$Name]
     $Existing = $Operations.PSObject.Properties[$Name]
     if ($null -ne $Existing) {
@@ -93,4 +106,4 @@ catch {
 finally {
     Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
 }
-Write-Host "Reviewed build_only and deploy_staged enabled for $Project; no image changed."
+Write-Host "Reviewed staged rollout operations enabled for $Project; no image changed."
