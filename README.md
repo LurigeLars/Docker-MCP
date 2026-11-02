@@ -483,7 +483,22 @@ and **without** `services` for these script-backed actions:
 
 - `github-mcp-local` — runs the already reviewed `github-mcp-server/deploy/local-gateway/deploy-runtime.ps1`, syncing tracked runtime files and reimporting DPAPI-backed secrets, with backup/rollback.
 - `mcp-edge` — promotes only the pinned cloudflared tag in `dependency-watch/edge-images/Dockerfile`, keeps the existing tunnel secret holder and edge network mapping, and calls the secret-aware `mcp-edge-runtime.ps1 Up`.
-- `dockerlocal-runtime-promotion` — promotes only the installed DockerLocal public gateway's Node image and tracked JavaScript; never rebuilds or restarts the MCP backend or socket-proxy.
+- `dockerlocal-runtime-promotion` — promotes only the installed DockerLocal public gateway's Node image and tracked JavaScript; never rebuilds or restarts the MCP backend or socket-proxy. **Also refreshes the host Maintenance Runner when its trusted source files have changed**, without requiring another local installer command.
+
+To update the resident Maintenance Runner after a reviewed source change:
+fast-forward the clean `Docker-MCP` checkout with `repo_pull_ff`, then invoke
+`compose_redeploy` with `project="dockerlocal-runtime-promotion"`,
+`operation="redeploy_current"`, and **no service list**. This uses the
+**existing** local allowlist entry; it does not create a new remote permission.
+The script skips gateway recreation if its image and JavaScript already match.
+It requires exactly its own active dispatched maintenance job and no queued
+or concurrent processing jobs, backs up the currently installed runner files,
+checks PowerShell syntax, invokes the existing host-only installer, then
+verifies a new resident runner PID and exact installed source file hashes.
+The new runner adopts the still-active dispatched worker and retains its
+result receipt. If installation fails, old runner files are restored and the
+existing Windows host launcher is invoked. Do not start a second update
+while the first is running; check its job receipt and runner heartbeat first.
 
 The client cannot provide a path, a version, or a shell command. The host wrapper
 rejects an unexpected source origin, dirty checkout or non-`main` branch.
