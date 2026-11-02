@@ -832,7 +832,7 @@ def cleanup_superseded_images(image_refs: list[str]):
 def compose_redeploy(
     project: str,
     services: list[str] | None = None,
-    operation: Literal["redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged"] = "rebuild_and_redeploy",
+    operation: Literal["redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged"] = "rebuild_and_redeploy",
 ):
     """Queue a reviewed allowlisted project action; no paths, commands or image refs accepted."""
     project = _project(project)
@@ -842,9 +842,9 @@ def compose_redeploy(
             raise ValueError("Invalid service name")
         clean_services.append(service)
 
-    if operation not in {"redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged"}:
+    if operation not in {"redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged"}:
         raise ValueError("Unsupported maintenance operation")
-    if operation in {"sync_upstream", "build_only", "deploy_staged"} and clean_services:
+    if operation in {"sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged"} and clean_services:
         raise ValueError("Restricted script-backed operations cannot accept services")
 
     job_id = _write_job(
