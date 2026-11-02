@@ -60,18 +60,21 @@ $Required = @{
     build_only = "build-mcp"
     deploy_staged = "redeploy-mcp"
 }
-# API rollout is a separate, explicitly reviewed action of Firecrawl only.
-# The current local config is preserved until this opt-in is run.
+# Firecrawl's one-command maintenance may target ONLY this fixed stateless list.
+# This opt-in changes the local allowlist, never the running containers.
 if ($Project -ceq "firecrawl") {
     $ApiStage = Join-Path $WorkingDir "security\staged-api-image.ps1"
     if (-not (Test-Path -LiteralPath $ApiStage -PathType Leaf) -or
-        $ScriptSource -notmatch "'stage-api'\s*\{" -or
-        $ScriptSource -notmatch "'deploy-api'\s*\{" -or
-        $ScriptSource -notmatch "Invoke-ApiStage") {
-        throw "Firecrawl API-only staging handler is missing or unreviewed."
+        $ScriptSource -notmatch "'maintain-stateless'\s*\{" -or
+        $ScriptSource -notmatch "Invoke-ApiStage" -or
+        $ScriptSource -notmatch "Invoke-PlaywrightStage" -or
+        $ScriptSource -notmatch "Invoke-McpStageSecurityCheck") {
+        throw "Firecrawl stateless maintenance handler is missing or unreviewed."
     }
-    $Required["api_build_only"] = "stage-api"
-    $Required["api_deploy_staged"] = "deploy-api"
+    $Required["update_stateless"] = "maintain-stateless"
+    $Reviewed = @("api", "mcp", "playwright-service", "browser-session-service", "playwright-public-proxy-service")
+    $Configured = @($Cfg.services | ForEach-Object { [string]$_ })
+    $Cfg.services = @($Configured + $Reviewed | Select-Object -Unique)
 }
 foreach ($Name in @($Required.Keys)) {
     $Expected = [string]$Required[$Name]
