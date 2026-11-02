@@ -235,6 +235,31 @@ One-time local opt-in for an existing Firecrawl script-backed project (no Git sh
 
 This adds only `sync_upstream: ["-Action", "sync-upstream"]` to the host-only allowlist and refreshes the Maintenance Runner. The caller can then invoke `compose_redeploy(project="firecrawl", operation="sync_upstream", services=[])`; the existing Firecrawl launcher performs all pin, origin and dirty-tree checks. The operation never calls Compose or restarts Firecrawl. If the host project is not script-backed or its handler lacks a fixed sync action, the opt-in fails closed.
 
+**Recommended: one-command, service-only maintenance for Firecrawl**
+
+After the one-time local review/opt-in:
+
+```powershell
+.\enable-project-staged-rollout.ps1 -Project firecrawl
+```
+
+ChatGPT can do a bounded, reusable build → Scout security check → stage →
+deploy → rollback-on-failure operation for a single stateless service in one call:
+
+```text
+compose_redeploy(project="firecrawl", operation="update_stateless", services=["api"])
+```
+
+The same action accepts only `mcp`, `playwright-service`,
+`browser-session-service`, or `playwright-public-proxy-service` instead
+of `api`. Service lists of zero or multiple entries are rejected. The host
+runner checks a fixed allowlist, uses an exact reviewed `fc.ps1` action,
+and gives image builds a bounded extended time window. Redis, RabbitMQ,
+PostgreSQL, SearXNG, and non-Firecrawl projects are **never** eligible.
+Version bumps still need to enter reviewed GitHub source, and data-bearing
+upgrades require verified backups and a separate migration plan. No new
+GitHub PR is needed to rerun this workflow for a newly approved version.
+
 **Opt-in isolated staged builds and deployment (script-backed projects only):**
 
 `compose_redeploy(project="firecrawl", operation="build_only", services=[])`
