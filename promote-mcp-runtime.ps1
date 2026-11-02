@@ -170,7 +170,7 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
     # and no generic shell/build/restart privilege granted to the container.
     $FirecrawlRoot = 'C:\ClaudeCode\firecrawl-local'
     Assert-CleanSource -Path $FirecrawlRoot -Repository 'firecrawl-local-mcp'
-    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security','security\refresh-ephemeral.ps1','security\refresh-searxng.ps1','security\refresh-node-helpers.ps1','security\refresh-public-gateway.ps1')) {
+    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security','security\refresh-ephemeral.ps1','security\refresh-searxng.ps1','security\refresh-node-helpers.ps1','security\refresh-public-gateway.ps1','security\refresh-node-runtime.ps1')) {
         Require-File (Join-Path $FirecrawlRoot $Relative)
     }
     $FcText = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'fc.ps1') -Raw
@@ -199,6 +199,13 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         $GatewayRefresh -notmatch '--no-deps --no-build --force-recreate gateway') {
         throw 'Reviewed Firecrawl public gateway refresh implementation not present.'
     }
+    $NodeRuntime = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'security\refresh-node-runtime.ps1') -Raw
+    if ($NodeRuntime -notmatch "ValidateSet\('playwright-router','llm-proxy'\)" -or
+        $NodeRuntime -notmatch 'Import-GeminiKey' -or
+        $NodeRuntime -notmatch 'scout cves --only-severity critical,high --only-fixed --exit-code' -or
+        $NodeRuntime -notmatch '--no-deps --no-build --force-recreate') {
+        throw 'Reviewed last two Firecrawl Node runtime patch actions missing.'
+    }
     $ServiceMap = [ordered]@{
         'firecrawl-playwright-stage' = @('stage-playwright','playwright-service')
         'firecrawl-browser-stage' = @('stage-browser','browser-session-service')
@@ -211,6 +218,8 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         'firecrawl-searxng-refresh' = @('refresh-searxng','searxng')
         'firecrawl-search-proxy-refresh' = @('refresh-search-proxy','searxng-proxy')
         'firecrawl-public-gateway-refresh' = @('refresh-gateway','gateway')
+        'firecrawl-playwright-router-refresh' = @('refresh-playwright-router','playwright-router')
+        'firecrawl-llm-proxy-refresh' = @('refresh-llm-proxy','llm-proxy')
     }
     $ConfigPath = Join-Path $LocalRoot 'maintenance-projects.local.json'
     Require-File $ConfigPath
