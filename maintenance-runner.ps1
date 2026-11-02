@@ -1899,6 +1899,11 @@ function Get-ExistingDispatchedWorker {
         if ($null -eq $Candidate -or $Candidate.ProcessName -notin @("pwsh", "powershell") -or $Candidate.HasExited) {
             return $null
         }
+        # A recycled PID must never be adopted or killed as the previous worker.
+        $ProcessStartUnix = [DateTimeOffset]::new($Candidate.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
+        if ([Math]::Abs($ProcessStartUnix - [int64]$State.started_unix) -gt 30) {
+            return $null
+        }
         return @{ job_id=$Id; process=$Candidate; started_unix=[int64]$State.started_unix }
     }
     catch { return $null }
