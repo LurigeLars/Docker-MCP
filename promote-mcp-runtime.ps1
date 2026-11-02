@@ -124,7 +124,7 @@ switch ($Target) {
         if ([regex]::Matches($Current,$Pattern).Count -ne 1) { throw 'Expected exactly one cloudflared service image line.' }
         # Do not change tunnel token, secret holder, networks or ingress.
         $Updated = [regex]::Replace($Current,$Pattern,"    image: $Wanted")
-        Run-Docker @('pull',$Wanted)
+        Run-Docker -Arguments @('pull',$Wanted)
         $Backup = New-Backup 'edge'
         $Saved = Join-Path $Backup 'compose.yaml'
         Copy-Item -LiteralPath $Compose -Destination $Saved -Force
@@ -158,7 +158,7 @@ switch ($Target) {
         $Pattern = '(?m)^    image: node:[0-9]+\.[0-9]+\.[0-9]+-alpine\s*$'
         if ([regex]::Matches($Current,$Pattern).Count -ne 1) { throw 'Expected exactly one Node gateway image line.' }
         $Updated = [regex]::Replace($Current,$Pattern,"    image: $Wanted")
-        Run-Docker @('pull',$Wanted)
+        Run-Docker -Arguments @('pull',$Wanted)
         $Backup = New-Backup 'dockerlocal'
         $SavedCompose = Join-Path $Backup 'compose.public.yaml'
         $SavedGateway = Join-Path $Backup 'gateway.mjs'
@@ -167,15 +167,15 @@ switch ($Target) {
         try {
             [IO.File]::WriteAllText($Compose,$Updated,[Text.UTF8Encoding]::new($false))
             Copy-Item -LiteralPath $SrcGateway -Destination $Gateway -Force
-            Run-Docker @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')
+            Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')
             Assert-RunningImage 'dockerlocal-gateway' $Wanted
-            Run-Docker @('exec','dockerlocal-gateway','node','-e',"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))")
+            Run-Docker -Arguments @('exec','dockerlocal-gateway','node','-e',"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))")
             Write-Output "DOCKERLOCAL_GATEWAY_PROMOTED $Wanted"
         } catch {
             $Reason = $_.Exception.Message
             Copy-Item -LiteralPath $SavedCompose -Destination $Compose -Force
             Copy-Item -LiteralPath $SavedGateway -Destination $Gateway -Force
-            try { Run-Docker @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway') }
+            try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway') }
             catch { Write-Warning 'DockerLocal gateway rollback requires local recovery.' }
             throw "DockerLocal gateway promotion failed; files restored. Cause: $Reason"
         }
