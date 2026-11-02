@@ -165,6 +165,104 @@ function Refresh-InstalledMaintenanceRunner {
     }
 }
 
+function Enable-ReviewedFirecrawlPlaywrightActions {
+    # Narrow host policy migration: six exact reviewed actions, no caller input,
+    # and no generic shell/build/restart privilege granted to the container.
+    $FirecrawlRoot = 'C:\ClaudeCode\firecrawl-local'
+    Assert-CleanSource -Path $FirecrawlRoot -Repository 'firecrawl-local-mcp'
+    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security')) {
+        Require-File (Join-Path $FirecrawlRoot $Relative)
+    }
+    $FcText = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'fc.ps1') -Raw
+    $ServiceMap = [ordered]@{
+        'firecrawl-playwright-stage' = @('stage-playwright','playwright-service')
+        'firecrawl-browser-stage' = @('stage-browser','browser-session-service')
+        'firecrawl-proxy-stage' = @('stage-proxy','playwright-public-proxy-service')
+        'firecrawl-playwright-deploy' = @('deploy-playwright','playwright-service')
+        'firecrawl-browser-deploy' = @('deploy-browser','browser-session-service')
+        'firecrawl-proxy-deploy' = @('deploy-proxy','playwright-public-proxy-service')
+    }
+    $ConfigPath = Join-Path $LocalRoot 'maintenance-projects.local.json'
+    Require-File $ConfigPath
+    $Original = Get-Content -LiteralPath $ConfigPath -Raw
+    $Cfg = $Original | ConvertFrom-Json
+    $Existing = $Cfg.PSObject.Properties['firecrawl']
+    if ($null -eq $Existing -or $null -eq $Existing.Value -or
+        [string]$Existing.Value.working_dir -ine $FirecrawlRoot -or
+        [string]$Existing.Value.handler.script -ine (Join-Path $FirecrawlRoot 'fc.ps1')) {
+        throw 'Existing Firecrawl policy does not match the reviewed host mapping.'
+    }
+    $Changed = $false
+    foreach ($Alias in $ServiceMap.Keys) {
+        $Action = $ServiceMap[$Alias][0]
+        $Service = $ServiceMap[$Alias][1]
+        if (-not $FcText.Contains("'" + $Action + "'")) {
+            throw "Firecrawl wrapper action not available: $Action"
+        }
+        $Known = $Cfg.PSObject.Properties[$Alias]
+        if ($null -ne $Known) {
+            $V = $Known.Value
+            $Ops = @($V.handler.operations.redeploy_current)
+            $Services = @($V.services)
+            if ([string]$V.working_dir -ine $FirecrawlRoot -or
+                [string]$V.handler.script -ine (Join-Path $FirecrawlRoot 'fc.ps1') -or
+                $Services.Count -ne 1 -or $Services[0] -cne $Service -or
+                $Ops.Count -ne 2 -or $Ops[0] -cne '-Action' -or $Ops[1] -cne $Action) {
+                throw "Existing policy alias differs from reviewed definition: $Alias"
+            }
+            continue
+        }
+        $Cfg | Add-Member -NotePropertyName $Alias -NotePropertyValue ([pscustomobject]@{
+            working_dir = $FirecrawlRoot
+            files = @()
+            services = @($Service)
+            handler = [pscustomobject]@{
+                script = (Join-Path $FirecrawlRoot 'fc.ps1')
+                operations = [pscustomobject]@{ redeploy_current = @('-Action',$Action) }
+            }
+        })
+        $Changed = $true
+    }
+    if (-not $Changed) {
+        Write-Output 'FIRECRAWL_PLAYWRIGHT_ACTIONS_ALREADY_ENABLED'
+        return
+    }
+    # This same reviewed worker survives one runner reload. Refuse if any
+    # different job is pending, running, or in-flight.
+    $Control = Join-Path $LocalRoot 'control'
+    $Active = Get-Content -LiteralPath (Join-Path $Control 'active-worker.json') -Raw | ConvertFrom-Json
+    $Processing = @(Get-ChildItem -LiteralPath (Join-Path $Control 'processing') -Filter '*.json' -File)
+    $Requests = @(Get-ChildItem -LiteralPath (Join-Path $Control 'requests') -Filter '*.json' -File)
+    if ([string]$Active.project -cne 'dockerlocal-runtime-promotion' -or
+        $Processing.Count -ne 1 -or $Processing[0].BaseName -cne [string]$Active.job_id -or
+        $Requests.Count -gt 0) {
+        throw 'Policy reload refused: another maintenance job is active or queued.'
+    }
+    $HeartbeatPath = Join-Path $Control 'runner-heartbeat.json'
+    $OldPid = [int](Get-Content -LiteralPath $HeartbeatPath -Raw | ConvertFrom-Json).pid
+    $Installer = Join-Path $SourceRoot 'install-maintenance-runner.ps1'
+    Require-File $Installer
+    $Backup = New-Backup 'firecrawl-playwright-allowlist'
+    Copy-Item -LiteralPath $ConfigPath -Destination (Join-Path $Backup 'maintenance-projects.local.json') -Force
+    try {
+        $Tmp = $ConfigPath + '.tmp'
+        [IO.File]::WriteAllText($Tmp,($Cfg | ConvertTo-Json -Depth 24),[Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $Tmp -Destination $ConfigPath -Force
+        & $Installer
+        if (-not $?) { throw 'Host runner failed to load new Playwright policy.' }
+        $NewPid = [int](Get-Content -LiteralPath $HeartbeatPath -Raw | ConvertFrom-Json).pid
+        if ($NewPid -eq $OldPid -or -not (Get-Process -Id $NewPid -ErrorAction SilentlyContinue)) {
+            throw 'Playwright policy reload did not start a new resident runner.'
+        }
+        Write-Output 'FIRECRAWL_PLAYWRIGHT_ACTIONS_ENABLED'
+    } catch {
+        $Reason = $_.Exception.Message
+        Copy-Item -LiteralPath (Join-Path $Backup 'maintenance-projects.local.json') -Destination $ConfigPath -Force
+        try { & $Installer } catch { Write-Warning 'Manual allowlist reload recovery may be needed.' }
+        throw "Playwright policy registration rolled back. Cause: $Reason"
+    }
+}
+
 switch ($Target) {
     'GitHub' {
         $Checkout = 'C:\ClaudeCode\github-mcp-server'
@@ -321,5 +419,6 @@ switch ($Target) {
             Write-Output "DOCKERLOCAL_GATEWAY_ALREADY_CURRENT $Wanted"
         }
         Refresh-InstalledMaintenanceRunner
+        Enable-ReviewedFirecrawlPlaywrightActions
     }
 }
