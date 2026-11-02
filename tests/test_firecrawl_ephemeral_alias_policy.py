@@ -14,6 +14,11 @@ class FirecrawlEphemeralRefreshRegistrationTests(unittest.TestCase):
         self.assertIn("'security\\refresh-ephemeral.ps1'", PROMOTE)
         self.assertIn("Reviewed Firecrawl ephemeral refresh implementation not present.", PROMOTE)
 
+    def test_searxng_refresh_exact_alias_and_scan_gate(self):
+        self.assertIn("'firecrawl-searxng-refresh' = @('refresh-searxng','searxng')", PROMOTE)
+        self.assertIn("'security\\\\refresh-searxng.ps1'", PROMOTE)
+        self.assertIn("Reviewed Firecrawl SearXNG refresh implementation not present.", PROMOTE)
+
     def test_existing_stateless_allowlist_does_not_expand_to_data_services(self):
         self.assertIn('if ($Operation -eq "update_stateless")', RUNNER)
         self.assertIn('if ($Project -cne "firecrawl" -or', RUNNER)
