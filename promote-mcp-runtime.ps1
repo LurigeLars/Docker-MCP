@@ -87,9 +87,21 @@ switch ($Target) {
             if (-not $?) { throw 'GitHub runtime deployment wrapper failed.' }
             Assert-RunningImage 'github-mcp-local-github-mcp-1' $ExpectedMcpImage
             Assert-RunningImage 'github-mcp-local-github-gateway-1' $ExpectedGateway
-            $Health = @(& docker inspect --format '{{.State.Health.Status}}' github-mcp-local-github-gateway-1)
-            if ($LASTEXITCODE -ne 0 -or $Health.Count -ne 1 -or $Health[0] -cne 'healthy') {
-                throw 'GitHub MCP gateway health verification failed.'
+            # Docker's health status may remain "starting" briefly even after
+            # the wrapper's direct /healthz probe has passed. Poll the real
+            # container health instead of prematurely invoking rollback.
+            $Healthy = $false
+            $Deadline = (Get-Date).AddSeconds(45)
+            do {
+                $Health = @(& docker inspect --format '{{.State.Health.Status}}' github-mcp-local-github-gateway-1 2>$null)
+                if ($LASTEXITCODE -eq 0 -and $Health.Count -eq 1 -and $Health[0] -ceq 'healthy') {
+                    $Healthy = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 750
+            } while ((Get-Date) -lt $Deadline)
+            if (-not $Healthy) {
+                throw 'GitHub MCP gateway did not become healthy within 45 seconds.'
             }
             Write-Output "GITHUB_RUNTIME_PROMOTED $ExpectedMcpImage $ExpectedGateway"
         } catch {

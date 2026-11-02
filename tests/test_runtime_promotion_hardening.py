@@ -57,3 +57,11 @@ def test_installer_preserves_existing_projects_and_builtins():
     assert "runner-heartbeat.json" in INSTALL
     assert "Copy-Item -LiteralPath $Backup -Destination $ConfigPath" in INSTALL
     assert "DRY_RUN_COMPLETE" in INSTALL
+
+
+def test_github_gateway_waits_for_docker_health_before_rollback():
+    # The wrapper's direct HTTP /healthz can pass before Docker marks it healthy.
+    assert "AddSeconds(45)" in PROMOTE
+    assert "Start-Sleep -Milliseconds 750" in PROMOTE
+    assert "if (-not $Healthy)" in PROMOTE
+    assert "GitHub MCP gateway did not become healthy within 45 seconds." in PROMOTE
