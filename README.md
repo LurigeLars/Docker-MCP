@@ -462,6 +462,35 @@ Two execution modes are supported:
 
 Script-backed projects are whole-project operations: callers must omit the `services` argument. The local config contains the script path and fixed arguments only; credentials and secret values must remain in the project-specific secret store and must not be copied into the maintenance config. An operation may use an empty argument array when the allowlisted wrapper itself requires no parameters.
 
+## Reviewed source-to-runtime promotions (GitHub MCP, Cloudflared, DockerLocal)
+
+The original Compose maintenance tool recreates containers from the **installed**
+Compose files. Some locally installed runtimes are *copies* of the source repo,
+so a successful `repo_pull_ff` alone does not update the running image.
+
+One-time host-only registration, under the normal logged-in Windows user:
+
+```powershell
+& 'C:\ClaudeCode\Docker-MCP\enable-runtime-promotions.ps1' -DryRun
+& 'C:\ClaudeCode\Docker-MCP\enable-runtime-promotions.ps1'
+```
+
+This extends three **exact** existing aliases; it preserves all other project
+allowlists and the built-in DockerLocal project. It does **not** deploy anything.
+Stop if an active maintenance job is reported. After registration, ChatGPT
+can use existing `compose_redeploy` with `operation="redeploy_current"`
+and **without** `services` for these script-backed actions:
+
+- `github-mcp-local` — runs the already reviewed `github-mcp-server/deploy/local-gateway/deploy-runtime.ps1`, syncing tracked runtime files and reimporting DPAPI-backed secrets, with backup/rollback.
+- `mcp-edge` — promotes only the pinned cloudflared tag in `dependency-watch/edge-images/Dockerfile`, keeps the existing tunnel secret holder and edge network mapping, and calls the secret-aware `mcp-edge-runtime.ps1 Up`.
+- `dockerlocal-runtime-promotion` — promotes only the installed DockerLocal public gateway's Node image and tracked JavaScript; never rebuilds or restarts the MCP backend or socket-proxy.
+
+The client cannot provide a path, a version, or a shell command. The host wrapper
+rejects an unexpected source origin, dirty checkout or non-`main` branch.
+The local-only allowlist is backed up before registration, while deployment
+backups live under `%LOCALAPPDATA%\DockerLocalMCP\runtime-promotion-backups`.
+Data-bearing Firecrawl services remain excluded.
+
 ## AIRSEA aggregate coverage: on-demand read-only access
 
 `airsea_coverage_report` is a dedicated, **no-argument**, read-only inspection
