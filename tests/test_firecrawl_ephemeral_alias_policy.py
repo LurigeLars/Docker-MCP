@@ -27,6 +27,11 @@ class FirecrawlEphemeralRefreshRegistrationTests(unittest.TestCase):
         self.assertIn("'firecrawl-public-gateway-refresh' = @('refresh-gateway','gateway')", PROMOTE)
         self.assertIn("Reviewed Firecrawl public gateway refresh implementation not present.", PROMOTE)
 
+    def test_last_two_node_helpers_have_exact_fixed_actions_and_gemini_restore(self):
+        self.assertIn("'firecrawl-playwright-router-refresh' = @('refresh-playwright-router','playwright-router')", PROMOTE)
+        self.assertIn("'firecrawl-llm-proxy-refresh' = @('refresh-llm-proxy','llm-proxy')", PROMOTE)
+        self.assertIn("Reviewed last two Firecrawl Node runtime patch actions missing.", PROMOTE)
+
     def test_existing_stateless_allowlist_does_not_expand_to_data_services(self):
         self.assertIn('if ($Operation -eq "update_stateless")', RUNNER)
         self.assertIn('if ($Project -cne "firecrawl" -or', RUNNER)
