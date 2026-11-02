@@ -353,6 +353,29 @@ function Get-BoundedScoutOutput {
     return $Value
 }
 
+function Get-ScoutMarkdownPackageSummary {
+    param([AllowEmptyString()][string]$Markdown)
+
+    # Scout's GitLab formatter can crash. Its Markdown fallback is diagnostic
+    # ONLY and never authorizes deployment. Keep package IDs in the bounded
+    # output so remediation does not require repeated long-running scans.
+    $Pattern = '<strong>(?<name>[^<]{1,128})</strong>\s*<code>(?<version>[^<]{1,64})</code>\s*\((?<ecosystem>[^)<]{1,32})\)'
+    $Unique = [ordered]@{}
+    foreach ($Match in [regex]::Matches($Markdown, $Pattern)) {
+        $Name = [string]$Match.Groups['name'].Value
+        $Version = [string]$Match.Groups['version'].Value
+        $Ecosystem = [string]$Match.Groups['ecosystem'].Value
+        if ($Name -cnotmatch '^[A-Za-z0-9@._/+:-]{1,128}$' -or
+            $Version -cnotmatch '^[A-Za-z0-9._+:-]{1,64}$' -or
+            $Ecosystem -cnotmatch '^[A-Za-z0-9._+-]{1,32}$') { continue }
+        $Entry = "$Name@$Version ($Ecosystem)"
+        if (-not $Unique.Contains($Entry)) { $Unique[$Entry] = $true }
+        if ($Unique.Count -ge 100) { break }
+    }
+    if ($Unique.Count -eq 0) { return 'SCOUT_DIAGNOSTIC_PACKAGES: unavailable' }
+    return 'SCOUT_DIAGNOSTIC_PACKAGES (scan NOT approved): ' + ((@($Unique.Keys)) -join ', ')
+}
+
 function ConvertFrom-ScoutGitLabReport {
     param([AllowEmptyString()][string]$JsonText)
 
@@ -748,8 +771,10 @@ function Invoke-ScoutFullScan {
             $Result.status = "failed"
             $Result.scan_complete = $false
             $Result.error_code = "SCAN_FAILED_FORMATTER"
+            $PackageSummary = Get-ScoutMarkdownPackageSummary -Markdown $MarkdownOut
             $Result.output = Get-BoundedScoutOutput -Text (
                 "GitLab formatter crashed (exit $OriginalFailure). Markdown diagnostics only; scan NOT approved." +
+                [Environment]::NewLine + $PackageSummary +
                 [Environment]::NewLine + $MarkdownOut + [Environment]::NewLine + $MarkdownErr
             ) -RedactValues @($ScoutUser, $ScoutPassword)
             return $Result
