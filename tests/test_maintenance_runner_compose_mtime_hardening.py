@@ -45,3 +45,21 @@ def test_verified_hashes_remain_separate_from_unverified_mtime() -> None:
     # Diagnostic does not leak Docker's combined stderr/stdout.
     assert '$Entry.hash_command_output' not in RUNNER
     assert '$Entry.hash_command_error' not in RUNNER
+
+
+
+def test_allowlisted_hash_fallback_requires_same_compose_files():
+    assert '$AllowlistedDesired = $null' in RUNNER
+    assert '$Projects.ContainsKey($Project)' in RUNNER
+    assert '$KnownFiles.Count -eq $ContainerPaths.Count' in RUNNER
+    assert 'Compare-Object -ReferenceObject $KnownFiles -DifferenceObject $ContainerPaths' in RUNNER
+    assert 'service_hash_verified_match_via_allowlist' in RUNNER
+    assert 'service_hash_verified_mismatch_via_allowlist' in RUNNER
+    assert '$Entry.config_hash_verified = $true' in RUNNER
+
+
+def test_audit_keeps_unverified_hashes_visible():
+    assert '$HashVerificationReason = "compose_hash_command_failed"' in RUNNER
+    assert '$HashCommandExitCode = [int]$HashRun.exit_code' in RUNNER
+    assert 'if (-not [string]::IsNullOrWhiteSpace($FallbackHash))' in RUNNER
+    assert 'if ($Match) { "mtime_only" } else { "config_hash_mismatch" }' in RUNNER
