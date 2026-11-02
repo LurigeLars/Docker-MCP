@@ -44,7 +44,9 @@ if ([string]$GHEntry.working_dir -ine 'C:\ClaudeCode\github-mcp-local') {
 }
 $CurrentGHScript = [string]$GHEntry.handler.script
 $ExpectedGHScript = 'C:\ClaudeCode\github-mcp-local\github-mcp.ps1'
-if ($CurrentGHScript -ine $ExpectedGHScript -and $CurrentGHScript -ine $Handler) {
+$LegacyDeploy = 'C:\ClaudeCode\github-mcp-server\deploy\local-gateway\deploy-runtime.ps1'
+if ($CurrentGHScript -ine $ExpectedGHScript -and $CurrentGHScript -ine $LegacyDeploy -and
+    $CurrentGHScript -ine $Handler) {
     throw 'Unrecognized GitHub MCP runtime handler. No changes made.'
 }
 if ($CurrentGHScript -ine $Handler) {
@@ -62,9 +64,11 @@ if ([string]$EdgeEntry.working_dir -ine $ExpectedEdgeDir) {
 }
 $CurrentEdgeHandler = $EdgeEntry.PSObject.Properties['handler']
 $OldEdgeWrapper = Join-Path $ExpectedEdgeDir 'mcp-edge-runtime.ps1'
+$OldEdgeSource = Join-Path $PSScriptRoot 'mcp-edge-runtime.ps1'
 if ($null -ne $CurrentEdgeHandler -and $null -ne $CurrentEdgeHandler.Value) {
     $OldScript = [string]$CurrentEdgeHandler.Value.script
-    if ($OldScript -ine $Handler -and $OldScript -ine $OldEdgeWrapper) {
+    if ($OldScript -ine $Handler -and $OldScript -ine $OldEdgeWrapper -and
+        $OldScript -ine $OldEdgeSource) {
         throw 'Edge has an unrecognized existing script handler. No changes made.'
     }
     if ($OldScript -ine $Handler) {
