@@ -450,5 +450,11 @@ switch ($Target) {
         }
         Refresh-InstalledMaintenanceRunner
         Enable-ReviewedFirecrawlPlaywrightActions
+        # Fixed and fail-closed: retire only the v2.0.2 shared stdio backend
+        # after independently verifying that no local stdio client uses it.
+        $RetireScript = Join-Path $SourceRoot 'retire-unused-github-stdio.ps1'
+        Require-File $RetireScript
+        & $RetireScript
+        if (-not $?) { throw 'Reviewed GitHub stdio retirement verification failed.' }
     }
 }
