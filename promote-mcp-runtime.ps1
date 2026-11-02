@@ -54,9 +54,9 @@ function New-Backup([string]$Name) {
 }
 
 function Refresh-InstalledMaintenanceRunner {
-    # Called only by the existing allowlisted DockerLocal promotion, inside
-    # the runner's own dispatched worker. No arbitrary path or command input.
-    $Names = @('maintenance-runner.ps1', 'port-registry.ps1', 'airsea-coverage-report.py')
+    # Only the already-allowlisted DockerLocal promotion may perform this
+    # host-only refresh. An existing dispatcher worker survives runner restart.
+    $Names = @('maintenance-runner.ps1','port-registry.ps1','airsea-coverage-report.py')
     $NeedsUpdate = $false
     foreach ($Name in $Names) {
         $Source = Join-Path $SourceRoot $Name
@@ -73,20 +73,99 @@ function Refresh-InstalledMaintenanceRunner {
         return
     }
 
-    # A resident runner may process status calls while one long worker runs.
-    # Refuse to transfer ownership while another job is queued/processing.
     $Control = Join-Path $LocalRoot 'control'
     $Requests = Join-Path $Control 'requests'
     $Processing = Join-Path $Control 'processing'
     $ActiveFile = Join-Path $Control 'active-worker.json'
     $HeartbeatFile = Join-Path $Control 'runner-heartbeat.json'
-    foreach ($Path in @($Requests, $Processing, $ActiveFile, $HeartbeatFile)) {
+    foreach ($Path in @($Requests,$Processing,$ActiveFile,$HeartbeatFile)) {
         if (-not (Test-Path -LiteralPath $Path)) {
             throw 'Runner handoff preflight failed: control state unavailable.'
         }
     }
     $Worker = Get-Content -LiteralPath $ActiveFile -Raw | ConvertFrom-Json
-    if ([string]$Worker.job_id -cnotmatch '^[a-f0-9]{32}
+    if ([string]$Worker.job_id -cnotmatch '^[a-f0-9]{32}$' -or
+        [string]$Worker.project -cne 'dockerlocal-runtime-promotion') {
+        throw 'Runner handoff refused: unexpected active worker.'
+    }
+    $WorkerProcess = Get-Process -Id ([int]$Worker.pid) -ErrorAction SilentlyContinue
+    if (-not $WorkerProcess -or $WorkerProcess.ProcessName -notin @('pwsh','powershell')) {
+        throw 'Runner handoff refused: worker process unavailable.'
+    }
+    $ProcessFiles = @(Get-ChildItem -LiteralPath $Processing -Filter '*.json' -File)
+    $OtherRequests = @(Get-ChildItem -LiteralPath $Requests -Filter '*.json' -File)
+    if ($ProcessFiles.Count -ne 1 -or
+        $ProcessFiles[0].BaseName -cne [string]$Worker.job_id -or
+        $OtherRequests.Count -gt 0) {
+        throw 'Runner handoff refused: other operations remain queued or processing.'
+    }
+    $Before = Get-Content -LiteralPath $HeartbeatFile -Raw | ConvertFrom-Json
+    $OldPid = [int]$Before.pid
+    if ([string]$Before.status -cne 'running' -or
+        -not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) {
+        throw 'Runner handoff refused: resident runner not healthy.'
+    }
+    $Installer = Join-Path $SourceRoot 'install-maintenance-runner.ps1'
+    Require-File $Installer
+    $Tokens = $null
+    $ParseErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $SourceRoot 'maintenance-runner.ps1'), [ref]$Tokens, [ref]$ParseErrors
+    )
+    if (@($ParseErrors).Count -ne 0) {
+        throw 'New maintenance runner failed PowerShell parser preflight.'
+    }
+    $Backup = New-Backup 'maintenance-runner'
+    foreach ($Name in $Names) {
+        Copy-Item -LiteralPath (Join-Path $LocalRoot $Name) -Destination (Join-Path $Backup $Name) -Force
+    }
+    try {
+        # The existing installer replaces reviewed files, stops only the
+        # resident runner and launches its successor. The dispatched worker
+        # is an independent process and retains its job/result receipts.
+        & $Installer
+        if (-not $?) { throw 'Maintenance runner installer failed.' }
+        $After = Get-Content -LiteralPath $HeartbeatFile -Raw | ConvertFrom-Json
+        if ([string]$After.status -cne 'running' -or [int]$After.pid -eq $OldPid -or
+            -not (Get-Process -Id ([int]$After.pid) -ErrorAction SilentlyContinue)) {
+            throw 'New maintenance runner did not take over the resident process.'
+        }
+        foreach ($Name in $Names) {
+            if ((Get-FileHash -LiteralPath (Join-Path $SourceRoot $Name) -Algorithm SHA256).Hash -cne
+                (Get-FileHash -LiteralPath (Join-Path $LocalRoot $Name) -Algorithm SHA256).Hash) {
+                throw 'Installed maintenance runner source hash mismatch after handoff.'
+            }
+        }
+        Write-Output 'MAINTENANCE_RUNNER_REFRESHED'
+    } catch {
+        $Reason = $_.Exception.Message
+        foreach ($Name in $Names) {
+            Copy-Item -LiteralPath (Join-Path $Backup $Name) -Destination (Join-Path $LocalRoot $Name) -Force
+        }
+        $Launch = Join-Path $LocalRoot 'maintenance-runner-launch.vbs'
+        $Wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        if ((Test-Path -LiteralPath $Launch -PathType Leaf) -and
+            (Test-Path -LiteralPath $Wscript -PathType Leaf)) {
+            $CurrentPid = 0
+            try {
+                if (Test-Path -LiteralPath $HeartbeatFile -PathType Leaf) {
+                    $CurrentPid = [int](Get-Content -LiteralPath $HeartbeatFile -Raw | ConvertFrom-Json).pid
+                }
+            } catch {}
+            if ($CurrentPid -gt 0 -and $CurrentPid -ne $OldPid) {
+                $Process = Get-Process -Id $CurrentPid -ErrorAction SilentlyContinue
+                if ($Process -and $Process.ProcessName -in @('pwsh','powershell')) {
+                    Stop-Process -Id $CurrentPid -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Remove-Item -LiteralPath $HeartbeatFile -Force -ErrorAction SilentlyContinue
+            Start-Process -FilePath $Wscript -ArgumentList @('"' + $Launch + '"') -WindowStyle Hidden
+        }
+        throw "Maintenance runner refresh failed and files restored. Cause: $Reason"
+    }
+}
+
+switch ($Target) {
     'GitHub' {
         $Checkout = 'C:\ClaudeCode\github-mcp-server'
         $Runtime = 'C:\ClaudeCode\github-mcp-local'
@@ -236,242 +315,11 @@ function Refresh-InstalledMaintenanceRunner {
                 Copy-Item -LiteralPath $SavedGateway -Destination $Gateway -Force
                 try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway') }
                 catch { Write-Warning 'DockerLocal gateway rollback requires local recovery.' }
-                throw "DockerLocal gateway promotion failed; files restored. Cause: $Reason"
+                throw "DockerLocal gateway promotion failed; tracked files restored. Cause: $Reason"
             }
         } else {
             Write-Output "DOCKERLOCAL_GATEWAY_ALREADY_CURRENT $Wanted"
         }
         Refresh-InstalledMaintenanceRunner
-    }
-}
- -or
-        [string]$Worker.project -cne 'dockerlocal-runtime-promotion') {
-        throw 'Runner handoff refused: unexpected active worker.'
-    }
-    $WorkerProcess = Get-Process -Id ([int]$Worker.pid) -ErrorAction SilentlyContinue
-    if (-not $WorkerProcess -or $WorkerProcess.ProcessName -notin @('pwsh','powershell')) {
-        throw 'Runner handoff refused: active worker is not a PowerShell process.'
-    }
-    $ProcessFiles = @(Get-ChildItem -LiteralPath $Processing -Filter '*.json' -File)
-    $OtherRequests = @(Get-ChildItem -LiteralPath $Requests -Filter '*.json' -File)
-    if ($ProcessFiles.Count -ne 1 -or
-        $ProcessFiles[0].BaseName -cne [string]$Worker.job_id -or
-        $OtherRequests.Count -gt 0) {
-        throw 'Runner handoff refused: other operations remain queued or processing.'
-    }
-    $Before = Get-Content -LiteralPath $HeartbeatFile -Raw | ConvertFrom-Json
-    $OldPid = [int]$Before.pid
-    if ([string]$Before.status -cne 'running' -or
-        -not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) {
-        throw 'Runner handoff refused: resident runner is not healthy.'
-    }
-    $Installer = Join-Path $SourceRoot 'install-maintenance-runner.ps1'
-    Require-File $Installer
-    $Tokens = $null
-    $ParseErrors = $null
-    [void][Management.Automation.Language.Parser]::ParseFile(
-        (Join-Path $SourceRoot 'maintenance-runner.ps1'),
-        [ref]$Tokens, [ref]$ParseErrors
-    )
-    if (@($ParseErrors).Count -ne 0) {
-        throw 'New maintenance runner failed PowerShell parser preflight.'
-    }
-
-    $Backup = New-Backup 'maintenance-runner'
-    foreach ($Name in $Names) {
-        Copy-Item -LiteralPath (Join-Path $LocalRoot $Name) -Destination (Join-Path $Backup $Name) -Force
-    }
-    try {
-        # The installer replaces only the runner's files, stops the old
-        # resident process, and launches a new one. The new runner explicitly
-        # adopts the dispatched worker and retains its job/result receipts.
-        & $Installer
-        if (-not $?) { throw 'Maintenance runner installer reported failure.' }
-        $After = Get-Content -LiteralPath $HeartbeatFile -Raw | ConvertFrom-Json
-        if ([string]$After.status -cne 'running' -or [int]$After.pid -eq $OldPid -or
-            -not (Get-Process -Id ([int]$After.pid) -ErrorAction SilentlyContinue)) {
-            throw 'New maintenance runner did not take over the resident process.'
-        }
-        foreach ($Name in $Names) {
-            if ((Get-FileHash -LiteralPath (Join-Path $SourceRoot $Name) -Algorithm SHA256).Hash -cne
-                (Get-FileHash -LiteralPath (Join-Path $LocalRoot $Name) -Algorithm SHA256).Hash) {
-                throw 'Installed maintenance runner source hash mismatch after handoff.'
-            }
-        }
-        Write-Output 'MAINTENANCE_RUNNER_REFRESHED'
-    }
-    catch {
-        $Reason = $_.Exception.Message
-        # Restore the old, validated files if startup fails. The installer
-        # launcher already exists in the user's host-only configuration.
-        foreach ($Name in $Names) {
-            Copy-Item -LiteralPath (Join-Path $Backup $Name) -Destination (Join-Path $LocalRoot $Name) -Force
-        }
-        $Launch = Join-Path $LocalRoot 'maintenance-runner-launch.vbs'
-        $Wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
-        if ((Test-Path -LiteralPath $Launch -PathType Leaf) -and
-            (Test-Path -LiteralPath $Wscript -PathType Leaf)) {
-            $CurrentPid = 0
-            try {
-                if (Test-Path -LiteralPath $HeartbeatFile -PathType Leaf) {
-                    $CurrentPid = [int](Get-Content -LiteralPath $HeartbeatFile -Raw | ConvertFrom-Json).pid
-                }
-            } catch {}
-            if ($CurrentPid -gt 0 -and $CurrentPid -ne $OldPid) {
-                $CurrentProcess = Get-Process -Id $CurrentPid -ErrorAction SilentlyContinue
-                if ($CurrentProcess -and $CurrentProcess.ProcessName -in @('pwsh','powershell')) {
-                    Stop-Process -Id $CurrentPid -Force -ErrorAction SilentlyContinue
-                }
-            }
-            Remove-Item -LiteralPath $HeartbeatFile -Force -ErrorAction SilentlyContinue
-            Start-Process -FilePath $Wscript -ArgumentList @('"' + $Launch + '"') -WindowStyle Hidden
-        }
-        throw "Maintenance runner refresh failed and files restored. Cause: $Reason"
-    }
-}
-
-switch ($Target) {
-    'GitHub' {
-        $Checkout = 'C:\ClaudeCode\github-mcp-server'
-        $Runtime = 'C:\ClaudeCode\github-mcp-local'
-        Assert-CleanSource -Path $Checkout -Repository 'github-mcp-server'
-        $Source = Join-Path $Checkout 'deploy\local-gateway'
-        $Deploy = Join-Path $Source 'deploy-runtime.ps1'
-        $ComposeSrc = Join-Path $Source 'compose.yaml'
-        Require-File $Deploy
-        Require-File $ComposeSrc
-        Require-File (Join-Path $Runtime 'config\github.env')
-        Require-File (Join-Path $Runtime 'config\gateway.env')
-        Require-File (Join-Path $Runtime '.env')
-
-        $ComposeText = Get-Content -LiteralPath $ComposeSrc -Raw
-        $ExpectedMcpImage = [regex]::Match($ComposeText,'(?m)^    image: (ghcr\.io/github/github-mcp-server:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64})\s*$').Groups[1].Value
-        $ExpectedGateway = [regex]::Match($ComposeText,'(?m)^    image: (node:[0-9]+\.[0-9]+\.[0-9]+-alpine)\s*$').Groups[1].Value
-        if (-not $ExpectedMcpImage -or -not $ExpectedGateway) { throw 'Reviewed GitHub runtime image pins invalid.' }
-
-        $Backup = New-Backup 'github'
-        $CopyNames = @('compose.yaml','github-mcp.ps1','public','scripts','local-mcp')
-        foreach ($Name in $CopyNames) {
-            $Item = Join-Path $Runtime $Name
-            if (Test-Path -LiteralPath $Item) {
-                Copy-Item -LiteralPath $Item -Destination (Join-Path $Backup $Name) -Recurse -Force
-            }
-        }
-        try {
-            # Existing reviewed wrapper: sync tracked runtime, preserve config/DPAPI,
-            # force reimport credentials to tmpfs and verify the gateway health.
-            & $Deploy -Action Up -RuntimeTarget $Runtime
-            if (-not $?) { throw 'GitHub runtime deployment wrapper failed.' }
-            Assert-RunningImage 'github-mcp-local-github-mcp-1' $ExpectedMcpImage
-            Assert-RunningImage 'github-mcp-local-github-gateway-1' $ExpectedGateway
-            # Docker's health status may remain "starting" briefly even after
-            # the wrapper's direct /healthz probe has passed. Poll the real
-            # container health instead of prematurely invoking rollback.
-            $Healthy = $false
-            $Deadline = (Get-Date).AddSeconds(45)
-            do {
-                $Health = @(& docker inspect --format '{{.State.Health.Status}}' github-mcp-local-github-gateway-1 2>$null)
-                if ($LASTEXITCODE -eq 0 -and $Health.Count -eq 1 -and $Health[0] -ceq 'healthy') {
-                    $Healthy = $true
-                    break
-                }
-                Start-Sleep -Milliseconds 750
-            } while ((Get-Date) -lt $Deadline)
-            if (-not $Healthy) {
-                throw 'GitHub MCP gateway did not become healthy within 45 seconds.'
-            }
-            Write-Output "GITHUB_RUNTIME_PROMOTED $ExpectedMcpImage $ExpectedGateway"
-        } catch {
-            $Reason = $_.Exception.Message
-            foreach ($Name in $CopyNames) {
-                $Stored = Join-Path $Backup $Name
-                if (Test-Path -LiteralPath $Stored) {
-                    $Destination = Join-Path $Runtime $Name
-                    if (Test-Path -LiteralPath $Destination) {
-                        Remove-Item -LiteralPath $Destination -Recurse -Force
-                    }
-                    Copy-Item -LiteralPath $Stored -Destination $Destination -Recurse -Force
-                }
-            }
-            try {
-                & (Join-Path $Runtime 'github-mcp.ps1') -Action import-secrets
-            } catch { Write-Warning 'GitHub rollback needs local recovery.' }
-            throw "GitHub runtime promotion failed; tracked files restored. Cause: $Reason"
-        }
-    }
-    'Edge' {
-        $EdgeRoot = Join-Path $env:LOCALAPPDATA 'mcp-edge'
-        $Compose = Join-Path $EdgeRoot 'compose.yaml'
-        $Wrapper = Join-Path $EdgeRoot 'mcp-edge-runtime.ps1'
-        $PinnedSource = Join-Path $SourceRoot 'dependency-watch\edge-images\Dockerfile'
-        Assert-CleanSource -Path $SourceRoot -Repository 'Docker-MCP'
-        Require-File $Compose
-        Require-File $Wrapper
-        Require-File $PinnedSource
-        Require-File (Join-Path $EdgeRoot 'secrets\tunnel_token.dpapi')
-
-        $Pinned = Get-Content -LiteralPath $PinnedSource -Raw
-        $Wanted = [regex]::Match($Pinned,'(?m)^FROM (cloudflare/cloudflared:[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}) AS cloudflared\s*$').Groups[1].Value
-        if (-not $Wanted) { throw 'Missing reviewed cloudflared pin.' }
-        $Current = Get-Content -LiteralPath $Compose -Raw
-        $Pattern = '(?m)^    image: cloudflare/cloudflared:[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}\s*$'
-        if ([regex]::Matches($Current,$Pattern).Count -ne 1) { throw 'Expected exactly one cloudflared service image line.' }
-        # Do not change tunnel token, secret holder, networks or ingress.
-        $Updated = [regex]::Replace($Current,$Pattern,"    image: $Wanted")
-        Run-Docker -Arguments @('pull',$Wanted)
-        $Backup = New-Backup 'edge'
-        $Saved = Join-Path $Backup 'compose.yaml'
-        Copy-Item -LiteralPath $Compose -Destination $Saved -Force
-        try {
-            [IO.File]::WriteAllText($Compose,$Updated,[Text.UTF8Encoding]::new($false))
-            & $Wrapper -Action Up
-            if (-not $?) { throw 'Edge runtime recovery wrapper failed.' }
-            Assert-RunningImage 'mcp-cloudflared' $Wanted
-            Write-Output "EDGE_RUNTIME_PROMOTED $Wanted"
-        } catch {
-            $Reason = $_.Exception.Message
-            Copy-Item -LiteralPath $Saved -Destination $Compose -Force
-            try { & $Wrapper -Action Up } catch { Write-Warning 'Tunnel rollback requires local recovery.' }
-            throw "Cloudflare runtime promotion failed; Compose restored. Cause: $Reason"
-        }
-    }
-    'DockerLocal' {
-        Assert-CleanSource -Path $SourceRoot -Repository 'Docker-MCP'
-        $Runtime = Join-Path $LocalRoot 'containerized'
-        $SrcCompose = Join-Path $SourceRoot 'compose.public.yaml'
-        $SrcGateway = Join-Path $SourceRoot 'public\gateway\gateway.mjs'
-        $Compose = Join-Path $Runtime 'compose.public.yaml'
-        $Gateway = Join-Path $Runtime 'public\gateway\gateway.mjs'
-        foreach ($Path in @($SrcCompose,$SrcGateway,$Compose,$Gateway,(Join-Path $Runtime 'public\gateway.env'))) {
-            Require-File $Path
-        }
-        $SourceText = Get-Content -LiteralPath $SrcCompose -Raw
-        $Wanted = [regex]::Match($SourceText,'(?m)^    image: (node:[0-9]+\.[0-9]+\.[0-9]+-alpine)\s*$').Groups[1].Value
-        if (-not $Wanted) { throw 'Expected reviewed Node gateway image not found.' }
-        $Current = Get-Content -LiteralPath $Compose -Raw
-        $Pattern = '(?m)^    image: node:[0-9]+\.[0-9]+\.[0-9]+-alpine\s*$'
-        if ([regex]::Matches($Current,$Pattern).Count -ne 1) { throw 'Expected exactly one Node gateway image line.' }
-        $Updated = [regex]::Replace($Current,$Pattern,"    image: $Wanted")
-        Run-Docker -Arguments @('pull',$Wanted)
-        $Backup = New-Backup 'dockerlocal'
-        $SavedCompose = Join-Path $Backup 'compose.public.yaml'
-        $SavedGateway = Join-Path $Backup 'gateway.mjs'
-        Copy-Item -LiteralPath $Compose -Destination $SavedCompose -Force
-        Copy-Item -LiteralPath $Gateway -Destination $SavedGateway -Force
-        try {
-            [IO.File]::WriteAllText($Compose,$Updated,[Text.UTF8Encoding]::new($false))
-            Copy-Item -LiteralPath $SrcGateway -Destination $Gateway -Force
-            Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')
-            Assert-RunningImage 'dockerlocal-gateway' $Wanted
-            Run-Docker -Arguments @('exec','dockerlocal-gateway','node','-e',"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))")
-            Write-Output "DOCKERLOCAL_GATEWAY_PROMOTED $Wanted"
-        } catch {
-            $Reason = $_.Exception.Message
-            Copy-Item -LiteralPath $SavedCompose -Destination $Compose -Force
-            Copy-Item -LiteralPath $SavedGateway -Destination $Gateway -Force
-            try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway') }
-            catch { Write-Warning 'DockerLocal gateway rollback requires local recovery.' }
-            throw "DockerLocal gateway promotion failed; files restored. Cause: $Reason"
-        }
     }
 }
