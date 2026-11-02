@@ -63,3 +63,11 @@ def test_audit_keeps_unverified_hashes_visible():
     assert '$HashCommandExitCode = [int]$HashRun.exit_code' in RUNNER
     assert 'if (-not [string]::IsNullOrWhiteSpace($FallbackHash))' in RUNNER
     assert 'if ($Match) { "mtime_only" } else { "config_hash_mismatch" }' in RUNNER
+
+
+
+def test_non_project_docker_scout_scan_worker_dispatch_has_safe_alias():
+    assert '$DispatchProject = if ($Action -eq "scout_full_scan")' in RUNNER
+    assert '"image-scan"' in RUNNER
+    assert 'Start-DispatchedWorker -JobId $JobId -Project $DispatchProject' in RUNNER
+    assert 'Start-DispatchedWorker -JobId $JobId -Project ([string]$Job.project)' not in RUNNER
