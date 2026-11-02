@@ -12,13 +12,18 @@ $LocalRoot = Join-Path $env:LOCALAPPDATA 'DockerLocalMCP'
 $BackupRoot = Join-Path $LocalRoot 'runtime-promotion-backups'
 $Stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 
-function Assert-CleanSource([string]$Path) {
+function Assert-CleanSource([string]$Path, [string]$Repository) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         throw 'Reviewed source checkout is missing.'
     }
     $Top = (& git -C $Path rev-parse --show-toplevel)
     if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($Top).TrimEnd('\') -ine [IO.Path]::GetFullPath($Path).TrimEnd('\')) {
         throw 'Source is not the exact repository root.'
+    }
+    $Origin = @(& git -C $Path remote get-url origin)
+    $Expected = @("https://github.com/LurigeLars/$Repository", "https://github.com/LurigeLars/$Repository.git")
+    if ($LASTEXITCODE -ne 0 -or $Origin.Count -ne 1 -or $Origin[0] -cnotin $Expected) {
+        throw 'Source repository origin does not match the reviewed GitHub repository.'
     }
     $Branch = (& git -C $Path branch --show-current)
     if ($LASTEXITCODE -ne 0 -or $Branch -cne 'main') { throw 'Source must be on main.' }
@@ -52,7 +57,7 @@ switch ($Target) {
     'GitHub' {
         $Checkout = 'C:\ClaudeCode\github-mcp-server'
         $Runtime = 'C:\ClaudeCode\github-mcp-local'
-        Assert-CleanSource $Checkout
+        Assert-CleanSource -Path $Checkout -Repository 'github-mcp-server'
         $Source = Join-Path $Checkout 'deploy\local-gateway'
         $Deploy = Join-Path $Source 'deploy-runtime.ps1'
         $ComposeSrc = Join-Path $Source 'compose.yaml'
@@ -110,7 +115,7 @@ switch ($Target) {
         $Compose = Join-Path $EdgeRoot 'compose.yaml'
         $Wrapper = Join-Path $EdgeRoot 'mcp-edge-runtime.ps1'
         $PinnedSource = Join-Path $SourceRoot 'dependency-watch\edge-images\Dockerfile'
-        Assert-CleanSource $SourceRoot
+        Assert-CleanSource -Path $SourceRoot -Repository 'Docker-MCP'
         Require-File $Compose
         Require-File $Wrapper
         Require-File $PinnedSource
@@ -142,7 +147,7 @@ switch ($Target) {
         }
     }
     'DockerLocal' {
-        Assert-CleanSource $SourceRoot
+        Assert-CleanSource -Path $SourceRoot -Repository 'Docker-MCP'
         $Runtime = Join-Path $LocalRoot 'containerized'
         $SrcCompose = Join-Path $SourceRoot 'compose.public.yaml'
         $SrcGateway = Join-Path $SourceRoot 'public\gateway\gateway.mjs'
