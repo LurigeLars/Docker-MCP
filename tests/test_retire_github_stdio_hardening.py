@@ -24,6 +24,12 @@ class RetireOldGithubStdioHardening(unittest.TestCase):
         self.assertIn("Start-Sleep -Seconds 3", SCRIPT)
         self.assertIn("Unable to verify local stdio process/TCP ownership; retirement refused", SCRIPT)
 
+    def test_absent_backend_is_idempotent_and_never_emits_expected_docker_errors(self):
+        self.assertIn('docker ps -a --filter "name=^/$Old$"', SCRIPT)
+        self.assertIn('GITHUB_OLD_STDIO_ALREADY_ABSENT', SCRIPT)
+        self.assertNotIn('docker inspect $Old 2>$null', SCRIPT)
+        self.assertNotIn('docker inspect $Old 2>$null | Out-Null', SCRIPT)
+
     def test_no_generic_docker_permissions_or_credential_handling(self):
         self.assertIn("docker stop --time 10 $Old", SCRIPT)
         self.assertIn("docker rm $Old", SCRIPT)
