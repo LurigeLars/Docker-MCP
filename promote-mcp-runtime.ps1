@@ -208,27 +208,40 @@ function Refresh-InstalledMaintenanceRunner {
         $Pattern = '(?m)^    image: node:[0-9]+\.[0-9]+\.[0-9]+-alpine\s*$'
         if ([regex]::Matches($Current,$Pattern).Count -ne 1) { throw 'Expected exactly one Node gateway image line.' }
         $Updated = [regex]::Replace($Current,$Pattern,"    image: $Wanted")
-        Run-Docker -Arguments @('pull',$Wanted)
-        $Backup = New-Backup 'dockerlocal'
-        $SavedCompose = Join-Path $Backup 'compose.public.yaml'
-        $SavedGateway = Join-Path $Backup 'gateway.mjs'
-        Copy-Item -LiteralPath $Compose -Destination $SavedCompose -Force
-        Copy-Item -LiteralPath $Gateway -Destination $SavedGateway -Force
-        try {
-            [IO.File]::WriteAllText($Compose,$Updated,[Text.UTF8Encoding]::new($false))
-            Copy-Item -LiteralPath $SrcGateway -Destination $Gateway -Force
-            Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')
-            Assert-RunningImage 'dockerlocal-gateway' $Wanted
-            Run-Docker -Arguments @('exec','dockerlocal-gateway','node','-e',"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))")
-            Write-Output "DOCKERLOCAL_GATEWAY_PROMOTED $Wanted"
-        } catch {
-            $Reason = $_.Exception.Message
-            Copy-Item -LiteralPath $SavedCompose -Destination $Compose -Force
-            Copy-Item -LiteralPath $SavedGateway -Destination $Gateway -Force
-            try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway') }
-            catch { Write-Warning 'DockerLocal gateway rollback requires local recovery.' }
-            throw "DockerLocal gateway promotion failed; files restored. Cause: $Reason"
+        $RunningGateway = @(& docker inspect --format '{{.Config.Image}}|{{.State.Running}}' dockerlocal-gateway)
+        if ($LASTEXITCODE -ne 0 -or $RunningGateway.Count -ne 1) {
+            throw 'Existing DockerLocal gateway metadata unavailable.'
         }
+        $CodeMatches = ((Get-FileHash -LiteralPath $SrcGateway -Algorithm SHA256).Hash -ceq
+                        (Get-FileHash -LiteralPath $Gateway -Algorithm SHA256).Hash)
+        $NeedsGatewayUpdate = ($Current -cne $Updated -or -not $CodeMatches -or
+                               $RunningGateway[0] -cne "$Wanted|true")
+        if ($NeedsGatewayUpdate) {
+            Run-Docker -Arguments @('pull',$Wanted)
+            $Backup = New-Backup 'dockerlocal'
+            $SavedCompose = Join-Path $Backup 'compose.public.yaml'
+            $SavedGateway = Join-Path $Backup 'gateway.mjs'
+            Copy-Item -LiteralPath $Compose -Destination $SavedCompose -Force
+            Copy-Item -LiteralPath $Gateway -Destination $SavedGateway -Force
+            try {
+                [IO.File]::WriteAllText($Compose,$Updated,[Text.UTF8Encoding]::new($false))
+                Copy-Item -LiteralPath $SrcGateway -Destination $Gateway -Force
+                Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')
+                Assert-RunningImage 'dockerlocal-gateway' $Wanted
+                Run-Docker -Arguments @('exec','dockerlocal-gateway','node','-e',"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))")
+                Write-Output "DOCKERLOCAL_GATEWAY_PROMOTED $Wanted"
+            } catch {
+                $Reason = $_.Exception.Message
+                Copy-Item -LiteralPath $SavedCompose -Destination $Compose -Force
+                Copy-Item -LiteralPath $SavedGateway -Destination $Gateway -Force
+                try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway') }
+                catch { Write-Warning 'DockerLocal gateway rollback requires local recovery.' }
+                throw "DockerLocal gateway promotion failed; files restored. Cause: $Reason"
+            }
+        } else {
+            Write-Output "DOCKERLOCAL_GATEWAY_ALREADY_CURRENT $Wanted"
+        }
+        Refresh-InstalledMaintenanceRunner
     }
 }
  -or
