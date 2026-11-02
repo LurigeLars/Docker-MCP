@@ -1,5 +1,8 @@
 param([switch]$SelfTest, [ValidatePattern("^[a-f0-9]{32}$")][string]$WorkerJobId)
 
+# Runner supports adoption of a live dispatched worker after a reviewed,
+# allowlisted source-to-host refresh; the worker retains its result receipt.
+
 $ErrorActionPreference = "Stop"
 
 $Root = Join-Path $env:LOCALAPPDATA "DockerLocalMCP"
