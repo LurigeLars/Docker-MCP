@@ -61,15 +61,22 @@ if ([string]$EdgeEntry.working_dir -ine $ExpectedEdgeDir) {
     throw 'Unexpected Cloudflare edge working directory.'
 }
 $CurrentEdgeHandler = $EdgeEntry.PSObject.Properties['handler']
-if ($null -ne $CurrentEdgeHandler -and $null -ne $CurrentEdgeHandler.Value -and
-    [string]$CurrentEdgeHandler.Value.script -ine $Handler) {
-    throw 'Edge has an unrecognized existing script handler. No changes made.'
-}
-if ($null -eq $CurrentEdgeHandler) {
+$OldEdgeWrapper = Join-Path $ExpectedEdgeDir 'mcp-edge-runtime.ps1'
+if ($null -ne $CurrentEdgeHandler -and $null -ne $CurrentEdgeHandler.Value) {
+    $OldScript = [string]$CurrentEdgeHandler.Value.script
+    if ($OldScript -ine $Handler -and $OldScript -ine $OldEdgeWrapper) {
+        throw 'Edge has an unrecognized existing script handler. No changes made.'
+    }
+    if ($OldScript -ine $Handler) {
+        $EdgeEntry.handler.script = $Handler
+        $EdgeEntry.handler.operations = [pscustomobject]@{redeploy_current=@('-Target','Edge')}
+        $Changed.Add('mcp-edge')
+    }
+} else {
     $EdgeEntry | Add-Member -NotePropertyName 'handler' -NotePropertyValue ([pscustomobject]@{
         script=$Handler
         operations=[pscustomobject]@{ redeploy_current=@('-Target','Edge') }
-    })
+    }) -Force
     $Changed.Add('mcp-edge')
 }
 
