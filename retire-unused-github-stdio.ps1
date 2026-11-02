@@ -11,11 +11,19 @@ $Old = 'github-mcp-local-stdio-a5f7e123f4c44346'
 $OldImage = 'ghcr.io/github/github-mcp-server:v2.0.2@sha256:ffced0d76e77428532a2ced185516992d77fd146d69eec2f244e6237d1a97796'
 $NewImage = 'ghcr.io/github/github-mcp-server:v2.0.3@sha256:250bc6ce70788207608ef74cef4397230ff2e8481218da74d6093e4bd9101132'
 $ExpectedId = '2e247ce91d507ce09e7823e1b62cd4ce99c9bf1273ec0b019c169ad3d0caebbd'
-$TargetId = @(& docker inspect --format '{{.Id}}' $Old 2>$null)
-if ($LASTEXITCODE -ne 0) {
+# Verify absence using a successful listing, never an intentionally failing
+# inspect call: our reviewed host worker treats all stderr as a failed job.
+$Names = @(& docker ps -a --filter "name=^/$Old$" --format '{{.Names}}')
+if ($LASTEXITCODE -ne 0) { throw 'Unable to list old GitHub MCP stdio backend.' }
+if ($Names.Count -eq 0) {
     Write-Output 'GITHUB_OLD_STDIO_ALREADY_ABSENT'
     return
 }
+if ($Names.Count -ne 1 -or $Names[0] -cne $Old) {
+    throw 'Unexpected old GitHub MCP backend listing.'
+}
+$TargetId = @(& docker inspect --format '{{.Id}}' $Old)
+if ($LASTEXITCODE -ne 0) { throw 'Old backend identity inspection failed.' }
 if ($TargetId.Count -ne 1 -or $TargetId[0] -cne $ExpectedId) {
     throw 'Old stdio container identity changed; refusing retirement.'
 }
@@ -90,8 +98,10 @@ if ($LASTEXITCODE -ne 0 -or $Recheck.Count -ne 1 -or
 if ($LASTEXITCODE -ne 0) { throw 'Scoped old backend stop failed.' }
 & docker rm $Old | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Scoped old backend removal failed.' }
-& docker inspect $Old 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) { throw 'Old GitHub MCP backend still exists.' }
+$Remaining = @(& docker ps -a --filter "name=^/$Old$" --format '{{.Names}}')
+if ($LASTEXITCODE -ne 0 -or $Remaining.Count -ne 0) {
+    throw 'Old GitHub MCP backend still exists or absence cannot be verified.'
+}
 $Unchanged = @(& docker inspect --format '{{.Config.Image}}|{{.State.Running}}' 'github-mcp-local-github-mcp-1')
 if ($LASTEXITCODE -ne 0 -or $Unchanged.Count -ne 1 -or $Unchanged[0] -cne "$NewImage|true") {
     throw 'Modern GitHub MCP service changed unexpectedly.'
