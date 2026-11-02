@@ -88,6 +88,19 @@ if (@($Task.Actions).Count -ne 1 -or
     throw 'Scheduled Task identity, interpreter or privilege does not match the approved project.'
 }
 
+# Check the actual socket, not Get-NetTCPConnection telemetry; the latter
+# can return empty results under a restricted Windows scheduled worker.
+function Test-LoopbackListener([int]$Port) {
+    $Client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $Connect = $Client.ConnectAsync([System.Net.IPAddress]::Loopback, $Port)
+        if (-not $Connect.Wait([TimeSpan]::FromSeconds(3))) { return $false }
+        return [bool]$Client.Connected
+    }
+    catch { return $false }
+    finally { $Client.Dispose() }
+}
+
 $WasRunning = ([string]$Task.State -eq 'Running')
 $Stopped = $false
 try {
@@ -104,8 +117,9 @@ try {
         $Stopped = $true
     }
     # Don't replace a virtualenv while its old HTTP listener is still alive.
-    $Listeners = @(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-    if ($Listeners.Count -gt 0) { throw 'Old loopback HTTP listener is still active; refusing in-place update.' }
+    if (Test-LoopbackListener -Port $Port) {
+        throw 'Old loopback HTTP listener is still active; refusing in-place update.'
+    }
 
     Push-Location -LiteralPath $Root
     try {
@@ -125,8 +139,7 @@ finally {
         do {
             Start-Sleep -Seconds 2
             $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-            $Listeners = @(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-            if ([string]$Task.State -eq 'Running' -and $Listeners.Count -gt 0) {
+            if ([string]$Task.State -eq 'Running' -and (Test-LoopbackListener -Port $Port)) {
                 $Ready = $true
                 break
             }

@@ -41,7 +41,9 @@ def test_stop_then_sync_then_restart_and_validate_loopback():
     assert "Start-ScheduledTask -TaskName $TaskName" in HANDLER
     assert "sync --locked --no-dev" in HANDLER
     assert "pip check --python $Python" in HANDLER
-    assert "Get-NetTCPConnection -LocalAddress '127.0.0.1'" in HANDLER
+    assert "Test-LoopbackListener -Port $Port" in HANDLER
+    assert "ConnectAsync([System.Net.IPAddress]::Loopback, $Port)" in HANDLER
+    assert "Get-NetTCPConnection" not in HANDLER.split("function Test-LoopbackListener",1)[1]
     assert "finally {" in HANDLER
     assert "The Python HTTP task did not resume listening" not in HANDLER
     assert "Python HTTP task did not resume listening" in HANDLER
