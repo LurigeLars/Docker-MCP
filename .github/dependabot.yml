@@ -8,6 +8,10 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
+      security-minor-patch:
+        applies-to: "security-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
       python-minor-patch:
         applies-to: "version-updates"
         patterns:
@@ -30,6 +34,10 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
+      security-minor-patch:
+        applies-to: "security-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
       docker-minor-patch:
         applies-to: "version-updates"
         patterns:
@@ -67,6 +75,10 @@ updates:
       timezone: "Europe/Stockholm"
     open-pull-requests-limit: 2
     groups:
+      security-minor-patch:
+        applies-to: "security-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
       test-runner-base-minor-patch:
         applies-to: "version-updates"
         patterns: ["*"]
@@ -81,6 +93,10 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
+      security-minor-patch:
+        applies-to: "security-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
       compose-minor-patch:
         applies-to: "version-updates"
         patterns:
@@ -98,6 +114,10 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
+      security-minor-patch:
+        applies-to: "security-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
       actions-minor-patch:
         applies-to: "version-updates"
         patterns:
