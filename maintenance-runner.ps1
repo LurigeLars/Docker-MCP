@@ -2090,7 +2090,13 @@ try {
 
                 Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
                 if ($Action -in @("scout_full_scan", "compose_redeploy")) {
-                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project ([string]$Job.project)
+                    # Image scans are not associated with any Compose project.
+                    # PowerShell Mandatory string parameters reject an empty
+                    # value, so use a fixed telemetry-only name for scan jobs.
+                    $DispatchProject = if ($Action -eq "scout_full_scan") {
+                        "image-scan"
+                    } else { [string]$Job.project }
+                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project $DispatchProject
                     $ActiveLongJobId = $JobId
                     $ActiveLongStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                     $WorkerDispatched = $true
