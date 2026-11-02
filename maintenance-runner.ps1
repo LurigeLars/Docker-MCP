@@ -353,6 +353,5992 @@ function Get-BoundedScoutOutput {
     return $Value
 }
 
+function Get-ScoutMarkdownPackageSummary {
+    param([AllowEmptyString()][string]$Markdown)
+
+    # Docker Scout's GitLab formatter can crash. Its Markdown fallback is
+    # diagnostic ONLY and never authorizes a deployment. Keep all package names
+    # ahead of the bounded verbose report so the user can remediate in one pass.
+    $Pattern = '<strong>(?<name>[^<]{1,128})</strong>\s*<code>(?<version>[^<]{1,64})</code>\s*\((?<ecosystem>[^)<]{1,32})\)'
+    $Unique = [ordered]@{}
+    foreach ($Match in [regex]::Matches($Markdown, $Pattern)) {
+        $Name = [string]$Match.Groups['name'].Value
+        $Version = [string]$Match.Groups['version'].Value
+        $Ecosystem = [string]$Match.Groups['ecosystem'].Value
+        if ($Name -cnotmatch '^[A-Za-z0-9@._/+:-]{1,128}
+    param([AllowEmptyString()][string]$JsonText)
+
+    try {
+        $Report = $JsonText | ConvertFrom-Json -Depth 100
+    }
+    catch {
+        throw "Docker Scout returned invalid GitLab JSON."
+    }
+
+    $Vulnerabilities = @()
+    if ($null -ne $Report.vulnerabilities) {
+        $Vulnerabilities = @($Report.vulnerabilities)
+    }
+
+    $Counts = [ordered]@{}
+    $UniqueCves = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Counts[$Severity] = 0
+        $UniqueCves[$Severity] = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+    }
+
+    foreach ($Vulnerability in $Vulnerabilities) {
+        $Severity = ([string]$Vulnerability.severity).ToLowerInvariant()
+        if ($Severity -notin $ScoutSeverities) {
+            $Severity = "unspecified"
+        }
+        $Counts[$Severity]++
+
+        $Cve = [string]$Vulnerability.cve
+        if ([string]::IsNullOrWhiteSpace($Cve)) {
+            foreach ($Identifier in @($Vulnerability.identifiers)) {
+                $Type = ([string]$Identifier.type).ToLowerInvariant()
+                $Value = [string]$Identifier.value
+                if ($Type -eq "cve" -and -not [string]::IsNullOrWhiteSpace($Value)) {
+                    $Cve = $Value
+                    break
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Cve)) {
+            [void]$UniqueCves[$Severity].Add($Cve)
+        }
+    }
+
+    $UniqueCounts = [ordered]@{}
+    $CveIds = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Sorted = @($UniqueCves[$Severity] | Sort-Object)
+        $UniqueCounts[$Severity] = $Sorted.Count
+        $CveIds[$Severity] = $Sorted
+    }
+
+    return [ordered]@{
+        vulnerability_counts = $Counts
+        unique_cve_counts = $UniqueCounts
+        cve_ids = $CveIds
+        detected_vulnerabilities_total = $Vulnerabilities.Count
+    }
+}
+
+function Remove-ScoutJobDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $true
+    }
+
+    foreach ($Attempt in 1..15) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
+}
+
+function New-ScoutFullScanResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [AllowEmptyString()][string]$Image,
+        [object[]]$Severity = @(),
+        [bool]$OnlyFixed = $false,
+        [bool]$CisaKev = $false
+    )
+
+    return [ordered]@{
+        job_id = $JobId
+        status = "failed"
+        scan_complete = $false
+        image = $Image
+        image_id = $null
+        image_digest = $null
+        image_size_bytes = $null
+        severity = @($Severity)
+        only_fixed = $OnlyFixed
+        cisa_kev = $CisaKev
+        output = ""
+        error_code = $null
+        cleanup_complete = $null
+    }
+}
+
+function Remove-StaleScoutJobDirectories {
+    $Cutoff = (Get-Date).ToUniversalTime().AddHours(-24)
+    foreach ($Directory in @(Get-ChildItem -LiteralPath $ScoutJobsRoot -Directory -ErrorAction SilentlyContinue)) {
+        if (
+            $Directory.Name -match '^[a-f0-9]{32}$' -and
+            $Directory.LastWriteTimeUtc -lt $Cutoff
+        ) {
+            Remove-Item -LiteralPath $Directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Write-RunnerLog "removed stale scout job directory: $($Directory.Name)"
+        }
+    }
+}
+
+function Get-LocalScoutImageMetadata {
+    param([Parameter(Mandatory)][string]$Image)
+
+    $Inspect = Invoke-DockerText -Arguments @(
+        "image", "inspect", "--format", "{{json .}}", $Image
+    ) -WorkingDirectory $Root
+
+    if ([int]$Inspect.exit_code -ne 0) {
+        $Code = if ([string]$Inspect.output -match '(?i)(no such image|not found)') {
+            "IMAGE_NOT_FOUND"
+        }
+        else {
+            "SCAN_FAILED_DOCKER"
+        }
+        return @{
+            ok = $false
+            error_code = $Code
+            output = [string]$Inspect.output
+        }
+    }
+
+    try {
+        $Metadata = ([string]$Inspect.output).Trim() | ConvertFrom-Json
+        $ImageId = [string]$Metadata.Id
+        $ImageSize = [int64]$Metadata.Size
+        $Digest = $null
+        if ($null -ne $Metadata.RepoDigests) {
+            $Digest = @($Metadata.RepoDigests | ForEach-Object { [string]$_ } | Where-Object { $_ }) |
+                Select-Object -First 1
+        }
+
+        if (
+            $ImageId -notmatch '^sha256:[a-fA-F0-9]{64}$' -or
+            $ImageSize -lt 0
+        ) {
+            throw "Docker image inspect returned invalid metadata."
+        }
+
+        return @{
+            ok = $true
+            image_id = $ImageId
+            image_digest = $Digest
+            image_size_bytes = $ImageSize
+        }
+    }
+    catch {
+        return @{
+            ok = $false
+            error_code = "SCAN_FAILED_DOCKER"
+            output = "Unable to parse local image metadata."
+        }
+    }
+}
+
+function Invoke-ScoutFullScan {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)]$Job
+    )
+
+    $RawImage = [string]$Job.image
+    $RawSeverity = @($Job.severity)
+    $OnlyFixed = if ($Job.only_fixed -is [bool]) { [bool]$Job.only_fixed } else { $false }
+    $CisaKev = if ($Job.cisa_kev -is [bool]) { [bool]$Job.cisa_kev } else { $false }
+    $Result = New-ScoutFullScanResult -JobId $JobId -Image $RawImage -Severity $RawSeverity -OnlyFixed $OnlyFixed -CisaKev $CisaKev
+
+    $AllowedProperties = @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )
+    foreach ($Property in $Job.PSObject.Properties.Name) {
+        if ($Property -notin $AllowedProperties) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unexpected scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    foreach ($RequiredProperty in @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )) {
+        if ($null -eq $Job.PSObject.Properties[$RequiredProperty]) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Missing scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    if (
+        $RawImage -notmatch $ScoutImageRefPattern -or
+        $Job.severity -is [string] -or
+        -not ($Job.only_fixed -is [bool]) -or
+        -not ($Job.cisa_kev -is [bool])
+    ) {
+        $Result.error_code = "INVALID_REQUEST"
+        $Result.output = "Invalid scout_full_scan request."
+        return $Result
+    }
+
+    $Severity = @()
+    foreach ($Item in $RawSeverity) {
+        $Value = ([string]$Item).ToLowerInvariant()
+        if ($Value -notin $ScoutSeverities) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unsupported Scout severity."
+            return $Result
+        }
+        if ($Value -notin $Severity) {
+            $Severity += $Value
+        }
+    }
+    $Result.severity = @($Severity)
+
+    $Metadata = Get-LocalScoutImageMetadata -Image $RawImage
+    if (-not [bool]$Metadata.ok) {
+        $Result.error_code = [string]$Metadata.error_code
+        $Result.output = Get-BoundedScoutOutput -Text ([string]$Metadata.output)
+        return $Result
+    }
+
+    $Result.image_id = [string]$Metadata.image_id
+    $Result.image_digest = $Metadata.image_digest
+    $Result.image_size_bytes = [int64]$Metadata.image_size_bytes
+
+    $DriveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($ScoutJobsRoot))
+    $AvailableBytes = [int64]([IO.DriveInfo]::new($DriveRoot)).AvailableFreeSpace
+    $RequiredBytes = [Math]::Max(
+        [int64](4GB + (2 * [int64]$Result.image_size_bytes)),
+        [int64]8GB
+    )
+    $Result.available_disk_bytes = $AvailableBytes
+    $Result.required_disk_bytes = $RequiredBytes
+
+    if ($AvailableBytes -lt $RequiredBytes) {
+        $Result.error_code = "INSUFFICIENT_DISK"
+        $Result.output = "Insufficient free disk for Docker Scout full scan."
+        return $Result
+    }
+
+    $ScanMutex = [Threading.Mutex]::new($false, "Local\DockerLocalScoutFullScan")
+    $LockTaken = $false
+    $JobDirectory = Join-Path $ScoutJobsRoot $JobId
+    $Process = $null
+    $ScoutUser = $null
+    $ScoutPassword = $null
+
+    try {
+        $LockTaken = $ScanMutex.WaitOne(0)
+        if (-not $LockTaken) {
+            $Result.error_code = "SCAN_FAILED_RESOURCE_LIMIT"
+            $Result.output = "Another Docker Scout full scan is already running."
+            return $Result
+        }
+
+        New-Item -ItemType Directory -Force -Path $JobDirectory | Out-Null
+        $CacheDirectory = Join-Path $JobDirectory "cache"
+        $TempDirectory = Join-Path $JobDirectory "tmp"
+        New-Item -ItemType Directory -Force -Path $CacheDirectory, $TempDirectory | Out-Null
+
+        $ScoutUser = Get-DpapiSecretValue -Path $ScoutUserDpapi -Label "Docker Scout Hub user"
+        $ScoutPassword = Get-DpapiSecretValue -Path $ScoutPasswordDpapi -Label "Docker Scout Hub password"
+
+        $Arguments = @("scout", "cves", "--format", "gitlab")
+        if ($Severity.Count -gt 0) {
+            $Arguments += @("--only-severity", ($Severity -join ","))
+        }
+        if ([bool]$Job.only_fixed) {
+            $Arguments += "--only-fixed"
+        }
+        if ([bool]$Job.cisa_kev) {
+            $Arguments += "--only-cisa-kev"
+        }
+        $Arguments += "local://$RawImage"
+
+        $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $StartInfo.FileName = $Docker
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+        $StartInfo.CreateNoWindow = $true
+        $StartInfo.WorkingDirectory = $JobDirectory
+        foreach ($Argument in $Arguments) {
+            [void]$StartInfo.ArgumentList.Add([string]$Argument)
+        }
+
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_USER")
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_PASSWORD")
+        $StartInfo.Environment["DOCKER_SCOUT_CACHE_DIR"] = $CacheDirectory
+        $StartInfo.Environment["TEMP"] = $TempDirectory
+        $StartInfo.Environment["TMP"] = $TempDirectory
+        $StartInfo.Environment["NO_COLOR"] = "1"
+        $StartInfo.Environment["DOCKER_SCOUT_NEW_VERSION_WARN"] = "false"
+        if (-not [string]::IsNullOrWhiteSpace($ScoutUser)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_USER"] = $ScoutUser
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ScoutPassword)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_PASSWORD"] = $ScoutPassword
+        }
+
+        $Process = [Diagnostics.Process]::new()
+        $Process.StartInfo = $StartInfo
+        [void]$Process.Start()
+
+        $StdOutTask = $Process.StandardOutput.ReadToEndAsync()
+        $StdErrTask = $Process.StandardError.ReadToEndAsync()
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($ScoutTimeoutSeconds)
+
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = "scout_full_scan"
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            }
+            Start-Sleep -Seconds 1
+            $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            $StdOut = $StdOutTask.GetAwaiter().GetResult()
+            $StdErr = $StdErrTask.GetAwaiter().GetResult()
+            $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+            $Result.status = "timeout"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_TIMEOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Process.WaitForExit()
+        $StdOut = $StdOutTask.GetAwaiter().GetResult()
+        $StdErr = $StdErrTask.GetAwaiter().GetResult()
+        $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+        $Result.exit_code = [int]$Process.ExitCode
+
+        if ([int]$Process.ExitCode -ne 0 -and
+            $Combined -match 'internal/format/sbom/gitlab|gitlab\\.go:207') {
+            # Scout can panic inside its GitLab formatter *after* completing
+            # vulnerability detection. Diagnostic fallback is read-only.
+            # It never returns a successful scan or waives the CVE gate.
+            $OriginalFailure = [int]$Process.ExitCode
+            $Process.Dispose()
+            $Process = $null
+            $StartInfo.ArgumentList[3] = "markdown"
+            $Diagnostic = [Diagnostics.Process]::new()
+            $Diagnostic.StartInfo = $StartInfo
+            $Process = $Diagnostic
+            [void]$Process.Start()
+            $MarkdownOutTask = $Process.StandardOutput.ReadToEndAsync()
+            $MarkdownErrTask = $Process.StandardError.ReadToEndAsync()
+            while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+                Start-Sleep -Seconds 1
+                $Process.Refresh()
+            }
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+                try { $Process.WaitForExit(5000) | Out-Null } catch {}
+                $Result.error_code = "SCAN_TIMEOUT"
+                $Result.output = "Scout GitLab formatter crashed; Markdown diagnostic exceeded scan timeout."
+                return $Result
+            }
+            $Process.WaitForExit()
+            $MarkdownOut = [string]$MarkdownOutTask.GetAwaiter().GetResult()
+            $MarkdownErr = [string]$MarkdownErrTask.GetAwaiter().GetResult()
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_FORMATTER"
+            $PackageSummary = Get-ScoutMarkdownPackageSummary -Markdown $MarkdownOut
+            $Result.output = Get-BoundedScoutOutput -Text (
+                "GitLab formatter crashed (exit $OriginalFailure). Markdown diagnostics only; scan NOT approved." +
+                [Environment]::NewLine + $PackageSummary +
+                [Environment]::NewLine + $MarkdownOut + [Environment]::NewLine + $MarkdownErr
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        if ([int]$Process.ExitCode -ne 0) {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_SCOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        try {
+            $Structured = ConvertFrom-ScoutGitLabReport -JsonText $StdOut
+        }
+        catch {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_PARSE"
+            $Result.output = Get-BoundedScoutOutput -Text (
+                @($_.Exception.Message, $StdErr) -join [Environment]::NewLine
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Result.vulnerability_counts = $Structured.vulnerability_counts
+        $Result.unique_cve_counts = $Structured.unique_cve_counts
+        $Result.cve_ids = $Structured.cve_ids
+        $Result.detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        if ([bool]$Job.only_fixed) {
+            $Result.fixable_vulnerability_counts = $Structured.vulnerability_counts
+            $Result.fixable_unique_cve_counts = $Structured.unique_cve_counts
+        }
+
+        $Summary = [ordered]@{
+            vulnerability_counts = $Structured.vulnerability_counts
+            unique_cve_counts = $Structured.unique_cve_counts
+            cve_ids = $Structured.cve_ids
+            detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        } | ConvertTo-Json -Depth 8 -Compress
+        $Result.output = Get-BoundedScoutOutput -Text $Summary -RedactValues @($ScoutUser, $ScoutPassword)
+        $Result.status = "succeeded"
+        $Result.scan_complete = $true
+        $Result.error_code = $null
+        return $Result
+    }
+    catch {
+        $Result.status = "failed"
+        $Result.scan_complete = $false
+        $Result.error_code = "SCAN_FAILED_INTERNAL"
+        $Result.output = Get-BoundedScoutOutput -Text $_.Exception.Message -RedactValues @($ScoutUser, $ScoutPassword)
+        return $Result
+    }
+    finally {
+        $ScoutUser = $null
+        $ScoutPassword = $null
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
+        $Result.cleanup_complete = Remove-ScoutJobDirectory -Path $JobDirectory
+        if ($LockTaken) {
+            try { $ScanMutex.ReleaseMutex() } catch {}
+        }
+        $ScanMutex.Dispose()
+    }
+}
+
+function Invoke-ScriptHandler {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Script,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [int]$TimeoutSeconds = $ScriptTimeoutSeconds
+    )
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if (-not $PwshCommand) {
+        throw "PowerShell 7 (pwsh.exe) is required for script-backed maintenance projects."
+    }
+
+    $Command = "& '" + $Script.Replace("'", "''") + "'"
+    foreach ($Argument in $Arguments) {
+        $ArgumentText = [string]$Argument
+        if ($ArgumentText -match '^-[A-Za-z][A-Za-z0-9-]*$') {
+            # Preserve allowlisted PowerShell parameter tokens such as -Action.
+            $Command += " " + $ArgumentText
+        }
+        else {
+            $Command += " '" + $ArgumentText.Replace("'", "''") + "'"
+        }
+    }
+
+    # -EncodedCommand does not reliably turn every script-level terminating error
+    # into a non-zero process exit code on its own. Make process semantics explicit.
+    $InvocationLines = @(
+        '$ErrorActionPreference = ''Stop'''
+        '$Error.Clear()'
+        'try {'
+        "    $Command"
+        '    if (-not $? -or $Error.Count -gt 0) { exit 1 }'
+        '    exit 0'
+        '}'
+        'catch {'
+        '    [Console]::Error.WriteLine(($_ | Out-String))'
+        '    exit 1'
+        '}'
+    )
+    $Invocation = $InvocationLines -join [Environment]::NewLine
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Invocation))
+
+    $StdOutPath = Join-Path $Control ("maintenance-{0}.out.log" -f $JobId)
+    $StdErrPath = Join-Path $Control ("maintenance-{0}.err.log" -f $JobId)
+    Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+
+    $Process = $null
+    try {
+        $Process = Start-Process `
+            -FilePath $PwshCommand.Source `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-EncodedCommand", $EncodedCommand) `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $StdOutPath `
+            -RedirectStandardError $StdErrPath `
+            -PassThru
+
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = $Project
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            }
+            Start-Sleep -Seconds 2
+            $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            return @{ exit_code = 124; output = "Script-backed maintenance timed out; completion is unverified." }
+        }
+
+        $ExitCode = [int]$Process.ExitCode
+        $StdOut = if (Test-Path -LiteralPath $StdOutPath) { Get-Content -LiteralPath $StdOutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $StdErr = if (Test-Path -LiteralPath $StdErrPath) { Get-Content -LiteralPath $StdErrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $Output = @($StdOut, $StdErr) -join [Environment]::NewLine
+
+        if ($Output.Length -gt 16000) {
+            $Output = $Output.Substring($Output.Length - 16000)
+        }
+
+        return @{ exit_code = $ExitCode; output = $Output }
+    }
+    finally {
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
+        Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-DockerText {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    Push-Location $WorkingDirectory
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $Output = (& $Docker @Arguments 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+        Pop-Location
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Invoke-GitText {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $Git = (Get-Command git.exe -ErrorAction Stop).Source
+    $EmptyHooks = Join-Path $Root "empty-git-hooks"
+    New-Item -ItemType Directory -Force -Path $EmptyHooks | Out-Null
+
+    $PreviousTerminalPrompt = $env:GIT_TERMINAL_PROMPT
+    $PreviousGcmInteractive = $env:GCM_INTERACTIVE
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $env:GIT_TERMINAL_PROMPT = "0"
+        $env:GCM_INTERACTIVE = "Never"
+        $ErrorActionPreference = "Continue"
+        $FixedArgs = @(
+            "-c", "core.hooksPath=$EmptyHooks",
+            "-c", "submodule.recurse=false",
+            "-C", $RepositoryPath
+        ) + $Arguments
+        $Output = (& $Git @FixedArgs 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:GIT_TERMINAL_PROMPT = $PreviousTerminalPrompt
+        $env:GCM_INTERACTIVE = $PreviousGcmInteractive
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Get-AllowlistedRepository {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid repository alias."
+    }
+    if (-not $HostRepositories.ContainsKey($Alias)) {
+        throw "Repository alias is not allowlisted."
+    }
+    return $HostRepositories[$Alias]
+}
+
+function Get-RepositoryState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $RepoPath = [string]$Cfg.Path
+    if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
+        throw "Allowlisted repository path is missing."
+    }
+
+    $TopLevel = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "--show-toplevel")
+    if ([int]$TopLevel.exit_code -ne 0) { throw "Allowlisted path is not a Git repository." }
+
+    $ExpectedRoot = [IO.Path]::GetFullPath($RepoPath).TrimEnd('\')
+    $ActualRoot = [IO.Path]::GetFullPath(([string]$TopLevel.output).Trim()).TrimEnd('\')
+    if (-not [string]::Equals($ExpectedRoot, $ActualRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Allowlisted path is not the repository root."
+    }
+
+    $Head = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "HEAD")
+    if ([int]$Head.exit_code -ne 0) { throw "Unable to read repository HEAD." }
+
+    $Branch = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("symbolic-ref", "--quiet", "--short", "HEAD")
+    $BranchName = if ([int]$Branch.exit_code -eq 0) { ([string]$Branch.output).Trim() } else { "" }
+
+    $Status = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("status", "--porcelain=v1", "--untracked-files=normal")
+    if ([int]$Status.exit_code -ne 0) { throw "Unable to read repository status." }
+
+    $Conflicts = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("ls-files", "-u")
+    if ([int]$Conflicts.exit_code -ne 0) { throw "Unable to inspect repository conflicts." }
+
+    $Origin = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("remote", "get-url", "origin")
+    if ([int]$Origin.exit_code -ne 0) { throw "Unable to read origin URL." }
+
+    $Clean = [string]::IsNullOrWhiteSpace([string]$Status.output)
+    $HasConflicts = -not [string]::IsNullOrWhiteSpace([string]$Conflicts.output)
+    $OriginOk = [string]::Equals(
+        ([string]$Origin.output).Trim(),
+        [string]$Cfg.OriginUrl,
+        [StringComparison]::Ordinal
+    )
+    $BranchOk = $BranchName -eq "main"
+
+    return @{
+        repo = $Alias
+        branch = $BranchName
+        head = ([string]$Head.output).Trim()
+        clean = $Clean
+        conflicts = $HasConflicts
+        origin_ok = $OriginOk
+        eligible_for_pull = ($BranchOk -and $Clean -and -not $HasConflicts -and $OriginOk)
+    }
+}
+
+function Invoke-RepositoryPull {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $Before = Get-RepositoryState -Alias $Alias
+    if ($Before.branch -ne "main") { throw "Repository is not on main." }
+    if (-not [bool]$Before.clean) { throw "Repository has local changes." }
+    if ([bool]$Before.conflicts) { throw "Repository has unresolved conflicts." }
+    if (-not [bool]$Before.origin_ok) { throw "Repository origin does not match the allowlist." }
+
+    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "--no-rebase", "origin", "main")
+    if ([int]$Pull.exit_code -ne 0) {
+        throw "git pull --ff-only failed with exit code $([int]$Pull.exit_code)."
+    }
+
+    $After = Get-RepositoryState -Alias $Alias
+    if (
+        $After.branch -ne "main" -or
+        -not [bool]$After.clean -or
+        [bool]$After.conflicts -or
+        -not [bool]$After.origin_ok
+    ) {
+        throw "Repository verification failed after pull."
+    }
+
+    return @{
+        action = "repo_pull_ff"
+        repo = $Alias
+        branch = "main"
+        before_head = [string]$Before.head
+        after_head = [string]$After.head
+        changed = ([string]$Before.head -ne [string]$After.head)
+        clean = [bool]$After.clean
+    }
+}
+
+function Get-AllowlistedScheduledTask {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid Scheduled Task alias."
+    }
+    if (-not $HostScheduledTasks.ContainsKey($Alias)) {
+        throw "Scheduled Task alias is not allowlisted."
+    }
+
+    $Cfg = $HostScheduledTasks[$Alias]
+    $Matches = @(
+        Get-ScheduledTask -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop |
+            Where-Object {
+                [string]::Equals($_.TaskName, [string]$Cfg.TaskName, [StringComparison]::Ordinal) -and
+                [string]::Equals($_.TaskPath, [string]$Cfg.TaskPath, [StringComparison]::Ordinal)
+            }
+    )
+    if ($Matches.Count -ne 1) { throw "Allowlisted Scheduled Task was not resolved exactly once." }
+
+    return @{ Config = $Cfg; Task = $Matches[0] }
+}
+
+function Get-AllowlistedScheduledTaskState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Cfg = $Resolved.Config
+    $Task = $Resolved.Task
+    $Info = Get-ScheduledTaskInfo -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop
+
+    $LastRunTime = $null
+    if ($Info.LastRunTime -and $Info.LastRunTime -gt [DateTime]::MinValue) {
+        $LastRunTime = $Info.LastRunTime.ToString("o")
+    }
+
+    return @{
+        task = $Alias
+        state = [string]$Task.State
+        principal = [string]$Task.Principal.UserId
+        run_level = [string]$Task.Principal.RunLevel
+        last_run_time = $LastRunTime
+        last_task_result = [uint32]$Info.LastTaskResult
+    }
+}
+
+function Wait-ScheduledTaskNotRunning {
+    param([Parameter(Mandatory)][string]$Alias,[int]$TimeoutSeconds = 10)
+    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $State = Get-AllowlistedScheduledTaskState -Alias $Alias
+        if ([string]$State.state -ne "Running") { return $State }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $Deadline)
+    throw "Scheduled Task did not stop within the bounded wait."
+}
+
+function Invoke-AllowlistedScheduledTaskControl {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][ValidateSet("start", "stop", "restart")][string]$Operation
+    )
+
+    $Before = Get-AllowlistedScheduledTaskState -Alias $Alias
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Task = $Resolved.Task
+
+    if ($Operation -eq "start") {
+        if ([string]$Before.state -ne "Running") {
+            $Task | Start-ScheduledTask
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    elseif ($Operation -eq "stop") {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+    }
+    else {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+        $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+        $Resolved.Task | Start-ScheduledTask
+        Start-Sleep -Milliseconds 300
+    }
+
+    $After = Get-AllowlistedScheduledTaskState -Alias $Alias
+    return @{
+        action = "scheduled_task_control"
+        task = $Alias
+        operation = $Operation
+        before_state = [string]$Before.state
+        after_state = [string]$After.state
+        last_task_result = [uint32]$After.last_task_result
+    }
+}
+
+function Get-ComposeFileState {
+    $Containers = @()
+    $Drift = @()
+    $Errors = @()
+    # Compose container labels can point at a subdirectory while the reviewed
+    # allowlisted deployment uses a different project directory and .env file.
+    # Only use this fallback for exact matching Compose-file sets, and only
+    # when the label-based hash command itself failed. Never guess a match.
+    $AllowlistedDesired = $null
+
+    $Ids = @(& $Docker ps -aq)
+    if ($LASTEXITCODE -ne 0) {
+        return @{
+            containers = @()
+            drift = @()
+            errors = @(@{ error = "docker_ps_failed" })
+        }
+    }
+
+    foreach ($Id in $Ids) {
+        if ([string]::IsNullOrWhiteSpace([string]$Id)) { continue }
+
+        $InspectText = (& $Docker inspect ([string]$Id) 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($InspectText)) {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_failed" }
+            continue
+        }
+
+        try {
+            $Inspect = @($InspectText | ConvertFrom-Json)[0]
+        }
+        catch {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_invalid_json" }
+            continue
+        }
+
+        $Labels = $Inspect.Config.Labels
+        if ($null -eq $Labels) { continue }
+
+        $ProjectProp = $Labels.PSObject.Properties["com.docker.compose.project"]
+        $ServiceProp = $Labels.PSObject.Properties["com.docker.compose.service"]
+        $FilesProp = $Labels.PSObject.Properties["com.docker.compose.project.config_files"]
+        if ($null -eq $ProjectProp -or $null -eq $ServiceProp -or $null -eq $FilesProp) {
+            continue
+        }
+
+        $Project = [string]$ProjectProp.Value
+        $Service = [string]$ServiceProp.Value
+        $FilesText = [string]$FilesProp.Value
+        if ([string]::IsNullOrWhiteSpace($Project) -or [string]::IsNullOrWhiteSpace($FilesText)) {
+            continue
+        }
+
+        $WorkingDirProp = $Labels.PSObject.Properties["com.docker.compose.project.working_dir"]
+        $ConfigHashProp = $Labels.PSObject.Properties["com.docker.compose.config-hash"]
+        $WorkingDir = if ($null -ne $WorkingDirProp) { [string]$WorkingDirProp.Value } else { "" }
+        $RunningConfigHash = if ($null -ne $ConfigHashProp) { [string]$ConfigHashProp.Value } else { "" }
+
+        $CreatedUtc = $null
+        $CreatedDisplay = $null
+        try {
+            $CreatedUtc = ConvertTo-ContainerCreatedUtc -Value $Inspect.Created
+            $CreatedDisplay = $CreatedUtc.ToString(
+                "o",
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        catch {
+            $Errors += @{ project = $Project; service = $Service; error = "container_created_time_invalid" }
+        }
+
+        $ContainerFiles = @()
+        $ResolvedFiles = @()
+        $HasMissing = $false
+        $HasNewer = $false
+
+        foreach ($PathText in @($FilesText -split ",")) {
+            $Path = ([string]$PathText).Trim()
+            if ([string]::IsNullOrWhiteSpace($Path)) { continue }
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                $Entry = @{
+                    project = $Project
+                    service = $Service
+                    container = ([string]$Inspect.Name).TrimStart("/")
+                    compose_file = $Path
+                    status = "missing"
+                    container_created_at = $CreatedDisplay
+                    compose_file_modified_at = $null
+                }
+                $ContainerFiles += $Entry
+                $HasMissing = $true
+                continue
+            }
+
+            $File = Get-Item -LiteralPath $Path
+            $ResolvedFiles += $File.FullName
+            $ModifiedUtc = $File.LastWriteTimeUtc
+            $IsNewer = $false
+            if ($null -ne $CreatedUtc) {
+                $IsNewer = $ModifiedUtc -gt $CreatedUtc.AddSeconds(1)
+            }
+
+            $Entry = @{
+                project = $Project
+                service = $Service
+                container = ([string]$Inspect.Name).TrimStart("/")
+                compose_file = $File.FullName
+                status = if ($IsNewer) { "newer_than_container" } else { "ok" }
+                container_created_at = $CreatedDisplay
+                compose_file_modified_at = $ModifiedUtc.ToString("o")
+            }
+            $ContainerFiles += $Entry
+            if ($IsNewer) { $HasNewer = $true }
+        }
+
+        # File mtime is only a heuristic. If a Compose file is newer than the
+        # container, verify the rendered service config against the immutable
+        # config hash embedded in the container. Matching hashes are
+        # informational mtime-only changes, not deployment drift.
+        # If verification is impossible, keep the warning and explain WHY.
+        # Do not include Docker stderr, Compose variable values, or secrets.
+        $HashVerificationReason = $null
+        $HashCommandExitCode = $null
+        if ($HasNewer) {
+            if ($HasMissing) {
+                $HashVerificationReason = "compose_file_missing"
+            }
+            elseif ($ResolvedFiles.Count -eq 0) {
+                $HashVerificationReason = "compose_files_unresolved"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($WorkingDir)) {
+                $HashVerificationReason = "working_directory_label_missing"
+            }
+            elseif (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+                $HashVerificationReason = "working_directory_unavailable"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($RunningConfigHash)) {
+                $HashVerificationReason = "running_config_hash_label_missing"
+            }
+            else {
+                $HashVerificationReason = "verification_not_completed"
+            }
+        }
+        if (
+            $HasNewer -and
+            -not $HasMissing -and
+            $ResolvedFiles.Count -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($WorkingDir) -and
+            (Test-Path -LiteralPath $WorkingDir -PathType Container) -and
+            -not [string]::IsNullOrWhiteSpace($RunningConfigHash)
+        ) {
+            $HashArgs = @("compose")
+            foreach ($ResolvedFile in $ResolvedFiles) {
+                $HashArgs += @("-f", $ResolvedFile)
+            }
+
+            $HashRun = $null
+            try {
+                $HashRun = Invoke-DockerText -Arguments ($HashArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            }
+            catch {
+                $HashVerificationReason = "compose_hash_invocation_failed"
+            }
+            if ($null -ne $HashRun -and [int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                $DesiredConfigHash = if ($Tokens.Count -gt 0) { [string]$Tokens[-1] } else { "" }
+
+                if (
+                    -not [string]::IsNullOrWhiteSpace($DesiredConfigHash) -and
+                    $DesiredConfigHash -eq $RunningConfigHash
+                ) {
+                    $HashVerificationReason = "service_hash_verified_match"
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "mtime_only"
+                            $Entry.config_hash_verified = $true
+                        }
+                    }
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace($DesiredConfigHash)) {
+                    $HashVerificationReason = "service_hash_verified_mismatch"
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "config_hash_mismatch"
+                            $Entry.running_config_hash = $RunningConfigHash
+                            $Entry.desired_config_hash = $DesiredConfigHash
+                        }
+                    }
+                }
+                else {
+                    $HashVerificationReason = "compose_hash_output_empty"
+                }
+            }
+            elseif ($null -ne $HashRun) {
+                $HashVerificationReason = "compose_hash_command_failed"
+                $HashCommandExitCode = [int]$HashRun.exit_code
+
+                # Try the exact reviewed project allowlist if Docker's
+                # container-label working directory lacks required env context.
+                # Never let unrelated Compose-file sets claim a valid match.
+                if ($Projects.ContainsKey($Project)) {
+                    $Allowlisted = $Projects[$Project]
+                    $KnownFiles = @(
+                        $Allowlisted.Files | ForEach-Object {
+                            [IO.Path]::GetFullPath((Join-Path ([string]$Allowlisted.WorkingDir) ([string]$_))).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    $ContainerPaths = @(
+                        $ResolvedFiles | ForEach-Object {
+                            [IO.Path]::GetFullPath([string]$_).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    if ($KnownFiles.Count -gt 0 -and $KnownFiles.Count -eq $ContainerPaths.Count -and
+                        (@(Compare-Object -ReferenceObject $KnownFiles -DifferenceObject $ContainerPaths).Count -eq 0)) {
+                        if ($null -eq $AllowlistedDesired) {
+                            $AllowlistedDesired = Get-ComposeDesiredState
+                        }
+                        $DesiredProject = $AllowlistedDesired.projects[$Project]
+                        $DesiredService = if ($null -ne $DesiredProject) {
+                            $DesiredProject.services[$Service]
+                        } else { $null }
+                        $FallbackHash = if ($null -ne $DesiredService) {
+                            [string]$DesiredService.config_hash
+                        } else { "" }
+                        if (-not [string]::IsNullOrWhiteSpace($FallbackHash)) {
+                            $Match = ($FallbackHash -ceq $RunningConfigHash)
+                            $HashVerificationReason = if ($Match) {
+                                "service_hash_verified_match_via_allowlist"
+                            } else {
+                                "service_hash_verified_mismatch_via_allowlist"
+                            }
+                            foreach ($Entry in $ContainerFiles) {
+                                if ([string]$Entry.status -eq "newer_than_container") {
+                                    $Entry.status = if ($Match) { "mtime_only" } else { "config_hash_mismatch" }
+                                    $Entry.config_hash_verified = $true
+                                    if (-not $Match) {
+                                        $Entry.running_config_hash = $RunningConfigHash
+                                        $Entry.desired_config_hash = $FallbackHash
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($HasNewer) {
+            foreach ($Entry in $ContainerFiles) {
+                if ([string]$Entry.status -in @("newer_than_container", "mtime_only", "config_hash_mismatch")) {
+                    $Entry.hash_verification_reason = $HashVerificationReason
+                    if ($null -ne $HashCommandExitCode) {
+                        $Entry.hash_command_exit_code = $HashCommandExitCode
+                    }
+                }
+            }
+        }
+
+        foreach ($Entry in $ContainerFiles) {
+            if ([string]$Entry.status -in @("missing", "newer_than_container", "config_hash_mismatch")) {
+                $Drift += $Entry
+            }
+        }
+
+        $Containers += @{
+            project = $Project
+            service = $Service
+            container = ([string]$Inspect.Name).TrimStart("/")
+            files = $ContainerFiles
+        }
+    }
+
+    return @{
+        containers = $Containers
+        drift = $Drift
+        errors = $Errors
+    }
+}
+
+function Get-ComposeDesiredState {
+    $Desired = @{}
+    $Errors = @()
+
+    foreach ($Project in @($Projects.Keys | Sort-Object)) {
+        $Cfg = $Projects[$Project]
+        $ConfiguredFiles = @($Cfg.Files)
+        if ($ConfiguredFiles.Count -eq 0) {
+            continue
+        }
+
+        $WorkingDir = [string]$Cfg.WorkingDir
+        if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+            $Errors += @{ project = $Project; error = "working_directory_missing" }
+            continue
+        }
+
+        $BaseArgs = @("compose")
+        $MissingFile = $false
+        foreach ($File in @($Cfg.Files)) {
+            $FullPath = Join-Path $WorkingDir ([string]$File)
+            if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+                $Errors += @{ project = $Project; file = [string]$File; error = "compose_file_missing" }
+                $MissingFile = $true
+                break
+            }
+            $BaseArgs += @("-f", $FullPath)
+        }
+        if ($MissingFile) { continue }
+
+        $ConfigRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--format", "json")) -WorkingDirectory $WorkingDir
+        if ([int]$ConfigRun.exit_code -ne 0) {
+            $Errors += @{ project = $Project; error = "compose_config_failed"; detail = ([string]$ConfigRun.output).Trim() }
+            continue
+        }
+
+        try {
+            $Config = ([string]$ConfigRun.output) | ConvertFrom-Json
+        }
+        catch {
+            $Errors += @{ project = $Project; error = "compose_config_invalid_json" }
+            continue
+        }
+
+        $Services = @{}
+        $ServiceProperties = @()
+        if ($null -ne $Config.services) {
+            $ServiceProperties = @($Config.services.PSObject.Properties)
+        }
+
+        foreach ($ServiceProperty in $ServiceProperties) {
+            $Service = [string]$ServiceProperty.Name
+            $ServiceConfig = $ServiceProperty.Value
+            $Image = [string]$ServiceConfig.image
+
+            $HashRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            $DesiredHash = $null
+            if ([int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                if ($Tokens.Count -gt 0) {
+                    $DesiredHash = [string]$Tokens[-1]
+                }
+            }
+            else {
+                $Errors += @{ project = $Project; service = $Service; error = "compose_hash_failed"; detail = ([string]$HashRun.output).Trim() }
+            }
+
+            $Services[$Service] = @{
+                image = if ([string]::IsNullOrWhiteSpace($Image)) { $null } else { $Image }
+                config_hash = $DesiredHash
+            }
+        }
+
+        $Desired[$Project] = @{ services = $Services }
+    }
+
+    return @{ projects = $Desired; errors = $Errors }
+}
+
+function Run-ProjectRedeploy {
+    param($Job)
+
+    $Project = [string]$Job.project
+    if (-not $Projects.ContainsKey($Project)) { throw "Project is not allowlisted: $Project" }
+
+    $Cfg = $Projects[$Project]
+    $WorkingDir = [string]$Cfg.WorkingDir
+    if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+        throw "Allowlisted working directory is missing."
+    }
+
+    $Operation = [string]$Job.operation
+    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "update_stateless")) {
+        throw "Operation is not allowlisted: $Operation"
+    }
+    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged", "update_stateless") -and [string]$Cfg.Mode -ne "script") {
+        throw "Restricted actions are never available to plain Compose projects."
+    }
+
+    $Requested = @($Job.services | ForEach-Object { [string]$_ })
+
+    if ([string]$Cfg.Mode -eq "script") {
+        if ($Operation -eq "update_stateless") {
+            $Reviewed = @("api", "mcp", "playwright-service", "browser-session-service", "playwright-public-proxy-service")
+            if ($Project -cne "firecrawl" -or
+                $Requested.Count -ne 1 -or
+                $Requested[0] -cnotin $Reviewed -or
+                $Requested[0] -cnotin @($Cfg.Services)) {
+                throw "update_stateless requires one explicitly allowlisted Firecrawl stateless service."
+            }
+        }
+        elseif ($Requested.Count -gt 0) {
+            throw "Other script-backed operations cannot accept service selections."
+        }
+        if (-not $Cfg.Operations.ContainsKey($Operation)) {
+            throw "Operation is not configured for $($Project): $Operation"
+        }
+
+        $Script = [string]$Cfg.Script
+        if (-not (Test-Path -LiteralPath $Script -PathType Leaf)) {
+            throw "Allowlisted handler script is missing."
+        }
+
+        $HandlerArgs = @($Cfg.Operations[$Operation] | ForEach-Object { [string]$_ })
+        $ExpectedAction = @{
+            sync_upstream = "sync-upstream"
+            build_only = "build-mcp"
+            deploy_staged = "redeploy-mcp"
+                        update_stateless = "maintain-stateless"
+        }
+        if ($ExpectedAction.ContainsKey($Operation) -and
+            ($HandlerArgs.Count -ne 2 -or $HandlerArgs[0] -cne "-Action" -or
+             $HandlerArgs[1] -cne $ExpectedAction[$Operation])) {
+            throw "Configured $Operation action is invalid."
+        }
+        if ($Operation -eq "update_stateless") {
+            $HandlerArgs += @("-Service", [string]$Requested[0])
+        }
+        # Builds and two Scout gates can exceed the generic 15-minute handler limit.
+        # The bound remains finite and applies to only one selected service.
+        $HandlerTimeout = if ($Operation -eq "update_stateless") { 3600 } else { $ScriptTimeoutSeconds }
+        $HandlerRun = Invoke-ScriptHandler `
+            -JobId ([string]$Job.job_id) `
+            -Project $Project `
+            -Script $Script `
+            -Arguments $HandlerArgs `
+            -WorkingDirectory $WorkingDir `
+            -TimeoutSeconds $HandlerTimeout
+
+        return @{
+            exit_code = $HandlerRun.exit_code
+            output = $HandlerRun.output
+            project = $Project
+            services = @($Cfg.Services)
+            operation = $Operation
+            execution_mode = "script"
+        }
+    }
+
+    if ($Requested.Count -eq 0) { $Requested = @($Cfg.Services) }
+
+    $Allowed = @{}
+    foreach ($Service in @($Cfg.Services)) { $Allowed[[string]$Service] = $true }
+    foreach ($Service in $Requested) {
+        if (-not $Allowed.ContainsKey($Service)) {
+            throw "Service is not allowlisted for $($Project): $Service"
+        }
+    }
+
+    $Args = @("compose")
+    foreach ($File in @($Cfg.Files)) {
+        $FullPath = Join-Path $WorkingDir ([string]$File)
+        if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+            throw "An allowlisted Compose file is missing."
+        }
+        $Args += @("-f", $FullPath)
+    }
+
+    $Args += @("up", "-d")
+    if ($Operation -eq "rebuild_and_redeploy") { $Args += "--build" }
+    $Args += "--force-recreate"
+    $Args += $Requested
+
+    # Docker Compose writes normal progress to stderr. Treat the native
+    # process exit code as authoritative instead of stderr presence.
+    $DockerRun = Invoke-DockerText -Arguments $Args -WorkingDirectory $WorkingDir
+    $Output = [string]$DockerRun.output
+    if ($Output.Length -gt 16000) { $Output = $Output.Substring($Output.Length - 16000) }
+
+    return @{
+        exit_code = [int]$DockerRun.exit_code
+        output = $Output
+        project = $Project
+        services = $Requested
+        operation = $Operation
+        execution_mode = "compose"
+    }
+}
+
+# Read-only fixed-volume telemetry; no caller paths and no mutating operations.
+function Get-HostDiskUsage {
+    $Drives = @()
+    foreach ($Drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($Drive.DriveType -ne [System.IO.DriveType]::Fixed -or -not $Drive.IsReady) { continue }
+            $Total = [int64]$Drive.TotalSize
+            $Available = [int64]$Drive.AvailableFreeSpace
+            if ($Total -le 0 -or $Available -lt 0 -or $Available -gt $Total) { continue }
+            $Letter = ([string]$Drive.Name).Substring(0, 2).ToUpperInvariant()
+            if ($Letter -notmatch '^[A-Z]:$') { continue }
+            $Used = $Total - $Available
+            $Drives += @{
+                volume = $Letter
+                total_bytes = $Total
+                available_bytes = $Available
+                used_bytes = $Used
+                used_percent = [Math]::Round((100.0 * [double]$Used / [double]$Total), 1)
+            }
+        }
+        catch { continue }
+    }
+    return @($Drives | Sort-Object volume)
+}
+
+function Invoke-RunnerSelfTest {
+    $ExpectedCreatedUtc = [DateTime]::SpecifyKind(
+        [DateTime]::new(2026, 10, 1, 2, 39, 48),
+        [DateTimeKind]::Utc
+    )
+    $JsonCreated = ('{"Created":"2026-10-01T02:39:48Z"}' | ConvertFrom-Json).Created
+    foreach ($CreatedValue in @(
+        $JsonCreated,
+        $ExpectedCreatedUtc,
+        [DateTimeOffset]::new($ExpectedCreatedUtc)
+    )) {
+        $ParsedCreatedUtc = ConvertTo-ContainerCreatedUtc -Value $CreatedValue
+        if ($ParsedCreatedUtc -ne $ExpectedCreatedUtc) {
+            throw "Container created timestamp normalization regression."
+        }
+    }
+
+    $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("dockerlocal-runner-selftest-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
+    $TestScript = Join-Path $TestRoot "handler.ps1"
+
+    try {
+        @'
+param(
+    [ValidateSet("Up", "Redeploy", "sync-upstream")]
+    [string]$Action
+)
+Write-Output "ACTION=$Action"
+Write-Host "HOST=$Action"
+'@ | Set-Content -LiteralPath $TestScript -Encoding utf8
+
+        $ZeroArgs = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @() `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$ZeroArgs.exit_code -ne 0) {
+            throw "Zero-argument script invocation regression."
+        }
+
+        $Named = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if (
+            [int]$Named.exit_code -ne 0 -or
+            [string]$Named.output -notmatch 'ACTION=Redeploy' -or
+            [string]$Named.output -notmatch 'HOST=Redeploy' -or
+            [string]$Named.output -match '#< CLIXML'
+        ) {
+            throw "Named-parameter/text-output script invocation regression."
+        }
+
+        # Exercise the generic allowlisted script action end-to-end on a
+        # temporary handler without touching Docker or any real project.
+        $Projects["selftest-upstream"] = @{
+            Mode = "script"
+            WorkingDir = $TestRoot
+            Files = @()
+            Services = @("api")
+            Script = $TestScript
+            Operations = @{ sync_upstream = @("-Action", "sync-upstream") }
+        }
+        try {
+            $Sync = Run-ProjectRedeploy -Job @{
+                job_id = [Guid]::NewGuid().ToString("N")
+                project = "selftest-upstream"
+                operation = "sync_upstream"
+                services = @()
+            }
+            if ([int]$Sync.exit_code -ne 0 -or
+                [string]$Sync.output -notmatch 'ACTION=sync-upstream') {
+                throw "Pinned-upstream script handler regression."
+            }
+            $Projects["selftest-upstream"].Operations.Remove("sync_upstream")
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'Operation is not configured'
+            }
+            if (-not $Denied) { throw "Unconfigured upstream sync was not denied." }
+
+            $Projects["selftest-upstream"].Mode = "compose"
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'never available to plain Compose'
+            }
+            if (-not $Denied) { throw "Compose upstream sync was not denied." }
+        }
+        finally {
+            $Projects.Remove("selftest-upstream")
+        }
+
+        $Positional = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Positional.exit_code -ne 0 -or [string]$Positional.output -notmatch 'ACTION=Redeploy') {
+            throw "Positional script invocation regression."
+        }
+
+        $Invalid = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "DefinitelyInvalid") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Invalid.exit_code -eq 0) {
+            throw "Script failure was incorrectly reported as exit code 0."
+        }
+
+        $InternalErrorScript = Join-Path $TestRoot "handler-internal-error.ps1"
+        @'
+param([switch]$Noop)
+$ErrorActionPreference = "Continue"
+Set-StrictMode -Version Latest
+$null = $DefinitelyUnsetVariable
+'@ | Set-Content -LiteralPath $InternalErrorScript -Encoding utf8
+
+        $InternalError = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $InternalErrorScript `
+            -Arguments @("-Noop") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$InternalError.exit_code -eq 0) {
+            throw "Script-internal PowerShell error was incorrectly reported as exit code 0."
+        }
+
+        $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
+        $OriginRepo = Join-Path $TestRoot "origin.git"
+        $SeedRepo = Join-Path $TestRoot "seed"
+        $TargetRepo = Join-Path $TestRoot "target"
+
+        & $GitExe init --bare $OriginRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test bare init failed." }
+        & $GitExe init -b main $SeedRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test seed init failed." }
+        & $GitExe -C $SeedRepo config user.name "DockerLocal SelfTest"
+        & $GitExe -C $SeedRepo config user.email "selftest@example.invalid"
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "one" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "initial" *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial commit failed." }
+        & $GitExe -C $SeedRepo remote add origin $OriginRepo
+        & $GitExe -C $SeedRepo push -u origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial push failed." }
+        & $GitExe clone --branch main $OriginRepo $TargetRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test clone failed." }
+
+        $SelfTestOrigin = (& $GitExe -C $TargetRepo remote get-url origin | Out-String).Trim()
+        $HostRepositories["selftest-repo"] = @{
+            Path = [IO.Path]::GetFullPath($TargetRepo).TrimEnd('\')
+            OriginUrl = $SelfTestOrigin
+            Branch = "main"
+        }
+
+        $BeforeState = Get-RepositoryState -Alias "selftest-repo"
+        if (-not [bool]$BeforeState.eligible_for_pull) {
+            throw "Clean main repository was not eligible for pull."
+        }
+
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "two" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "update" *> $null
+        & $GitExe -C $SeedRepo push origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test update push failed." }
+
+        $PullState = Invoke-RepositoryPull -Alias "selftest-repo"
+        if (
+            -not [bool]$PullState.changed -or
+            [string]$PullState.before_head -eq [string]$PullState.after_head -or
+            -not [bool]$PullState.clean
+        ) {
+            throw "Fast-forward repository maintenance regression."
+        }
+
+        Set-Content -LiteralPath (Join-Path $TargetRepo "dirty.txt") -Value "dirty" -Encoding ascii
+        $DirtyBlocked = $false
+        try {
+            [void](Invoke-RepositoryPull -Alias "selftest-repo")
+        }
+        catch {
+            if ($_.Exception.Message -eq "Repository has local changes.") {
+                $DirtyBlocked = $true
+            }
+        }
+        if (-not $DirtyBlocked) { throw "Dirty repository pull was not blocked." }
+
+        $HostRepositories.Remove("selftest-repo")
+
+        Write-Host "maintenance runner self-test: PASS"
+    }
+    finally {
+        Remove-Item -LiteralPath $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
+# Long-running Scout/Compose jobs use one bounded child process. The dispatcher
+# stays responsive for read-only host status requests while the child runs.
+# All requests still originate in the existing fixed-schema /control queue.
+function Invoke-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId)
+
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $Job = $null
+    $Action = ""
+    try {
+        if (-not (Test-Path -LiteralPath $ProcessingPath -PathType Leaf)) {
+            throw "Dispatched job is not in processing queue."
+        }
+        $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+        if ([string]$Job.job_id -cne $JobId) { throw "Worker job ID mismatch." }
+        $Action = [string]$Job.action
+        if ($Action -notin @("scout_full_scan", "compose_redeploy")) {
+            throw "Dispatched worker action is not allowlisted."
+        }
+
+        $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        if ($Action -eq "scout_full_scan") {
+            $Result = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+            $Result.started_unix = $Started
+            $Result.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Result
+        }
+        else {
+            $Run = Run-ProjectRedeploy -Job $Job
+            $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status=$Status; started_unix=$Started
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                services=$Run.services; operation=$Run.operation
+                execution_mode=$Run.execution_mode
+                outcome_unknown=([int]$Run.exit_code -eq 124)
+            }
+        }
+    }
+    catch {
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_INTERNAL"
+            $Failure.output = "Dispatched Scout worker failed."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error="Dispatched maintenance operation failed; inspect state before retrying."
+            }
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Project)
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction Stop
+    $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $StartInfo.FileName = $PwshCommand.Source
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.CreateNoWindow = $true
+    foreach ($Argument in @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-WorkerJobId", $JobId)) {
+        [void]$StartInfo.ArgumentList.Add([string]$Argument)
+    }
+    $Child = [Diagnostics.Process]::new()
+    $Child.StartInfo = $StartInfo
+    try {
+        [void]$Child.Start()
+        Write-JsonAtomic -Path $ActiveWorkerFile -Value @{
+            job_id=$JobId; pid=$Child.Id; project=$Project
+            started_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        }
+        return $Child
+    }
+    catch {
+        if (-not $Child.HasExited) {
+            try { $Child.Kill($true) } catch { try { $Child.Kill() } catch {} }
+        }
+        $Child.Dispose()
+        throw
+    }
+}
+
+function Get-ExistingDispatchedWorker {
+    if (-not (Test-Path -LiteralPath $ActiveWorkerFile -PathType Leaf)) { return $null }
+    try {
+        $State = Get-Content -LiteralPath $ActiveWorkerFile -Raw | ConvertFrom-Json
+        $Id = [string]$State.job_id
+        if ($Id -notmatch '^[a-f0-9]{32}$') { return $null }
+        if (-not (Test-Path -LiteralPath (Join-Path $Processing "$Id.json") -PathType Leaf)) { return $null }
+        $Candidate = Get-Process -Id ([int]$State.pid) -ErrorAction SilentlyContinue
+        if ($null -eq $Candidate -or $Candidate.ProcessName -notin @("pwsh", "powershell") -or $Candidate.HasExited) {
+            return $null
+        }
+        # A recycled PID must never be adopted or killed as the previous worker.
+        $ProcessStartUnix = [DateTimeOffset]::new($Candidate.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
+        if ([Math]::Abs($ProcessStartUnix - [int64]$State.started_unix) -gt 30) {
+            return $null
+        }
+        return @{ job_id=$Id; process=$Candidate; started_unix=[int64]$State.started_unix }
+    }
+    catch { return $null }
+}
+
+function Complete-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Reason)
+
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
+        $Action = ""
+        $Job = $null
+        try {
+            $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+            $Action = [string]$Job.action
+        } catch {}
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_RUNNER_RESTART"
+            $Failure.output = "Scout worker terminated without a verified result."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error=$Reason
+            }
+        }
+    }
+    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
+
+if ($SelfTest) {
+    Invoke-RunnerSelfTest
+    exit 0
+}
+
+if ($WorkerJobId) {
+    Invoke-DispatchedWorker -JobId $WorkerJobId
+    exit 0
+}
+
+$Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenanceRunner")
+if (-not $Mutex.WaitOne(0)) { exit 0 }
+
+$ActiveWorker = Get-ExistingDispatchedWorker
+$ActiveLongJobId = if ($ActiveWorker) { [string]$ActiveWorker.job_id } else { "" }
+$ActiveLongProcess = if ($ActiveWorker) { $ActiveWorker.process } else { $null }
+$ActiveLongStarted = if ($ActiveWorker) { [int64]$ActiveWorker.started_unix } else { 0 }
+Recover-OrphanedJobs -SkipJobId $ActiveLongJobId
+if (-not $ActiveWorker) {
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
+Remove-StaleScoutJobDirectories
+Write-RunnerLog "runner started"
+
+try {
+    while ($true) {
+        if ($null -ne $ActiveLongProcess) {
+            $ActiveLongProcess.Refresh()
+            $WorkerExpired = (
+                [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $ActiveLongStarted
+            ) -gt $WorkerTimeoutSeconds
+            if ($WorkerExpired -and -not $ActiveLongProcess.HasExited) {
+                try { $ActiveLongProcess.Kill($true) } catch { try { $ActiveLongProcess.Kill() } catch {} }
+                try { $ActiveLongProcess.WaitForExit(5000) | Out-Null } catch {}
+            }
+            if ($ActiveLongProcess.HasExited) {
+                $Reason = if ($WorkerExpired) {
+                    "Maintenance worker exceeded its time limit; outcome is unverified."
+                } else {
+                    "Maintenance worker exited without writing a verified result."
+                }
+                Complete-DispatchedWorker -JobId $ActiveLongJobId -Reason $Reason
+                $ActiveLongProcess.Dispose()
+                $ActiveLongProcess = $null
+                $ActiveLongJobId = ""
+                $ActiveLongStarted = 0
+            }
+        }
+        Write-JsonAtomic -Path $Heartbeat -Value @{
+            status = "running"
+            pid = $PID
+            updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        }
+
+        foreach ($RequestFile in @(Get-ChildItem -LiteralPath $Requests -Filter "*.json" -File -ErrorAction SilentlyContinue | Sort-Object CreationTimeUtc)) {
+            $JobId = [IO.Path]::GetFileNameWithoutExtension($RequestFile.Name)
+            if ($JobId -notmatch '^[a-f0-9]{32}$') {
+                Remove-Item -LiteralPath $RequestFile.FullName -Force -ErrorAction SilentlyContinue
+                continue
+            }
+
+            $ProcessingPath = Join-Path $Processing $RequestFile.Name
+            $Action = ""
+            $Job = $null
+            $WorkerDispatched = $false
+            try {
+                # Defer only long jobs while a long worker is active; let every
+                # bounded status/control request behind them run without delay.
+                if ($null -ne $ActiveLongProcess) {
+                    $WaitingJob = Get-Content -LiteralPath $RequestFile.FullName -Raw | ConvertFrom-Json
+                    if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy")) {
+                        continue
+                    }
+                }
+                Move-Item -LiteralPath $RequestFile.FullName -Destination $ProcessingPath -Force
+                $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+                if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
+                $Action = [string]$Job.action
+                if ($Action -notin @(
+                    "compose_redeploy",
+                    "compose_desired_state",
+                    "compose_file_state",
+                    "repo_status",
+                    "repo_pull_ff",
+                    "port_registry_status",
+                    "scheduled_task_status",
+                    "scheduled_task_control",
+                    "airsea_coverage_report",
+                    "host_disk_usage",
+                    "scout_full_scan"
+                )) { throw "Action is not allowlisted." }
+
+                Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
+                if ($Action -in @("scout_full_scan", "compose_redeploy")) {
+                    # Image scans are not associated with any Compose project.
+                    # PowerShell Mandatory string parameters reject an empty
+                    # value, so use a fixed telemetry-only name for scan jobs.
+                    $DispatchProject = if ($Action -eq "scout_full_scan") {
+                        "image-scan"
+                    } else { [string]$Job.project }
+                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project $DispatchProject
+                    $ActiveLongJobId = $JobId
+                    $ActiveLongStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    $WorkerDispatched = $true
+                    continue
+                }
+                $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "busy"
+                    pid = $PID
+                    job_id = $JobId
+                    project = [string]$Job.project
+                    updated_unix = $Started
+                }
+
+                if ($Action -eq "compose_desired_state") {
+                    $Desired = Get-ComposeDesiredState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        projects=$Desired.projects; errors=$Desired.errors
+                    }
+                }
+                elseif ($Action -eq "compose_file_state") {
+                    $FileState = Get-ComposeFileState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        containers=$FileState.containers; drift=$FileState.drift; errors=$FileState.errors
+                    }
+                }
+                elseif ($Action -eq "repo_status") {
+                    $State = Get-RepositoryState -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        repo=$State.repo; branch=$State.branch; head=$State.head
+                        clean=$State.clean; conflicts=$State.conflicts
+                        origin_ok=$State.origin_ok; eligible_for_pull=$State.eligible_for_pull
+                    }
+                }
+                elseif ($Action -eq "repo_pull_ff") {
+                    $Run = Invoke-RepositoryPull -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; repo=$Run.repo; branch=$Run.branch
+                        before_head=$Run.before_head; after_head=$Run.after_head
+                        changed=$Run.changed; clean=$Run.clean
+                    }
+                }
+                elseif ($Action -eq "port_registry_status") {
+                    $State = Get-McpPortRegistryStatus
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        version=$State.version; range_start=$State.range_start; range_end=$State.range_end
+                        services=$State.services; docker_reserved_ports=$State.docker_reserved_ports; unregistered_listeners=$State.unregistered_listeners
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_status") {
+                    $State = Get-AllowlistedScheduledTaskState -Alias ([string]$Job.task)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        task=$State.task; state=$State.state
+                        principal=$State.principal; run_level=$State.run_level
+                        last_run_time=$State.last_run_time; last_task_result=$State.last_task_result
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_control") {
+                    $Run = Invoke-AllowlistedScheduledTaskControl -Alias ([string]$Job.task) -Operation ([string]$Job.operation)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; task=$Run.task; operation=$Run.operation
+                        before_state=$Run.before_state; after_state=$Run.after_state
+                        last_task_result=$Run.last_task_result
+                    }
+                }
+                elseif ($Action -eq "airsea_coverage_report") {
+                    # Explicitly opt-in by the existing local-only scheduled-task
+                    # allowlist. No caller paths, SQL or arbitrary host commands.
+                    if (-not $HostScheduledTasks.ContainsKey("MarketObservationPilotShadow")) {
+                        throw "AIRSEA_REPORT_NOT_ALLOWLISTED"
+                    }
+                    $ReportScript = Join-Path $Root "airsea-coverage-report.py"
+                    if (-not (Test-Path -LiteralPath $ReportScript -PathType Leaf)) {
+                        throw "AIRSEA_REPORT_HELPER_NOT_INSTALLED"
+                    }
+                    $PythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
+                    if ($null -eq $PythonCommand) { throw "AIRSEA_PYTHON_NOT_AVAILABLE" }
+                    $RawReport = (& $PythonCommand.Source -I -B $ReportScript 2>$null | Out-String).Trim()
+                    if ($LASTEXITCODE -ne 0) { throw "AIRSEA_REPORT_NOT_AVAILABLE" }
+                    try {
+                        $Report = $RawReport | ConvertFrom-Json -ErrorAction Stop
+                    } catch {
+                        throw "AIRSEA_REPORT_INVALID_JSON"
+                    }
+                    if ($null -eq $Report -or [string]$Report.status -cne "succeeded") {
+                        throw "AIRSEA_REPORT_UNAVAILABLE"
+                    }
+                    # The Python helper has an exact immutable query surface
+                    # and cannot return raw observation tables. The server
+                    # performs independent strict field whitelisting.
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        report=$Report
+                    }
+                }
+                elseif ($Action -eq "host_disk_usage") {
+                    # No client-supplied disk paths. Return aggregate capacity only.
+                    $Drives = @(Get-HostDiskUsage)
+                    $MeasurementStatus = if ($Drives.Count -gt 0) { "measured" } else { "unknown" }
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        measurement_status=$MeasurementStatus
+                        measured_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        drives=$Drives
+                    }
+                }
+                elseif ($Action -eq "scout_full_scan") {
+                    $Run = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+                    $Run.started_unix = $Started
+                    $Run.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Run
+                }
+                else {
+                    $Run = Run-ProjectRedeploy -Job $Job
+                    $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status=$Status; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                        services=$Run.services; operation=$Run.operation
+                        execution_mode=$Run.execution_mode
+                    }
+                }
+            }
+            catch {
+                Write-RunnerLog "job $JobId failed: $($_.Exception.Message)"
+                if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+                    $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+                    $Failure.status = "failed"
+                    $Failure.scan_complete = $false
+                    $Failure.error_code = "SCAN_FAILED_INTERNAL"
+                    $Failure.output = $_.Exception.Message
+                    $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Failure
+                }
+                else {
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="failed"
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        error=$_.Exception.Message
+                    }
+                }
+            }
+            finally {
+                if (-not $WorkerDispatched) {
+                    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+                }
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "running"
+                    pid = $PID
+                    updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                }
+            }
+        }
+
+        Get-ChildItem -LiteralPath $Results -Filter "*.json" -File -ErrorAction SilentlyContinue |
+            Where-Object LastWriteTimeUtc -lt (Get-Date).ToUniversalTime().AddDays(-7) |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+        Start-Sleep -Seconds 2
+    }
+}
+finally {
+    try { $Mutex.ReleaseMutex() } catch {}
+    $Mutex.Dispose()
+} -or
+            $Version -cnotmatch '^[A-Za-z0-9._+:-]{1,64}
+    param([AllowEmptyString()][string]$JsonText)
+
+    try {
+        $Report = $JsonText | ConvertFrom-Json -Depth 100
+    }
+    catch {
+        throw "Docker Scout returned invalid GitLab JSON."
+    }
+
+    $Vulnerabilities = @()
+    if ($null -ne $Report.vulnerabilities) {
+        $Vulnerabilities = @($Report.vulnerabilities)
+    }
+
+    $Counts = [ordered]@{}
+    $UniqueCves = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Counts[$Severity] = 0
+        $UniqueCves[$Severity] = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+    }
+
+    foreach ($Vulnerability in $Vulnerabilities) {
+        $Severity = ([string]$Vulnerability.severity).ToLowerInvariant()
+        if ($Severity -notin $ScoutSeverities) {
+            $Severity = "unspecified"
+        }
+        $Counts[$Severity]++
+
+        $Cve = [string]$Vulnerability.cve
+        if ([string]::IsNullOrWhiteSpace($Cve)) {
+            foreach ($Identifier in @($Vulnerability.identifiers)) {
+                $Type = ([string]$Identifier.type).ToLowerInvariant()
+                $Value = [string]$Identifier.value
+                if ($Type -eq "cve" -and -not [string]::IsNullOrWhiteSpace($Value)) {
+                    $Cve = $Value
+                    break
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Cve)) {
+            [void]$UniqueCves[$Severity].Add($Cve)
+        }
+    }
+
+    $UniqueCounts = [ordered]@{}
+    $CveIds = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Sorted = @($UniqueCves[$Severity] | Sort-Object)
+        $UniqueCounts[$Severity] = $Sorted.Count
+        $CveIds[$Severity] = $Sorted
+    }
+
+    return [ordered]@{
+        vulnerability_counts = $Counts
+        unique_cve_counts = $UniqueCounts
+        cve_ids = $CveIds
+        detected_vulnerabilities_total = $Vulnerabilities.Count
+    }
+}
+
+function Remove-ScoutJobDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $true
+    }
+
+    foreach ($Attempt in 1..15) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
+}
+
+function New-ScoutFullScanResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [AllowEmptyString()][string]$Image,
+        [object[]]$Severity = @(),
+        [bool]$OnlyFixed = $false,
+        [bool]$CisaKev = $false
+    )
+
+    return [ordered]@{
+        job_id = $JobId
+        status = "failed"
+        scan_complete = $false
+        image = $Image
+        image_id = $null
+        image_digest = $null
+        image_size_bytes = $null
+        severity = @($Severity)
+        only_fixed = $OnlyFixed
+        cisa_kev = $CisaKev
+        output = ""
+        error_code = $null
+        cleanup_complete = $null
+    }
+}
+
+function Remove-StaleScoutJobDirectories {
+    $Cutoff = (Get-Date).ToUniversalTime().AddHours(-24)
+    foreach ($Directory in @(Get-ChildItem -LiteralPath $ScoutJobsRoot -Directory -ErrorAction SilentlyContinue)) {
+        if (
+            $Directory.Name -match '^[a-f0-9]{32}$' -and
+            $Directory.LastWriteTimeUtc -lt $Cutoff
+        ) {
+            Remove-Item -LiteralPath $Directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Write-RunnerLog "removed stale scout job directory: $($Directory.Name)"
+        }
+    }
+}
+
+function Get-LocalScoutImageMetadata {
+    param([Parameter(Mandatory)][string]$Image)
+
+    $Inspect = Invoke-DockerText -Arguments @(
+        "image", "inspect", "--format", "{{json .}}", $Image
+    ) -WorkingDirectory $Root
+
+    if ([int]$Inspect.exit_code -ne 0) {
+        $Code = if ([string]$Inspect.output -match '(?i)(no such image|not found)') {
+            "IMAGE_NOT_FOUND"
+        }
+        else {
+            "SCAN_FAILED_DOCKER"
+        }
+        return @{
+            ok = $false
+            error_code = $Code
+            output = [string]$Inspect.output
+        }
+    }
+
+    try {
+        $Metadata = ([string]$Inspect.output).Trim() | ConvertFrom-Json
+        $ImageId = [string]$Metadata.Id
+        $ImageSize = [int64]$Metadata.Size
+        $Digest = $null
+        if ($null -ne $Metadata.RepoDigests) {
+            $Digest = @($Metadata.RepoDigests | ForEach-Object { [string]$_ } | Where-Object { $_ }) |
+                Select-Object -First 1
+        }
+
+        if (
+            $ImageId -notmatch '^sha256:[a-fA-F0-9]{64}$' -or
+            $ImageSize -lt 0
+        ) {
+            throw "Docker image inspect returned invalid metadata."
+        }
+
+        return @{
+            ok = $true
+            image_id = $ImageId
+            image_digest = $Digest
+            image_size_bytes = $ImageSize
+        }
+    }
+    catch {
+        return @{
+            ok = $false
+            error_code = "SCAN_FAILED_DOCKER"
+            output = "Unable to parse local image metadata."
+        }
+    }
+}
+
+function Invoke-ScoutFullScan {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)]$Job
+    )
+
+    $RawImage = [string]$Job.image
+    $RawSeverity = @($Job.severity)
+    $OnlyFixed = if ($Job.only_fixed -is [bool]) { [bool]$Job.only_fixed } else { $false }
+    $CisaKev = if ($Job.cisa_kev -is [bool]) { [bool]$Job.cisa_kev } else { $false }
+    $Result = New-ScoutFullScanResult -JobId $JobId -Image $RawImage -Severity $RawSeverity -OnlyFixed $OnlyFixed -CisaKev $CisaKev
+
+    $AllowedProperties = @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )
+    foreach ($Property in $Job.PSObject.Properties.Name) {
+        if ($Property -notin $AllowedProperties) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unexpected scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    foreach ($RequiredProperty in @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )) {
+        if ($null -eq $Job.PSObject.Properties[$RequiredProperty]) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Missing scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    if (
+        $RawImage -notmatch $ScoutImageRefPattern -or
+        $Job.severity -is [string] -or
+        -not ($Job.only_fixed -is [bool]) -or
+        -not ($Job.cisa_kev -is [bool])
+    ) {
+        $Result.error_code = "INVALID_REQUEST"
+        $Result.output = "Invalid scout_full_scan request."
+        return $Result
+    }
+
+    $Severity = @()
+    foreach ($Item in $RawSeverity) {
+        $Value = ([string]$Item).ToLowerInvariant()
+        if ($Value -notin $ScoutSeverities) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unsupported Scout severity."
+            return $Result
+        }
+        if ($Value -notin $Severity) {
+            $Severity += $Value
+        }
+    }
+    $Result.severity = @($Severity)
+
+    $Metadata = Get-LocalScoutImageMetadata -Image $RawImage
+    if (-not [bool]$Metadata.ok) {
+        $Result.error_code = [string]$Metadata.error_code
+        $Result.output = Get-BoundedScoutOutput -Text ([string]$Metadata.output)
+        return $Result
+    }
+
+    $Result.image_id = [string]$Metadata.image_id
+    $Result.image_digest = $Metadata.image_digest
+    $Result.image_size_bytes = [int64]$Metadata.image_size_bytes
+
+    $DriveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($ScoutJobsRoot))
+    $AvailableBytes = [int64]([IO.DriveInfo]::new($DriveRoot)).AvailableFreeSpace
+    $RequiredBytes = [Math]::Max(
+        [int64](4GB + (2 * [int64]$Result.image_size_bytes)),
+        [int64]8GB
+    )
+    $Result.available_disk_bytes = $AvailableBytes
+    $Result.required_disk_bytes = $RequiredBytes
+
+    if ($AvailableBytes -lt $RequiredBytes) {
+        $Result.error_code = "INSUFFICIENT_DISK"
+        $Result.output = "Insufficient free disk for Docker Scout full scan."
+        return $Result
+    }
+
+    $ScanMutex = [Threading.Mutex]::new($false, "Local\DockerLocalScoutFullScan")
+    $LockTaken = $false
+    $JobDirectory = Join-Path $ScoutJobsRoot $JobId
+    $Process = $null
+    $ScoutUser = $null
+    $ScoutPassword = $null
+
+    try {
+        $LockTaken = $ScanMutex.WaitOne(0)
+        if (-not $LockTaken) {
+            $Result.error_code = "SCAN_FAILED_RESOURCE_LIMIT"
+            $Result.output = "Another Docker Scout full scan is already running."
+            return $Result
+        }
+
+        New-Item -ItemType Directory -Force -Path $JobDirectory | Out-Null
+        $CacheDirectory = Join-Path $JobDirectory "cache"
+        $TempDirectory = Join-Path $JobDirectory "tmp"
+        New-Item -ItemType Directory -Force -Path $CacheDirectory, $TempDirectory | Out-Null
+
+        $ScoutUser = Get-DpapiSecretValue -Path $ScoutUserDpapi -Label "Docker Scout Hub user"
+        $ScoutPassword = Get-DpapiSecretValue -Path $ScoutPasswordDpapi -Label "Docker Scout Hub password"
+
+        $Arguments = @("scout", "cves", "--format", "gitlab")
+        if ($Severity.Count -gt 0) {
+            $Arguments += @("--only-severity", ($Severity -join ","))
+        }
+        if ([bool]$Job.only_fixed) {
+            $Arguments += "--only-fixed"
+        }
+        if ([bool]$Job.cisa_kev) {
+            $Arguments += "--only-cisa-kev"
+        }
+        $Arguments += "local://$RawImage"
+
+        $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $StartInfo.FileName = $Docker
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+        $StartInfo.CreateNoWindow = $true
+        $StartInfo.WorkingDirectory = $JobDirectory
+        foreach ($Argument in $Arguments) {
+            [void]$StartInfo.ArgumentList.Add([string]$Argument)
+        }
+
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_USER")
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_PASSWORD")
+        $StartInfo.Environment["DOCKER_SCOUT_CACHE_DIR"] = $CacheDirectory
+        $StartInfo.Environment["TEMP"] = $TempDirectory
+        $StartInfo.Environment["TMP"] = $TempDirectory
+        $StartInfo.Environment["NO_COLOR"] = "1"
+        $StartInfo.Environment["DOCKER_SCOUT_NEW_VERSION_WARN"] = "false"
+        if (-not [string]::IsNullOrWhiteSpace($ScoutUser)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_USER"] = $ScoutUser
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ScoutPassword)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_PASSWORD"] = $ScoutPassword
+        }
+
+        $Process = [Diagnostics.Process]::new()
+        $Process.StartInfo = $StartInfo
+        [void]$Process.Start()
+
+        $StdOutTask = $Process.StandardOutput.ReadToEndAsync()
+        $StdErrTask = $Process.StandardError.ReadToEndAsync()
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($ScoutTimeoutSeconds)
+
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = "scout_full_scan"
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            }
+            Start-Sleep -Seconds 1
+            $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            $StdOut = $StdOutTask.GetAwaiter().GetResult()
+            $StdErr = $StdErrTask.GetAwaiter().GetResult()
+            $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+            $Result.status = "timeout"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_TIMEOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Process.WaitForExit()
+        $StdOut = $StdOutTask.GetAwaiter().GetResult()
+        $StdErr = $StdErrTask.GetAwaiter().GetResult()
+        $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+        $Result.exit_code = [int]$Process.ExitCode
+
+        if ([int]$Process.ExitCode -ne 0 -and
+            $Combined -match 'internal/format/sbom/gitlab|gitlab\\.go:207') {
+            # Scout can panic inside its GitLab formatter *after* completing
+            # vulnerability detection. Diagnostic fallback is read-only.
+            # It never returns a successful scan or waives the CVE gate.
+            $OriginalFailure = [int]$Process.ExitCode
+            $Process.Dispose()
+            $Process = $null
+            $StartInfo.ArgumentList[3] = "markdown"
+            $Diagnostic = [Diagnostics.Process]::new()
+            $Diagnostic.StartInfo = $StartInfo
+            $Process = $Diagnostic
+            [void]$Process.Start()
+            $MarkdownOutTask = $Process.StandardOutput.ReadToEndAsync()
+            $MarkdownErrTask = $Process.StandardError.ReadToEndAsync()
+            while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+                Start-Sleep -Seconds 1
+                $Process.Refresh()
+            }
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+                try { $Process.WaitForExit(5000) | Out-Null } catch {}
+                $Result.error_code = "SCAN_TIMEOUT"
+                $Result.output = "Scout GitLab formatter crashed; Markdown diagnostic exceeded scan timeout."
+                return $Result
+            }
+            $Process.WaitForExit()
+            $MarkdownOut = [string]$MarkdownOutTask.GetAwaiter().GetResult()
+            $MarkdownErr = [string]$MarkdownErrTask.GetAwaiter().GetResult()
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_FORMATTER"
+            $Result.output = Get-BoundedScoutOutput -Text (
+                "GitLab formatter crashed (exit $OriginalFailure). Markdown diagnostics only; scan NOT approved." +
+                [Environment]::NewLine + $MarkdownOut + [Environment]::NewLine + $MarkdownErr
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        if ([int]$Process.ExitCode -ne 0) {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_SCOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        try {
+            $Structured = ConvertFrom-ScoutGitLabReport -JsonText $StdOut
+        }
+        catch {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_PARSE"
+            $Result.output = Get-BoundedScoutOutput -Text (
+                @($_.Exception.Message, $StdErr) -join [Environment]::NewLine
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Result.vulnerability_counts = $Structured.vulnerability_counts
+        $Result.unique_cve_counts = $Structured.unique_cve_counts
+        $Result.cve_ids = $Structured.cve_ids
+        $Result.detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        if ([bool]$Job.only_fixed) {
+            $Result.fixable_vulnerability_counts = $Structured.vulnerability_counts
+            $Result.fixable_unique_cve_counts = $Structured.unique_cve_counts
+        }
+
+        $Summary = [ordered]@{
+            vulnerability_counts = $Structured.vulnerability_counts
+            unique_cve_counts = $Structured.unique_cve_counts
+            cve_ids = $Structured.cve_ids
+            detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        } | ConvertTo-Json -Depth 8 -Compress
+        $Result.output = Get-BoundedScoutOutput -Text $Summary -RedactValues @($ScoutUser, $ScoutPassword)
+        $Result.status = "succeeded"
+        $Result.scan_complete = $true
+        $Result.error_code = $null
+        return $Result
+    }
+    catch {
+        $Result.status = "failed"
+        $Result.scan_complete = $false
+        $Result.error_code = "SCAN_FAILED_INTERNAL"
+        $Result.output = Get-BoundedScoutOutput -Text $_.Exception.Message -RedactValues @($ScoutUser, $ScoutPassword)
+        return $Result
+    }
+    finally {
+        $ScoutUser = $null
+        $ScoutPassword = $null
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
+        $Result.cleanup_complete = Remove-ScoutJobDirectory -Path $JobDirectory
+        if ($LockTaken) {
+            try { $ScanMutex.ReleaseMutex() } catch {}
+        }
+        $ScanMutex.Dispose()
+    }
+}
+
+function Invoke-ScriptHandler {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Script,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [int]$TimeoutSeconds = $ScriptTimeoutSeconds
+    )
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if (-not $PwshCommand) {
+        throw "PowerShell 7 (pwsh.exe) is required for script-backed maintenance projects."
+    }
+
+    $Command = "& '" + $Script.Replace("'", "''") + "'"
+    foreach ($Argument in $Arguments) {
+        $ArgumentText = [string]$Argument
+        if ($ArgumentText -match '^-[A-Za-z][A-Za-z0-9-]*$') {
+            # Preserve allowlisted PowerShell parameter tokens such as -Action.
+            $Command += " " + $ArgumentText
+        }
+        else {
+            $Command += " '" + $ArgumentText.Replace("'", "''") + "'"
+        }
+    }
+
+    # -EncodedCommand does not reliably turn every script-level terminating error
+    # into a non-zero process exit code on its own. Make process semantics explicit.
+    $InvocationLines = @(
+        '$ErrorActionPreference = ''Stop'''
+        '$Error.Clear()'
+        'try {'
+        "    $Command"
+        '    if (-not $? -or $Error.Count -gt 0) { exit 1 }'
+        '    exit 0'
+        '}'
+        'catch {'
+        '    [Console]::Error.WriteLine(($_ | Out-String))'
+        '    exit 1'
+        '}'
+    )
+    $Invocation = $InvocationLines -join [Environment]::NewLine
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Invocation))
+
+    $StdOutPath = Join-Path $Control ("maintenance-{0}.out.log" -f $JobId)
+    $StdErrPath = Join-Path $Control ("maintenance-{0}.err.log" -f $JobId)
+    Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+
+    $Process = $null
+    try {
+        $Process = Start-Process `
+            -FilePath $PwshCommand.Source `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-EncodedCommand", $EncodedCommand) `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $StdOutPath `
+            -RedirectStandardError $StdErrPath `
+            -PassThru
+
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = $Project
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            }
+            Start-Sleep -Seconds 2
+            $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            return @{ exit_code = 124; output = "Script-backed maintenance timed out; completion is unverified." }
+        }
+
+        $ExitCode = [int]$Process.ExitCode
+        $StdOut = if (Test-Path -LiteralPath $StdOutPath) { Get-Content -LiteralPath $StdOutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $StdErr = if (Test-Path -LiteralPath $StdErrPath) { Get-Content -LiteralPath $StdErrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $Output = @($StdOut, $StdErr) -join [Environment]::NewLine
+
+        if ($Output.Length -gt 16000) {
+            $Output = $Output.Substring($Output.Length - 16000)
+        }
+
+        return @{ exit_code = $ExitCode; output = $Output }
+    }
+    finally {
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
+        Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-DockerText {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    Push-Location $WorkingDirectory
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $Output = (& $Docker @Arguments 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+        Pop-Location
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Invoke-GitText {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $Git = (Get-Command git.exe -ErrorAction Stop).Source
+    $EmptyHooks = Join-Path $Root "empty-git-hooks"
+    New-Item -ItemType Directory -Force -Path $EmptyHooks | Out-Null
+
+    $PreviousTerminalPrompt = $env:GIT_TERMINAL_PROMPT
+    $PreviousGcmInteractive = $env:GCM_INTERACTIVE
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $env:GIT_TERMINAL_PROMPT = "0"
+        $env:GCM_INTERACTIVE = "Never"
+        $ErrorActionPreference = "Continue"
+        $FixedArgs = @(
+            "-c", "core.hooksPath=$EmptyHooks",
+            "-c", "submodule.recurse=false",
+            "-C", $RepositoryPath
+        ) + $Arguments
+        $Output = (& $Git @FixedArgs 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:GIT_TERMINAL_PROMPT = $PreviousTerminalPrompt
+        $env:GCM_INTERACTIVE = $PreviousGcmInteractive
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Get-AllowlistedRepository {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid repository alias."
+    }
+    if (-not $HostRepositories.ContainsKey($Alias)) {
+        throw "Repository alias is not allowlisted."
+    }
+    return $HostRepositories[$Alias]
+}
+
+function Get-RepositoryState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $RepoPath = [string]$Cfg.Path
+    if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
+        throw "Allowlisted repository path is missing."
+    }
+
+    $TopLevel = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "--show-toplevel")
+    if ([int]$TopLevel.exit_code -ne 0) { throw "Allowlisted path is not a Git repository." }
+
+    $ExpectedRoot = [IO.Path]::GetFullPath($RepoPath).TrimEnd('\')
+    $ActualRoot = [IO.Path]::GetFullPath(([string]$TopLevel.output).Trim()).TrimEnd('\')
+    if (-not [string]::Equals($ExpectedRoot, $ActualRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Allowlisted path is not the repository root."
+    }
+
+    $Head = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "HEAD")
+    if ([int]$Head.exit_code -ne 0) { throw "Unable to read repository HEAD." }
+
+    $Branch = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("symbolic-ref", "--quiet", "--short", "HEAD")
+    $BranchName = if ([int]$Branch.exit_code -eq 0) { ([string]$Branch.output).Trim() } else { "" }
+
+    $Status = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("status", "--porcelain=v1", "--untracked-files=normal")
+    if ([int]$Status.exit_code -ne 0) { throw "Unable to read repository status." }
+
+    $Conflicts = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("ls-files", "-u")
+    if ([int]$Conflicts.exit_code -ne 0) { throw "Unable to inspect repository conflicts." }
+
+    $Origin = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("remote", "get-url", "origin")
+    if ([int]$Origin.exit_code -ne 0) { throw "Unable to read origin URL." }
+
+    $Clean = [string]::IsNullOrWhiteSpace([string]$Status.output)
+    $HasConflicts = -not [string]::IsNullOrWhiteSpace([string]$Conflicts.output)
+    $OriginOk = [string]::Equals(
+        ([string]$Origin.output).Trim(),
+        [string]$Cfg.OriginUrl,
+        [StringComparison]::Ordinal
+    )
+    $BranchOk = $BranchName -eq "main"
+
+    return @{
+        repo = $Alias
+        branch = $BranchName
+        head = ([string]$Head.output).Trim()
+        clean = $Clean
+        conflicts = $HasConflicts
+        origin_ok = $OriginOk
+        eligible_for_pull = ($BranchOk -and $Clean -and -not $HasConflicts -and $OriginOk)
+    }
+}
+
+function Invoke-RepositoryPull {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $Before = Get-RepositoryState -Alias $Alias
+    if ($Before.branch -ne "main") { throw "Repository is not on main." }
+    if (-not [bool]$Before.clean) { throw "Repository has local changes." }
+    if ([bool]$Before.conflicts) { throw "Repository has unresolved conflicts." }
+    if (-not [bool]$Before.origin_ok) { throw "Repository origin does not match the allowlist." }
+
+    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "--no-rebase", "origin", "main")
+    if ([int]$Pull.exit_code -ne 0) {
+        throw "git pull --ff-only failed with exit code $([int]$Pull.exit_code)."
+    }
+
+    $After = Get-RepositoryState -Alias $Alias
+    if (
+        $After.branch -ne "main" -or
+        -not [bool]$After.clean -or
+        [bool]$After.conflicts -or
+        -not [bool]$After.origin_ok
+    ) {
+        throw "Repository verification failed after pull."
+    }
+
+    return @{
+        action = "repo_pull_ff"
+        repo = $Alias
+        branch = "main"
+        before_head = [string]$Before.head
+        after_head = [string]$After.head
+        changed = ([string]$Before.head -ne [string]$After.head)
+        clean = [bool]$After.clean
+    }
+}
+
+function Get-AllowlistedScheduledTask {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid Scheduled Task alias."
+    }
+    if (-not $HostScheduledTasks.ContainsKey($Alias)) {
+        throw "Scheduled Task alias is not allowlisted."
+    }
+
+    $Cfg = $HostScheduledTasks[$Alias]
+    $Matches = @(
+        Get-ScheduledTask -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop |
+            Where-Object {
+                [string]::Equals($_.TaskName, [string]$Cfg.TaskName, [StringComparison]::Ordinal) -and
+                [string]::Equals($_.TaskPath, [string]$Cfg.TaskPath, [StringComparison]::Ordinal)
+            }
+    )
+    if ($Matches.Count -ne 1) { throw "Allowlisted Scheduled Task was not resolved exactly once." }
+
+    return @{ Config = $Cfg; Task = $Matches[0] }
+}
+
+function Get-AllowlistedScheduledTaskState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Cfg = $Resolved.Config
+    $Task = $Resolved.Task
+    $Info = Get-ScheduledTaskInfo -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop
+
+    $LastRunTime = $null
+    if ($Info.LastRunTime -and $Info.LastRunTime -gt [DateTime]::MinValue) {
+        $LastRunTime = $Info.LastRunTime.ToString("o")
+    }
+
+    return @{
+        task = $Alias
+        state = [string]$Task.State
+        principal = [string]$Task.Principal.UserId
+        run_level = [string]$Task.Principal.RunLevel
+        last_run_time = $LastRunTime
+        last_task_result = [uint32]$Info.LastTaskResult
+    }
+}
+
+function Wait-ScheduledTaskNotRunning {
+    param([Parameter(Mandatory)][string]$Alias,[int]$TimeoutSeconds = 10)
+    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $State = Get-AllowlistedScheduledTaskState -Alias $Alias
+        if ([string]$State.state -ne "Running") { return $State }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $Deadline)
+    throw "Scheduled Task did not stop within the bounded wait."
+}
+
+function Invoke-AllowlistedScheduledTaskControl {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][ValidateSet("start", "stop", "restart")][string]$Operation
+    )
+
+    $Before = Get-AllowlistedScheduledTaskState -Alias $Alias
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Task = $Resolved.Task
+
+    if ($Operation -eq "start") {
+        if ([string]$Before.state -ne "Running") {
+            $Task | Start-ScheduledTask
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    elseif ($Operation -eq "stop") {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+    }
+    else {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+        $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+        $Resolved.Task | Start-ScheduledTask
+        Start-Sleep -Milliseconds 300
+    }
+
+    $After = Get-AllowlistedScheduledTaskState -Alias $Alias
+    return @{
+        action = "scheduled_task_control"
+        task = $Alias
+        operation = $Operation
+        before_state = [string]$Before.state
+        after_state = [string]$After.state
+        last_task_result = [uint32]$After.last_task_result
+    }
+}
+
+function Get-ComposeFileState {
+    $Containers = @()
+    $Drift = @()
+    $Errors = @()
+    # Compose container labels can point at a subdirectory while the reviewed
+    # allowlisted deployment uses a different project directory and .env file.
+    # Only use this fallback for exact matching Compose-file sets, and only
+    # when the label-based hash command itself failed. Never guess a match.
+    $AllowlistedDesired = $null
+
+    $Ids = @(& $Docker ps -aq)
+    if ($LASTEXITCODE -ne 0) {
+        return @{
+            containers = @()
+            drift = @()
+            errors = @(@{ error = "docker_ps_failed" })
+        }
+    }
+
+    foreach ($Id in $Ids) {
+        if ([string]::IsNullOrWhiteSpace([string]$Id)) { continue }
+
+        $InspectText = (& $Docker inspect ([string]$Id) 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($InspectText)) {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_failed" }
+            continue
+        }
+
+        try {
+            $Inspect = @($InspectText | ConvertFrom-Json)[0]
+        }
+        catch {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_invalid_json" }
+            continue
+        }
+
+        $Labels = $Inspect.Config.Labels
+        if ($null -eq $Labels) { continue }
+
+        $ProjectProp = $Labels.PSObject.Properties["com.docker.compose.project"]
+        $ServiceProp = $Labels.PSObject.Properties["com.docker.compose.service"]
+        $FilesProp = $Labels.PSObject.Properties["com.docker.compose.project.config_files"]
+        if ($null -eq $ProjectProp -or $null -eq $ServiceProp -or $null -eq $FilesProp) {
+            continue
+        }
+
+        $Project = [string]$ProjectProp.Value
+        $Service = [string]$ServiceProp.Value
+        $FilesText = [string]$FilesProp.Value
+        if ([string]::IsNullOrWhiteSpace($Project) -or [string]::IsNullOrWhiteSpace($FilesText)) {
+            continue
+        }
+
+        $WorkingDirProp = $Labels.PSObject.Properties["com.docker.compose.project.working_dir"]
+        $ConfigHashProp = $Labels.PSObject.Properties["com.docker.compose.config-hash"]
+        $WorkingDir = if ($null -ne $WorkingDirProp) { [string]$WorkingDirProp.Value } else { "" }
+        $RunningConfigHash = if ($null -ne $ConfigHashProp) { [string]$ConfigHashProp.Value } else { "" }
+
+        $CreatedUtc = $null
+        $CreatedDisplay = $null
+        try {
+            $CreatedUtc = ConvertTo-ContainerCreatedUtc -Value $Inspect.Created
+            $CreatedDisplay = $CreatedUtc.ToString(
+                "o",
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        catch {
+            $Errors += @{ project = $Project; service = $Service; error = "container_created_time_invalid" }
+        }
+
+        $ContainerFiles = @()
+        $ResolvedFiles = @()
+        $HasMissing = $false
+        $HasNewer = $false
+
+        foreach ($PathText in @($FilesText -split ",")) {
+            $Path = ([string]$PathText).Trim()
+            if ([string]::IsNullOrWhiteSpace($Path)) { continue }
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                $Entry = @{
+                    project = $Project
+                    service = $Service
+                    container = ([string]$Inspect.Name).TrimStart("/")
+                    compose_file = $Path
+                    status = "missing"
+                    container_created_at = $CreatedDisplay
+                    compose_file_modified_at = $null
+                }
+                $ContainerFiles += $Entry
+                $HasMissing = $true
+                continue
+            }
+
+            $File = Get-Item -LiteralPath $Path
+            $ResolvedFiles += $File.FullName
+            $ModifiedUtc = $File.LastWriteTimeUtc
+            $IsNewer = $false
+            if ($null -ne $CreatedUtc) {
+                $IsNewer = $ModifiedUtc -gt $CreatedUtc.AddSeconds(1)
+            }
+
+            $Entry = @{
+                project = $Project
+                service = $Service
+                container = ([string]$Inspect.Name).TrimStart("/")
+                compose_file = $File.FullName
+                status = if ($IsNewer) { "newer_than_container" } else { "ok" }
+                container_created_at = $CreatedDisplay
+                compose_file_modified_at = $ModifiedUtc.ToString("o")
+            }
+            $ContainerFiles += $Entry
+            if ($IsNewer) { $HasNewer = $true }
+        }
+
+        # File mtime is only a heuristic. If a Compose file is newer than the
+        # container, verify the rendered service config against the immutable
+        # config hash embedded in the container. Matching hashes are
+        # informational mtime-only changes, not deployment drift.
+        # If verification is impossible, keep the warning and explain WHY.
+        # Do not include Docker stderr, Compose variable values, or secrets.
+        $HashVerificationReason = $null
+        $HashCommandExitCode = $null
+        if ($HasNewer) {
+            if ($HasMissing) {
+                $HashVerificationReason = "compose_file_missing"
+            }
+            elseif ($ResolvedFiles.Count -eq 0) {
+                $HashVerificationReason = "compose_files_unresolved"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($WorkingDir)) {
+                $HashVerificationReason = "working_directory_label_missing"
+            }
+            elseif (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+                $HashVerificationReason = "working_directory_unavailable"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($RunningConfigHash)) {
+                $HashVerificationReason = "running_config_hash_label_missing"
+            }
+            else {
+                $HashVerificationReason = "verification_not_completed"
+            }
+        }
+        if (
+            $HasNewer -and
+            -not $HasMissing -and
+            $ResolvedFiles.Count -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($WorkingDir) -and
+            (Test-Path -LiteralPath $WorkingDir -PathType Container) -and
+            -not [string]::IsNullOrWhiteSpace($RunningConfigHash)
+        ) {
+            $HashArgs = @("compose")
+            foreach ($ResolvedFile in $ResolvedFiles) {
+                $HashArgs += @("-f", $ResolvedFile)
+            }
+
+            $HashRun = $null
+            try {
+                $HashRun = Invoke-DockerText -Arguments ($HashArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            }
+            catch {
+                $HashVerificationReason = "compose_hash_invocation_failed"
+            }
+            if ($null -ne $HashRun -and [int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                $DesiredConfigHash = if ($Tokens.Count -gt 0) { [string]$Tokens[-1] } else { "" }
+
+                if (
+                    -not [string]::IsNullOrWhiteSpace($DesiredConfigHash) -and
+                    $DesiredConfigHash -eq $RunningConfigHash
+                ) {
+                    $HashVerificationReason = "service_hash_verified_match"
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "mtime_only"
+                            $Entry.config_hash_verified = $true
+                        }
+                    }
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace($DesiredConfigHash)) {
+                    $HashVerificationReason = "service_hash_verified_mismatch"
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "config_hash_mismatch"
+                            $Entry.running_config_hash = $RunningConfigHash
+                            $Entry.desired_config_hash = $DesiredConfigHash
+                        }
+                    }
+                }
+                else {
+                    $HashVerificationReason = "compose_hash_output_empty"
+                }
+            }
+            elseif ($null -ne $HashRun) {
+                $HashVerificationReason = "compose_hash_command_failed"
+                $HashCommandExitCode = [int]$HashRun.exit_code
+
+                # Try the exact reviewed project allowlist if Docker's
+                # container-label working directory lacks required env context.
+                # Never let unrelated Compose-file sets claim a valid match.
+                if ($Projects.ContainsKey($Project)) {
+                    $Allowlisted = $Projects[$Project]
+                    $KnownFiles = @(
+                        $Allowlisted.Files | ForEach-Object {
+                            [IO.Path]::GetFullPath((Join-Path ([string]$Allowlisted.WorkingDir) ([string]$_))).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    $ContainerPaths = @(
+                        $ResolvedFiles | ForEach-Object {
+                            [IO.Path]::GetFullPath([string]$_).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    if ($KnownFiles.Count -gt 0 -and $KnownFiles.Count -eq $ContainerPaths.Count -and
+                        (@(Compare-Object -ReferenceObject $KnownFiles -DifferenceObject $ContainerPaths).Count -eq 0)) {
+                        if ($null -eq $AllowlistedDesired) {
+                            $AllowlistedDesired = Get-ComposeDesiredState
+                        }
+                        $DesiredProject = $AllowlistedDesired.projects[$Project]
+                        $DesiredService = if ($null -ne $DesiredProject) {
+                            $DesiredProject.services[$Service]
+                        } else { $null }
+                        $FallbackHash = if ($null -ne $DesiredService) {
+                            [string]$DesiredService.config_hash
+                        } else { "" }
+                        if (-not [string]::IsNullOrWhiteSpace($FallbackHash)) {
+                            $Match = ($FallbackHash -ceq $RunningConfigHash)
+                            $HashVerificationReason = if ($Match) {
+                                "service_hash_verified_match_via_allowlist"
+                            } else {
+                                "service_hash_verified_mismatch_via_allowlist"
+                            }
+                            foreach ($Entry in $ContainerFiles) {
+                                if ([string]$Entry.status -eq "newer_than_container") {
+                                    $Entry.status = if ($Match) { "mtime_only" } else { "config_hash_mismatch" }
+                                    $Entry.config_hash_verified = $true
+                                    if (-not $Match) {
+                                        $Entry.running_config_hash = $RunningConfigHash
+                                        $Entry.desired_config_hash = $FallbackHash
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($HasNewer) {
+            foreach ($Entry in $ContainerFiles) {
+                if ([string]$Entry.status -in @("newer_than_container", "mtime_only", "config_hash_mismatch")) {
+                    $Entry.hash_verification_reason = $HashVerificationReason
+                    if ($null -ne $HashCommandExitCode) {
+                        $Entry.hash_command_exit_code = $HashCommandExitCode
+                    }
+                }
+            }
+        }
+
+        foreach ($Entry in $ContainerFiles) {
+            if ([string]$Entry.status -in @("missing", "newer_than_container", "config_hash_mismatch")) {
+                $Drift += $Entry
+            }
+        }
+
+        $Containers += @{
+            project = $Project
+            service = $Service
+            container = ([string]$Inspect.Name).TrimStart("/")
+            files = $ContainerFiles
+        }
+    }
+
+    return @{
+        containers = $Containers
+        drift = $Drift
+        errors = $Errors
+    }
+}
+
+function Get-ComposeDesiredState {
+    $Desired = @{}
+    $Errors = @()
+
+    foreach ($Project in @($Projects.Keys | Sort-Object)) {
+        $Cfg = $Projects[$Project]
+        $ConfiguredFiles = @($Cfg.Files)
+        if ($ConfiguredFiles.Count -eq 0) {
+            continue
+        }
+
+        $WorkingDir = [string]$Cfg.WorkingDir
+        if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+            $Errors += @{ project = $Project; error = "working_directory_missing" }
+            continue
+        }
+
+        $BaseArgs = @("compose")
+        $MissingFile = $false
+        foreach ($File in @($Cfg.Files)) {
+            $FullPath = Join-Path $WorkingDir ([string]$File)
+            if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+                $Errors += @{ project = $Project; file = [string]$File; error = "compose_file_missing" }
+                $MissingFile = $true
+                break
+            }
+            $BaseArgs += @("-f", $FullPath)
+        }
+        if ($MissingFile) { continue }
+
+        $ConfigRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--format", "json")) -WorkingDirectory $WorkingDir
+        if ([int]$ConfigRun.exit_code -ne 0) {
+            $Errors += @{ project = $Project; error = "compose_config_failed"; detail = ([string]$ConfigRun.output).Trim() }
+            continue
+        }
+
+        try {
+            $Config = ([string]$ConfigRun.output) | ConvertFrom-Json
+        }
+        catch {
+            $Errors += @{ project = $Project; error = "compose_config_invalid_json" }
+            continue
+        }
+
+        $Services = @{}
+        $ServiceProperties = @()
+        if ($null -ne $Config.services) {
+            $ServiceProperties = @($Config.services.PSObject.Properties)
+        }
+
+        foreach ($ServiceProperty in $ServiceProperties) {
+            $Service = [string]$ServiceProperty.Name
+            $ServiceConfig = $ServiceProperty.Value
+            $Image = [string]$ServiceConfig.image
+
+            $HashRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            $DesiredHash = $null
+            if ([int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                if ($Tokens.Count -gt 0) {
+                    $DesiredHash = [string]$Tokens[-1]
+                }
+            }
+            else {
+                $Errors += @{ project = $Project; service = $Service; error = "compose_hash_failed"; detail = ([string]$HashRun.output).Trim() }
+            }
+
+            $Services[$Service] = @{
+                image = if ([string]::IsNullOrWhiteSpace($Image)) { $null } else { $Image }
+                config_hash = $DesiredHash
+            }
+        }
+
+        $Desired[$Project] = @{ services = $Services }
+    }
+
+    return @{ projects = $Desired; errors = $Errors }
+}
+
+function Run-ProjectRedeploy {
+    param($Job)
+
+    $Project = [string]$Job.project
+    if (-not $Projects.ContainsKey($Project)) { throw "Project is not allowlisted: $Project" }
+
+    $Cfg = $Projects[$Project]
+    $WorkingDir = [string]$Cfg.WorkingDir
+    if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+        throw "Allowlisted working directory is missing."
+    }
+
+    $Operation = [string]$Job.operation
+    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "update_stateless")) {
+        throw "Operation is not allowlisted: $Operation"
+    }
+    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged", "update_stateless") -and [string]$Cfg.Mode -ne "script") {
+        throw "Restricted actions are never available to plain Compose projects."
+    }
+
+    $Requested = @($Job.services | ForEach-Object { [string]$_ })
+
+    if ([string]$Cfg.Mode -eq "script") {
+        if ($Operation -eq "update_stateless") {
+            $Reviewed = @("api", "mcp", "playwright-service", "browser-session-service", "playwright-public-proxy-service")
+            if ($Project -cne "firecrawl" -or
+                $Requested.Count -ne 1 -or
+                $Requested[0] -cnotin $Reviewed -or
+                $Requested[0] -cnotin @($Cfg.Services)) {
+                throw "update_stateless requires one explicitly allowlisted Firecrawl stateless service."
+            }
+        }
+        elseif ($Requested.Count -gt 0) {
+            throw "Other script-backed operations cannot accept service selections."
+        }
+        if (-not $Cfg.Operations.ContainsKey($Operation)) {
+            throw "Operation is not configured for $($Project): $Operation"
+        }
+
+        $Script = [string]$Cfg.Script
+        if (-not (Test-Path -LiteralPath $Script -PathType Leaf)) {
+            throw "Allowlisted handler script is missing."
+        }
+
+        $HandlerArgs = @($Cfg.Operations[$Operation] | ForEach-Object { [string]$_ })
+        $ExpectedAction = @{
+            sync_upstream = "sync-upstream"
+            build_only = "build-mcp"
+            deploy_staged = "redeploy-mcp"
+                        update_stateless = "maintain-stateless"
+        }
+        if ($ExpectedAction.ContainsKey($Operation) -and
+            ($HandlerArgs.Count -ne 2 -or $HandlerArgs[0] -cne "-Action" -or
+             $HandlerArgs[1] -cne $ExpectedAction[$Operation])) {
+            throw "Configured $Operation action is invalid."
+        }
+        if ($Operation -eq "update_stateless") {
+            $HandlerArgs += @("-Service", [string]$Requested[0])
+        }
+        # Builds and two Scout gates can exceed the generic 15-minute handler limit.
+        # The bound remains finite and applies to only one selected service.
+        $HandlerTimeout = if ($Operation -eq "update_stateless") { 3600 } else { $ScriptTimeoutSeconds }
+        $HandlerRun = Invoke-ScriptHandler `
+            -JobId ([string]$Job.job_id) `
+            -Project $Project `
+            -Script $Script `
+            -Arguments $HandlerArgs `
+            -WorkingDirectory $WorkingDir `
+            -TimeoutSeconds $HandlerTimeout
+
+        return @{
+            exit_code = $HandlerRun.exit_code
+            output = $HandlerRun.output
+            project = $Project
+            services = @($Cfg.Services)
+            operation = $Operation
+            execution_mode = "script"
+        }
+    }
+
+    if ($Requested.Count -eq 0) { $Requested = @($Cfg.Services) }
+
+    $Allowed = @{}
+    foreach ($Service in @($Cfg.Services)) { $Allowed[[string]$Service] = $true }
+    foreach ($Service in $Requested) {
+        if (-not $Allowed.ContainsKey($Service)) {
+            throw "Service is not allowlisted for $($Project): $Service"
+        }
+    }
+
+    $Args = @("compose")
+    foreach ($File in @($Cfg.Files)) {
+        $FullPath = Join-Path $WorkingDir ([string]$File)
+        if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+            throw "An allowlisted Compose file is missing."
+        }
+        $Args += @("-f", $FullPath)
+    }
+
+    $Args += @("up", "-d")
+    if ($Operation -eq "rebuild_and_redeploy") { $Args += "--build" }
+    $Args += "--force-recreate"
+    $Args += $Requested
+
+    # Docker Compose writes normal progress to stderr. Treat the native
+    # process exit code as authoritative instead of stderr presence.
+    $DockerRun = Invoke-DockerText -Arguments $Args -WorkingDirectory $WorkingDir
+    $Output = [string]$DockerRun.output
+    if ($Output.Length -gt 16000) { $Output = $Output.Substring($Output.Length - 16000) }
+
+    return @{
+        exit_code = [int]$DockerRun.exit_code
+        output = $Output
+        project = $Project
+        services = $Requested
+        operation = $Operation
+        execution_mode = "compose"
+    }
+}
+
+# Read-only fixed-volume telemetry; no caller paths and no mutating operations.
+function Get-HostDiskUsage {
+    $Drives = @()
+    foreach ($Drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($Drive.DriveType -ne [System.IO.DriveType]::Fixed -or -not $Drive.IsReady) { continue }
+            $Total = [int64]$Drive.TotalSize
+            $Available = [int64]$Drive.AvailableFreeSpace
+            if ($Total -le 0 -or $Available -lt 0 -or $Available -gt $Total) { continue }
+            $Letter = ([string]$Drive.Name).Substring(0, 2).ToUpperInvariant()
+            if ($Letter -notmatch '^[A-Z]:$') { continue }
+            $Used = $Total - $Available
+            $Drives += @{
+                volume = $Letter
+                total_bytes = $Total
+                available_bytes = $Available
+                used_bytes = $Used
+                used_percent = [Math]::Round((100.0 * [double]$Used / [double]$Total), 1)
+            }
+        }
+        catch { continue }
+    }
+    return @($Drives | Sort-Object volume)
+}
+
+function Invoke-RunnerSelfTest {
+    $ExpectedCreatedUtc = [DateTime]::SpecifyKind(
+        [DateTime]::new(2026, 10, 1, 2, 39, 48),
+        [DateTimeKind]::Utc
+    )
+    $JsonCreated = ('{"Created":"2026-10-01T02:39:48Z"}' | ConvertFrom-Json).Created
+    foreach ($CreatedValue in @(
+        $JsonCreated,
+        $ExpectedCreatedUtc,
+        [DateTimeOffset]::new($ExpectedCreatedUtc)
+    )) {
+        $ParsedCreatedUtc = ConvertTo-ContainerCreatedUtc -Value $CreatedValue
+        if ($ParsedCreatedUtc -ne $ExpectedCreatedUtc) {
+            throw "Container created timestamp normalization regression."
+        }
+    }
+
+    $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("dockerlocal-runner-selftest-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
+    $TestScript = Join-Path $TestRoot "handler.ps1"
+
+    try {
+        @'
+param(
+    [ValidateSet("Up", "Redeploy", "sync-upstream")]
+    [string]$Action
+)
+Write-Output "ACTION=$Action"
+Write-Host "HOST=$Action"
+'@ | Set-Content -LiteralPath $TestScript -Encoding utf8
+
+        $ZeroArgs = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @() `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$ZeroArgs.exit_code -ne 0) {
+            throw "Zero-argument script invocation regression."
+        }
+
+        $Named = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if (
+            [int]$Named.exit_code -ne 0 -or
+            [string]$Named.output -notmatch 'ACTION=Redeploy' -or
+            [string]$Named.output -notmatch 'HOST=Redeploy' -or
+            [string]$Named.output -match '#< CLIXML'
+        ) {
+            throw "Named-parameter/text-output script invocation regression."
+        }
+
+        # Exercise the generic allowlisted script action end-to-end on a
+        # temporary handler without touching Docker or any real project.
+        $Projects["selftest-upstream"] = @{
+            Mode = "script"
+            WorkingDir = $TestRoot
+            Files = @()
+            Services = @("api")
+            Script = $TestScript
+            Operations = @{ sync_upstream = @("-Action", "sync-upstream") }
+        }
+        try {
+            $Sync = Run-ProjectRedeploy -Job @{
+                job_id = [Guid]::NewGuid().ToString("N")
+                project = "selftest-upstream"
+                operation = "sync_upstream"
+                services = @()
+            }
+            if ([int]$Sync.exit_code -ne 0 -or
+                [string]$Sync.output -notmatch 'ACTION=sync-upstream') {
+                throw "Pinned-upstream script handler regression."
+            }
+            $Projects["selftest-upstream"].Operations.Remove("sync_upstream")
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'Operation is not configured'
+            }
+            if (-not $Denied) { throw "Unconfigured upstream sync was not denied." }
+
+            $Projects["selftest-upstream"].Mode = "compose"
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'never available to plain Compose'
+            }
+            if (-not $Denied) { throw "Compose upstream sync was not denied." }
+        }
+        finally {
+            $Projects.Remove("selftest-upstream")
+        }
+
+        $Positional = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Positional.exit_code -ne 0 -or [string]$Positional.output -notmatch 'ACTION=Redeploy') {
+            throw "Positional script invocation regression."
+        }
+
+        $Invalid = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "DefinitelyInvalid") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Invalid.exit_code -eq 0) {
+            throw "Script failure was incorrectly reported as exit code 0."
+        }
+
+        $InternalErrorScript = Join-Path $TestRoot "handler-internal-error.ps1"
+        @'
+param([switch]$Noop)
+$ErrorActionPreference = "Continue"
+Set-StrictMode -Version Latest
+$null = $DefinitelyUnsetVariable
+'@ | Set-Content -LiteralPath $InternalErrorScript -Encoding utf8
+
+        $InternalError = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $InternalErrorScript `
+            -Arguments @("-Noop") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$InternalError.exit_code -eq 0) {
+            throw "Script-internal PowerShell error was incorrectly reported as exit code 0."
+        }
+
+        $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
+        $OriginRepo = Join-Path $TestRoot "origin.git"
+        $SeedRepo = Join-Path $TestRoot "seed"
+        $TargetRepo = Join-Path $TestRoot "target"
+
+        & $GitExe init --bare $OriginRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test bare init failed." }
+        & $GitExe init -b main $SeedRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test seed init failed." }
+        & $GitExe -C $SeedRepo config user.name "DockerLocal SelfTest"
+        & $GitExe -C $SeedRepo config user.email "selftest@example.invalid"
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "one" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "initial" *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial commit failed." }
+        & $GitExe -C $SeedRepo remote add origin $OriginRepo
+        & $GitExe -C $SeedRepo push -u origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial push failed." }
+        & $GitExe clone --branch main $OriginRepo $TargetRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test clone failed." }
+
+        $SelfTestOrigin = (& $GitExe -C $TargetRepo remote get-url origin | Out-String).Trim()
+        $HostRepositories["selftest-repo"] = @{
+            Path = [IO.Path]::GetFullPath($TargetRepo).TrimEnd('\')
+            OriginUrl = $SelfTestOrigin
+            Branch = "main"
+        }
+
+        $BeforeState = Get-RepositoryState -Alias "selftest-repo"
+        if (-not [bool]$BeforeState.eligible_for_pull) {
+            throw "Clean main repository was not eligible for pull."
+        }
+
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "two" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "update" *> $null
+        & $GitExe -C $SeedRepo push origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test update push failed." }
+
+        $PullState = Invoke-RepositoryPull -Alias "selftest-repo"
+        if (
+            -not [bool]$PullState.changed -or
+            [string]$PullState.before_head -eq [string]$PullState.after_head -or
+            -not [bool]$PullState.clean
+        ) {
+            throw "Fast-forward repository maintenance regression."
+        }
+
+        Set-Content -LiteralPath (Join-Path $TargetRepo "dirty.txt") -Value "dirty" -Encoding ascii
+        $DirtyBlocked = $false
+        try {
+            [void](Invoke-RepositoryPull -Alias "selftest-repo")
+        }
+        catch {
+            if ($_.Exception.Message -eq "Repository has local changes.") {
+                $DirtyBlocked = $true
+            }
+        }
+        if (-not $DirtyBlocked) { throw "Dirty repository pull was not blocked." }
+
+        $HostRepositories.Remove("selftest-repo")
+
+        Write-Host "maintenance runner self-test: PASS"
+    }
+    finally {
+        Remove-Item -LiteralPath $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
+# Long-running Scout/Compose jobs use one bounded child process. The dispatcher
+# stays responsive for read-only host status requests while the child runs.
+# All requests still originate in the existing fixed-schema /control queue.
+function Invoke-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId)
+
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $Job = $null
+    $Action = ""
+    try {
+        if (-not (Test-Path -LiteralPath $ProcessingPath -PathType Leaf)) {
+            throw "Dispatched job is not in processing queue."
+        }
+        $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+        if ([string]$Job.job_id -cne $JobId) { throw "Worker job ID mismatch." }
+        $Action = [string]$Job.action
+        if ($Action -notin @("scout_full_scan", "compose_redeploy")) {
+            throw "Dispatched worker action is not allowlisted."
+        }
+
+        $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        if ($Action -eq "scout_full_scan") {
+            $Result = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+            $Result.started_unix = $Started
+            $Result.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Result
+        }
+        else {
+            $Run = Run-ProjectRedeploy -Job $Job
+            $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status=$Status; started_unix=$Started
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                services=$Run.services; operation=$Run.operation
+                execution_mode=$Run.execution_mode
+                outcome_unknown=([int]$Run.exit_code -eq 124)
+            }
+        }
+    }
+    catch {
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_INTERNAL"
+            $Failure.output = "Dispatched Scout worker failed."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error="Dispatched maintenance operation failed; inspect state before retrying."
+            }
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Project)
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction Stop
+    $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $StartInfo.FileName = $PwshCommand.Source
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.CreateNoWindow = $true
+    foreach ($Argument in @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-WorkerJobId", $JobId)) {
+        [void]$StartInfo.ArgumentList.Add([string]$Argument)
+    }
+    $Child = [Diagnostics.Process]::new()
+    $Child.StartInfo = $StartInfo
+    try {
+        [void]$Child.Start()
+        Write-JsonAtomic -Path $ActiveWorkerFile -Value @{
+            job_id=$JobId; pid=$Child.Id; project=$Project
+            started_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        }
+        return $Child
+    }
+    catch {
+        if (-not $Child.HasExited) {
+            try { $Child.Kill($true) } catch { try { $Child.Kill() } catch {} }
+        }
+        $Child.Dispose()
+        throw
+    }
+}
+
+function Get-ExistingDispatchedWorker {
+    if (-not (Test-Path -LiteralPath $ActiveWorkerFile -PathType Leaf)) { return $null }
+    try {
+        $State = Get-Content -LiteralPath $ActiveWorkerFile -Raw | ConvertFrom-Json
+        $Id = [string]$State.job_id
+        if ($Id -notmatch '^[a-f0-9]{32}$') { return $null }
+        if (-not (Test-Path -LiteralPath (Join-Path $Processing "$Id.json") -PathType Leaf)) { return $null }
+        $Candidate = Get-Process -Id ([int]$State.pid) -ErrorAction SilentlyContinue
+        if ($null -eq $Candidate -or $Candidate.ProcessName -notin @("pwsh", "powershell") -or $Candidate.HasExited) {
+            return $null
+        }
+        # A recycled PID must never be adopted or killed as the previous worker.
+        $ProcessStartUnix = [DateTimeOffset]::new($Candidate.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
+        if ([Math]::Abs($ProcessStartUnix - [int64]$State.started_unix) -gt 30) {
+            return $null
+        }
+        return @{ job_id=$Id; process=$Candidate; started_unix=[int64]$State.started_unix }
+    }
+    catch { return $null }
+}
+
+function Complete-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Reason)
+
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
+        $Action = ""
+        $Job = $null
+        try {
+            $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+            $Action = [string]$Job.action
+        } catch {}
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_RUNNER_RESTART"
+            $Failure.output = "Scout worker terminated without a verified result."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error=$Reason
+            }
+        }
+    }
+    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
+
+if ($SelfTest) {
+    Invoke-RunnerSelfTest
+    exit 0
+}
+
+if ($WorkerJobId) {
+    Invoke-DispatchedWorker -JobId $WorkerJobId
+    exit 0
+}
+
+$Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenanceRunner")
+if (-not $Mutex.WaitOne(0)) { exit 0 }
+
+$ActiveWorker = Get-ExistingDispatchedWorker
+$ActiveLongJobId = if ($ActiveWorker) { [string]$ActiveWorker.job_id } else { "" }
+$ActiveLongProcess = if ($ActiveWorker) { $ActiveWorker.process } else { $null }
+$ActiveLongStarted = if ($ActiveWorker) { [int64]$ActiveWorker.started_unix } else { 0 }
+Recover-OrphanedJobs -SkipJobId $ActiveLongJobId
+if (-not $ActiveWorker) {
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
+Remove-StaleScoutJobDirectories
+Write-RunnerLog "runner started"
+
+try {
+    while ($true) {
+        if ($null -ne $ActiveLongProcess) {
+            $ActiveLongProcess.Refresh()
+            $WorkerExpired = (
+                [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $ActiveLongStarted
+            ) -gt $WorkerTimeoutSeconds
+            if ($WorkerExpired -and -not $ActiveLongProcess.HasExited) {
+                try { $ActiveLongProcess.Kill($true) } catch { try { $ActiveLongProcess.Kill() } catch {} }
+                try { $ActiveLongProcess.WaitForExit(5000) | Out-Null } catch {}
+            }
+            if ($ActiveLongProcess.HasExited) {
+                $Reason = if ($WorkerExpired) {
+                    "Maintenance worker exceeded its time limit; outcome is unverified."
+                } else {
+                    "Maintenance worker exited without writing a verified result."
+                }
+                Complete-DispatchedWorker -JobId $ActiveLongJobId -Reason $Reason
+                $ActiveLongProcess.Dispose()
+                $ActiveLongProcess = $null
+                $ActiveLongJobId = ""
+                $ActiveLongStarted = 0
+            }
+        }
+        Write-JsonAtomic -Path $Heartbeat -Value @{
+            status = "running"
+            pid = $PID
+            updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        }
+
+        foreach ($RequestFile in @(Get-ChildItem -LiteralPath $Requests -Filter "*.json" -File -ErrorAction SilentlyContinue | Sort-Object CreationTimeUtc)) {
+            $JobId = [IO.Path]::GetFileNameWithoutExtension($RequestFile.Name)
+            if ($JobId -notmatch '^[a-f0-9]{32}$') {
+                Remove-Item -LiteralPath $RequestFile.FullName -Force -ErrorAction SilentlyContinue
+                continue
+            }
+
+            $ProcessingPath = Join-Path $Processing $RequestFile.Name
+            $Action = ""
+            $Job = $null
+            $WorkerDispatched = $false
+            try {
+                # Defer only long jobs while a long worker is active; let every
+                # bounded status/control request behind them run without delay.
+                if ($null -ne $ActiveLongProcess) {
+                    $WaitingJob = Get-Content -LiteralPath $RequestFile.FullName -Raw | ConvertFrom-Json
+                    if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy")) {
+                        continue
+                    }
+                }
+                Move-Item -LiteralPath $RequestFile.FullName -Destination $ProcessingPath -Force
+                $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+                if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
+                $Action = [string]$Job.action
+                if ($Action -notin @(
+                    "compose_redeploy",
+                    "compose_desired_state",
+                    "compose_file_state",
+                    "repo_status",
+                    "repo_pull_ff",
+                    "port_registry_status",
+                    "scheduled_task_status",
+                    "scheduled_task_control",
+                    "airsea_coverage_report",
+                    "host_disk_usage",
+                    "scout_full_scan"
+                )) { throw "Action is not allowlisted." }
+
+                Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
+                if ($Action -in @("scout_full_scan", "compose_redeploy")) {
+                    # Image scans are not associated with any Compose project.
+                    # PowerShell Mandatory string parameters reject an empty
+                    # value, so use a fixed telemetry-only name for scan jobs.
+                    $DispatchProject = if ($Action -eq "scout_full_scan") {
+                        "image-scan"
+                    } else { [string]$Job.project }
+                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project $DispatchProject
+                    $ActiveLongJobId = $JobId
+                    $ActiveLongStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    $WorkerDispatched = $true
+                    continue
+                }
+                $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "busy"
+                    pid = $PID
+                    job_id = $JobId
+                    project = [string]$Job.project
+                    updated_unix = $Started
+                }
+
+                if ($Action -eq "compose_desired_state") {
+                    $Desired = Get-ComposeDesiredState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        projects=$Desired.projects; errors=$Desired.errors
+                    }
+                }
+                elseif ($Action -eq "compose_file_state") {
+                    $FileState = Get-ComposeFileState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        containers=$FileState.containers; drift=$FileState.drift; errors=$FileState.errors
+                    }
+                }
+                elseif ($Action -eq "repo_status") {
+                    $State = Get-RepositoryState -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        repo=$State.repo; branch=$State.branch; head=$State.head
+                        clean=$State.clean; conflicts=$State.conflicts
+                        origin_ok=$State.origin_ok; eligible_for_pull=$State.eligible_for_pull
+                    }
+                }
+                elseif ($Action -eq "repo_pull_ff") {
+                    $Run = Invoke-RepositoryPull -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; repo=$Run.repo; branch=$Run.branch
+                        before_head=$Run.before_head; after_head=$Run.after_head
+                        changed=$Run.changed; clean=$Run.clean
+                    }
+                }
+                elseif ($Action -eq "port_registry_status") {
+                    $State = Get-McpPortRegistryStatus
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        version=$State.version; range_start=$State.range_start; range_end=$State.range_end
+                        services=$State.services; docker_reserved_ports=$State.docker_reserved_ports; unregistered_listeners=$State.unregistered_listeners
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_status") {
+                    $State = Get-AllowlistedScheduledTaskState -Alias ([string]$Job.task)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        task=$State.task; state=$State.state
+                        principal=$State.principal; run_level=$State.run_level
+                        last_run_time=$State.last_run_time; last_task_result=$State.last_task_result
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_control") {
+                    $Run = Invoke-AllowlistedScheduledTaskControl -Alias ([string]$Job.task) -Operation ([string]$Job.operation)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; task=$Run.task; operation=$Run.operation
+                        before_state=$Run.before_state; after_state=$Run.after_state
+                        last_task_result=$Run.last_task_result
+                    }
+                }
+                elseif ($Action -eq "airsea_coverage_report") {
+                    # Explicitly opt-in by the existing local-only scheduled-task
+                    # allowlist. No caller paths, SQL or arbitrary host commands.
+                    if (-not $HostScheduledTasks.ContainsKey("MarketObservationPilotShadow")) {
+                        throw "AIRSEA_REPORT_NOT_ALLOWLISTED"
+                    }
+                    $ReportScript = Join-Path $Root "airsea-coverage-report.py"
+                    if (-not (Test-Path -LiteralPath $ReportScript -PathType Leaf)) {
+                        throw "AIRSEA_REPORT_HELPER_NOT_INSTALLED"
+                    }
+                    $PythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
+                    if ($null -eq $PythonCommand) { throw "AIRSEA_PYTHON_NOT_AVAILABLE" }
+                    $RawReport = (& $PythonCommand.Source -I -B $ReportScript 2>$null | Out-String).Trim()
+                    if ($LASTEXITCODE -ne 0) { throw "AIRSEA_REPORT_NOT_AVAILABLE" }
+                    try {
+                        $Report = $RawReport | ConvertFrom-Json -ErrorAction Stop
+                    } catch {
+                        throw "AIRSEA_REPORT_INVALID_JSON"
+                    }
+                    if ($null -eq $Report -or [string]$Report.status -cne "succeeded") {
+                        throw "AIRSEA_REPORT_UNAVAILABLE"
+                    }
+                    # The Python helper has an exact immutable query surface
+                    # and cannot return raw observation tables. The server
+                    # performs independent strict field whitelisting.
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        report=$Report
+                    }
+                }
+                elseif ($Action -eq "host_disk_usage") {
+                    # No client-supplied disk paths. Return aggregate capacity only.
+                    $Drives = @(Get-HostDiskUsage)
+                    $MeasurementStatus = if ($Drives.Count -gt 0) { "measured" } else { "unknown" }
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        measurement_status=$MeasurementStatus
+                        measured_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        drives=$Drives
+                    }
+                }
+                elseif ($Action -eq "scout_full_scan") {
+                    $Run = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+                    $Run.started_unix = $Started
+                    $Run.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Run
+                }
+                else {
+                    $Run = Run-ProjectRedeploy -Job $Job
+                    $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status=$Status; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                        services=$Run.services; operation=$Run.operation
+                        execution_mode=$Run.execution_mode
+                    }
+                }
+            }
+            catch {
+                Write-RunnerLog "job $JobId failed: $($_.Exception.Message)"
+                if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+                    $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+                    $Failure.status = "failed"
+                    $Failure.scan_complete = $false
+                    $Failure.error_code = "SCAN_FAILED_INTERNAL"
+                    $Failure.output = $_.Exception.Message
+                    $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Failure
+                }
+                else {
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="failed"
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        error=$_.Exception.Message
+                    }
+                }
+            }
+            finally {
+                if (-not $WorkerDispatched) {
+                    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+                }
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "running"
+                    pid = $PID
+                    updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                }
+            }
+        }
+
+        Get-ChildItem -LiteralPath $Results -Filter "*.json" -File -ErrorAction SilentlyContinue |
+            Where-Object LastWriteTimeUtc -lt (Get-Date).ToUniversalTime().AddDays(-7) |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+        Start-Sleep -Seconds 2
+    }
+}
+finally {
+    try { $Mutex.ReleaseMutex() } catch {}
+    $Mutex.Dispose()
+} -or
+            $Ecosystem -cnotmatch '^[A-Za-z0-9._+-]{1,32}
+    param([AllowEmptyString()][string]$JsonText)
+
+    try {
+        $Report = $JsonText | ConvertFrom-Json -Depth 100
+    }
+    catch {
+        throw "Docker Scout returned invalid GitLab JSON."
+    }
+
+    $Vulnerabilities = @()
+    if ($null -ne $Report.vulnerabilities) {
+        $Vulnerabilities = @($Report.vulnerabilities)
+    }
+
+    $Counts = [ordered]@{}
+    $UniqueCves = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Counts[$Severity] = 0
+        $UniqueCves[$Severity] = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+    }
+
+    foreach ($Vulnerability in $Vulnerabilities) {
+        $Severity = ([string]$Vulnerability.severity).ToLowerInvariant()
+        if ($Severity -notin $ScoutSeverities) {
+            $Severity = "unspecified"
+        }
+        $Counts[$Severity]++
+
+        $Cve = [string]$Vulnerability.cve
+        if ([string]::IsNullOrWhiteSpace($Cve)) {
+            foreach ($Identifier in @($Vulnerability.identifiers)) {
+                $Type = ([string]$Identifier.type).ToLowerInvariant()
+                $Value = [string]$Identifier.value
+                if ($Type -eq "cve" -and -not [string]::IsNullOrWhiteSpace($Value)) {
+                    $Cve = $Value
+                    break
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($Cve)) {
+            [void]$UniqueCves[$Severity].Add($Cve)
+        }
+    }
+
+    $UniqueCounts = [ordered]@{}
+    $CveIds = [ordered]@{}
+    foreach ($Severity in $ScoutSeverities) {
+        $Sorted = @($UniqueCves[$Severity] | Sort-Object)
+        $UniqueCounts[$Severity] = $Sorted.Count
+        $CveIds[$Severity] = $Sorted
+    }
+
+    return [ordered]@{
+        vulnerability_counts = $Counts
+        unique_cve_counts = $UniqueCounts
+        cve_ids = $CveIds
+        detected_vulnerabilities_total = $Vulnerabilities.Count
+    }
+}
+
+function Remove-ScoutJobDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $true
+    }
+
+    foreach ($Attempt in 1..15) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
+}
+
+function New-ScoutFullScanResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [AllowEmptyString()][string]$Image,
+        [object[]]$Severity = @(),
+        [bool]$OnlyFixed = $false,
+        [bool]$CisaKev = $false
+    )
+
+    return [ordered]@{
+        job_id = $JobId
+        status = "failed"
+        scan_complete = $false
+        image = $Image
+        image_id = $null
+        image_digest = $null
+        image_size_bytes = $null
+        severity = @($Severity)
+        only_fixed = $OnlyFixed
+        cisa_kev = $CisaKev
+        output = ""
+        error_code = $null
+        cleanup_complete = $null
+    }
+}
+
+function Remove-StaleScoutJobDirectories {
+    $Cutoff = (Get-Date).ToUniversalTime().AddHours(-24)
+    foreach ($Directory in @(Get-ChildItem -LiteralPath $ScoutJobsRoot -Directory -ErrorAction SilentlyContinue)) {
+        if (
+            $Directory.Name -match '^[a-f0-9]{32}$' -and
+            $Directory.LastWriteTimeUtc -lt $Cutoff
+        ) {
+            Remove-Item -LiteralPath $Directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Write-RunnerLog "removed stale scout job directory: $($Directory.Name)"
+        }
+    }
+}
+
+function Get-LocalScoutImageMetadata {
+    param([Parameter(Mandatory)][string]$Image)
+
+    $Inspect = Invoke-DockerText -Arguments @(
+        "image", "inspect", "--format", "{{json .}}", $Image
+    ) -WorkingDirectory $Root
+
+    if ([int]$Inspect.exit_code -ne 0) {
+        $Code = if ([string]$Inspect.output -match '(?i)(no such image|not found)') {
+            "IMAGE_NOT_FOUND"
+        }
+        else {
+            "SCAN_FAILED_DOCKER"
+        }
+        return @{
+            ok = $false
+            error_code = $Code
+            output = [string]$Inspect.output
+        }
+    }
+
+    try {
+        $Metadata = ([string]$Inspect.output).Trim() | ConvertFrom-Json
+        $ImageId = [string]$Metadata.Id
+        $ImageSize = [int64]$Metadata.Size
+        $Digest = $null
+        if ($null -ne $Metadata.RepoDigests) {
+            $Digest = @($Metadata.RepoDigests | ForEach-Object { [string]$_ } | Where-Object { $_ }) |
+                Select-Object -First 1
+        }
+
+        if (
+            $ImageId -notmatch '^sha256:[a-fA-F0-9]{64}$' -or
+            $ImageSize -lt 0
+        ) {
+            throw "Docker image inspect returned invalid metadata."
+        }
+
+        return @{
+            ok = $true
+            image_id = $ImageId
+            image_digest = $Digest
+            image_size_bytes = $ImageSize
+        }
+    }
+    catch {
+        return @{
+            ok = $false
+            error_code = "SCAN_FAILED_DOCKER"
+            output = "Unable to parse local image metadata."
+        }
+    }
+}
+
+function Invoke-ScoutFullScan {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)]$Job
+    )
+
+    $RawImage = [string]$Job.image
+    $RawSeverity = @($Job.severity)
+    $OnlyFixed = if ($Job.only_fixed -is [bool]) { [bool]$Job.only_fixed } else { $false }
+    $CisaKev = if ($Job.cisa_kev -is [bool]) { [bool]$Job.cisa_kev } else { $false }
+    $Result = New-ScoutFullScanResult -JobId $JobId -Image $RawImage -Severity $RawSeverity -OnlyFixed $OnlyFixed -CisaKev $CisaKev
+
+    $AllowedProperties = @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )
+    foreach ($Property in $Job.PSObject.Properties.Name) {
+        if ($Property -notin $AllowedProperties) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unexpected scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    foreach ($RequiredProperty in @(
+        "job_id", "created_unix", "action",
+        "image", "severity", "only_fixed", "cisa_kev"
+    )) {
+        if ($null -eq $Job.PSObject.Properties[$RequiredProperty]) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Missing scout_full_scan request field."
+            return $Result
+        }
+    }
+
+    if (
+        $RawImage -notmatch $ScoutImageRefPattern -or
+        $Job.severity -is [string] -or
+        -not ($Job.only_fixed -is [bool]) -or
+        -not ($Job.cisa_kev -is [bool])
+    ) {
+        $Result.error_code = "INVALID_REQUEST"
+        $Result.output = "Invalid scout_full_scan request."
+        return $Result
+    }
+
+    $Severity = @()
+    foreach ($Item in $RawSeverity) {
+        $Value = ([string]$Item).ToLowerInvariant()
+        if ($Value -notin $ScoutSeverities) {
+            $Result.error_code = "INVALID_REQUEST"
+            $Result.output = "Unsupported Scout severity."
+            return $Result
+        }
+        if ($Value -notin $Severity) {
+            $Severity += $Value
+        }
+    }
+    $Result.severity = @($Severity)
+
+    $Metadata = Get-LocalScoutImageMetadata -Image $RawImage
+    if (-not [bool]$Metadata.ok) {
+        $Result.error_code = [string]$Metadata.error_code
+        $Result.output = Get-BoundedScoutOutput -Text ([string]$Metadata.output)
+        return $Result
+    }
+
+    $Result.image_id = [string]$Metadata.image_id
+    $Result.image_digest = $Metadata.image_digest
+    $Result.image_size_bytes = [int64]$Metadata.image_size_bytes
+
+    $DriveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($ScoutJobsRoot))
+    $AvailableBytes = [int64]([IO.DriveInfo]::new($DriveRoot)).AvailableFreeSpace
+    $RequiredBytes = [Math]::Max(
+        [int64](4GB + (2 * [int64]$Result.image_size_bytes)),
+        [int64]8GB
+    )
+    $Result.available_disk_bytes = $AvailableBytes
+    $Result.required_disk_bytes = $RequiredBytes
+
+    if ($AvailableBytes -lt $RequiredBytes) {
+        $Result.error_code = "INSUFFICIENT_DISK"
+        $Result.output = "Insufficient free disk for Docker Scout full scan."
+        return $Result
+    }
+
+    $ScanMutex = [Threading.Mutex]::new($false, "Local\DockerLocalScoutFullScan")
+    $LockTaken = $false
+    $JobDirectory = Join-Path $ScoutJobsRoot $JobId
+    $Process = $null
+    $ScoutUser = $null
+    $ScoutPassword = $null
+
+    try {
+        $LockTaken = $ScanMutex.WaitOne(0)
+        if (-not $LockTaken) {
+            $Result.error_code = "SCAN_FAILED_RESOURCE_LIMIT"
+            $Result.output = "Another Docker Scout full scan is already running."
+            return $Result
+        }
+
+        New-Item -ItemType Directory -Force -Path $JobDirectory | Out-Null
+        $CacheDirectory = Join-Path $JobDirectory "cache"
+        $TempDirectory = Join-Path $JobDirectory "tmp"
+        New-Item -ItemType Directory -Force -Path $CacheDirectory, $TempDirectory | Out-Null
+
+        $ScoutUser = Get-DpapiSecretValue -Path $ScoutUserDpapi -Label "Docker Scout Hub user"
+        $ScoutPassword = Get-DpapiSecretValue -Path $ScoutPasswordDpapi -Label "Docker Scout Hub password"
+
+        $Arguments = @("scout", "cves", "--format", "gitlab")
+        if ($Severity.Count -gt 0) {
+            $Arguments += @("--only-severity", ($Severity -join ","))
+        }
+        if ([bool]$Job.only_fixed) {
+            $Arguments += "--only-fixed"
+        }
+        if ([bool]$Job.cisa_kev) {
+            $Arguments += "--only-cisa-kev"
+        }
+        $Arguments += "local://$RawImage"
+
+        $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $StartInfo.FileName = $Docker
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+        $StartInfo.CreateNoWindow = $true
+        $StartInfo.WorkingDirectory = $JobDirectory
+        foreach ($Argument in $Arguments) {
+            [void]$StartInfo.ArgumentList.Add([string]$Argument)
+        }
+
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_USER")
+        [void]$StartInfo.Environment.Remove("DOCKER_SCOUT_HUB_PASSWORD")
+        $StartInfo.Environment["DOCKER_SCOUT_CACHE_DIR"] = $CacheDirectory
+        $StartInfo.Environment["TEMP"] = $TempDirectory
+        $StartInfo.Environment["TMP"] = $TempDirectory
+        $StartInfo.Environment["NO_COLOR"] = "1"
+        $StartInfo.Environment["DOCKER_SCOUT_NEW_VERSION_WARN"] = "false"
+        if (-not [string]::IsNullOrWhiteSpace($ScoutUser)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_USER"] = $ScoutUser
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ScoutPassword)) {
+            $StartInfo.Environment["DOCKER_SCOUT_HUB_PASSWORD"] = $ScoutPassword
+        }
+
+        $Process = [Diagnostics.Process]::new()
+        $Process.StartInfo = $StartInfo
+        [void]$Process.Start()
+
+        $StdOutTask = $Process.StandardOutput.ReadToEndAsync()
+        $StdErrTask = $Process.StandardError.ReadToEndAsync()
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($ScoutTimeoutSeconds)
+
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = "scout_full_scan"
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            }
+            Start-Sleep -Seconds 1
+            $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            $StdOut = $StdOutTask.GetAwaiter().GetResult()
+            $StdErr = $StdErrTask.GetAwaiter().GetResult()
+            $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+            $Result.status = "timeout"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_TIMEOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Process.WaitForExit()
+        $StdOut = $StdOutTask.GetAwaiter().GetResult()
+        $StdErr = $StdErrTask.GetAwaiter().GetResult()
+        $Combined = @($StdOut, $StdErr) -join [Environment]::NewLine
+        $Result.exit_code = [int]$Process.ExitCode
+
+        if ([int]$Process.ExitCode -ne 0 -and
+            $Combined -match 'internal/format/sbom/gitlab|gitlab\\.go:207') {
+            # Scout can panic inside its GitLab formatter *after* completing
+            # vulnerability detection. Diagnostic fallback is read-only.
+            # It never returns a successful scan or waives the CVE gate.
+            $OriginalFailure = [int]$Process.ExitCode
+            $Process.Dispose()
+            $Process = $null
+            $StartInfo.ArgumentList[3] = "markdown"
+            $Diagnostic = [Diagnostics.Process]::new()
+            $Diagnostic.StartInfo = $StartInfo
+            $Process = $Diagnostic
+            [void]$Process.Start()
+            $MarkdownOutTask = $Process.StandardOutput.ReadToEndAsync()
+            $MarkdownErrTask = $Process.StandardError.ReadToEndAsync()
+            while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+                Start-Sleep -Seconds 1
+                $Process.Refresh()
+            }
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+                try { $Process.WaitForExit(5000) | Out-Null } catch {}
+                $Result.error_code = "SCAN_TIMEOUT"
+                $Result.output = "Scout GitLab formatter crashed; Markdown diagnostic exceeded scan timeout."
+                return $Result
+            }
+            $Process.WaitForExit()
+            $MarkdownOut = [string]$MarkdownOutTask.GetAwaiter().GetResult()
+            $MarkdownErr = [string]$MarkdownErrTask.GetAwaiter().GetResult()
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_FORMATTER"
+            $Result.output = Get-BoundedScoutOutput -Text (
+                "GitLab formatter crashed (exit $OriginalFailure). Markdown diagnostics only; scan NOT approved." +
+                [Environment]::NewLine + $MarkdownOut + [Environment]::NewLine + $MarkdownErr
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        if ([int]$Process.ExitCode -ne 0) {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_SCOUT"
+            $Result.output = Get-BoundedScoutOutput -Text $Combined -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        try {
+            $Structured = ConvertFrom-ScoutGitLabReport -JsonText $StdOut
+        }
+        catch {
+            $Result.status = "failed"
+            $Result.scan_complete = $false
+            $Result.error_code = "SCAN_FAILED_PARSE"
+            $Result.output = Get-BoundedScoutOutput -Text (
+                @($_.Exception.Message, $StdErr) -join [Environment]::NewLine
+            ) -RedactValues @($ScoutUser, $ScoutPassword)
+            return $Result
+        }
+
+        $Result.vulnerability_counts = $Structured.vulnerability_counts
+        $Result.unique_cve_counts = $Structured.unique_cve_counts
+        $Result.cve_ids = $Structured.cve_ids
+        $Result.detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        if ([bool]$Job.only_fixed) {
+            $Result.fixable_vulnerability_counts = $Structured.vulnerability_counts
+            $Result.fixable_unique_cve_counts = $Structured.unique_cve_counts
+        }
+
+        $Summary = [ordered]@{
+            vulnerability_counts = $Structured.vulnerability_counts
+            unique_cve_counts = $Structured.unique_cve_counts
+            cve_ids = $Structured.cve_ids
+            detected_vulnerabilities_total = $Structured.detected_vulnerabilities_total
+        } | ConvertTo-Json -Depth 8 -Compress
+        $Result.output = Get-BoundedScoutOutput -Text $Summary -RedactValues @($ScoutUser, $ScoutPassword)
+        $Result.status = "succeeded"
+        $Result.scan_complete = $true
+        $Result.error_code = $null
+        return $Result
+    }
+    catch {
+        $Result.status = "failed"
+        $Result.scan_complete = $false
+        $Result.error_code = "SCAN_FAILED_INTERNAL"
+        $Result.output = Get-BoundedScoutOutput -Text $_.Exception.Message -RedactValues @($ScoutUser, $ScoutPassword)
+        return $Result
+    }
+    finally {
+        $ScoutUser = $null
+        $ScoutPassword = $null
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
+        $Result.cleanup_complete = Remove-ScoutJobDirectory -Path $JobDirectory
+        if ($LockTaken) {
+            try { $ScanMutex.ReleaseMutex() } catch {}
+        }
+        $ScanMutex.Dispose()
+    }
+}
+
+function Invoke-ScriptHandler {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Script,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [int]$TimeoutSeconds = $ScriptTimeoutSeconds
+    )
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if (-not $PwshCommand) {
+        throw "PowerShell 7 (pwsh.exe) is required for script-backed maintenance projects."
+    }
+
+    $Command = "& '" + $Script.Replace("'", "''") + "'"
+    foreach ($Argument in $Arguments) {
+        $ArgumentText = [string]$Argument
+        if ($ArgumentText -match '^-[A-Za-z][A-Za-z0-9-]*$') {
+            # Preserve allowlisted PowerShell parameter tokens such as -Action.
+            $Command += " " + $ArgumentText
+        }
+        else {
+            $Command += " '" + $ArgumentText.Replace("'", "''") + "'"
+        }
+    }
+
+    # -EncodedCommand does not reliably turn every script-level terminating error
+    # into a non-zero process exit code on its own. Make process semantics explicit.
+    $InvocationLines = @(
+        '$ErrorActionPreference = ''Stop'''
+        '$Error.Clear()'
+        'try {'
+        "    $Command"
+        '    if (-not $? -or $Error.Count -gt 0) { exit 1 }'
+        '    exit 0'
+        '}'
+        'catch {'
+        '    [Console]::Error.WriteLine(($_ | Out-String))'
+        '    exit 1'
+        '}'
+    )
+    $Invocation = $InvocationLines -join [Environment]::NewLine
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Invocation))
+
+    $StdOutPath = Join-Path $Control ("maintenance-{0}.out.log" -f $JobId)
+    $StdErrPath = Join-Path $Control ("maintenance-{0}.err.log" -f $JobId)
+    Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+
+    $Process = $null
+    try {
+        $Process = Start-Process `
+            -FilePath $PwshCommand.Source `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-EncodedCommand", $EncodedCommand) `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $StdOutPath `
+            -RedirectStandardError $StdErrPath `
+            -PassThru
+
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
+            Write-JsonAtomic -Path $Heartbeat -Value @{
+                status = "busy"
+                pid = $PID
+                job_id = $JobId
+                project = $Project
+                child_pid = $Process.Id
+                updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
+            }
+            Start-Sleep -Seconds 2
+            $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            return @{ exit_code = 124; output = "Script-backed maintenance timed out; completion is unverified." }
+        }
+
+        $ExitCode = [int]$Process.ExitCode
+        $StdOut = if (Test-Path -LiteralPath $StdOutPath) { Get-Content -LiteralPath $StdOutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $StdErr = if (Test-Path -LiteralPath $StdErrPath) { Get-Content -LiteralPath $StdErrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $Output = @($StdOut, $StdErr) -join [Environment]::NewLine
+
+        if ($Output.Length -gt 16000) {
+            $Output = $Output.Substring($Output.Length - 16000)
+        }
+
+        return @{ exit_code = $ExitCode; output = $Output }
+    }
+    finally {
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
+        Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-DockerText {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    Push-Location $WorkingDirectory
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $Output = (& $Docker @Arguments 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+        Pop-Location
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Invoke-GitText {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $Git = (Get-Command git.exe -ErrorAction Stop).Source
+    $EmptyHooks = Join-Path $Root "empty-git-hooks"
+    New-Item -ItemType Directory -Force -Path $EmptyHooks | Out-Null
+
+    $PreviousTerminalPrompt = $env:GIT_TERMINAL_PROMPT
+    $PreviousGcmInteractive = $env:GCM_INTERACTIVE
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $env:GIT_TERMINAL_PROMPT = "0"
+        $env:GCM_INTERACTIVE = "Never"
+        $ErrorActionPreference = "Continue"
+        $FixedArgs = @(
+            "-c", "core.hooksPath=$EmptyHooks",
+            "-c", "submodule.recurse=false",
+            "-C", $RepositoryPath
+        ) + $Arguments
+        $Output = (& $Git @FixedArgs 2>&1 | ForEach-Object { $_.ToString() } | Out-String)
+        $ExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:GIT_TERMINAL_PROMPT = $PreviousTerminalPrompt
+        $env:GCM_INTERACTIVE = $PreviousGcmInteractive
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+
+    return @{ exit_code = [int]$ExitCode; output = [string]$Output }
+}
+
+function Get-AllowlistedRepository {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid repository alias."
+    }
+    if (-not $HostRepositories.ContainsKey($Alias)) {
+        throw "Repository alias is not allowlisted."
+    }
+    return $HostRepositories[$Alias]
+}
+
+function Get-RepositoryState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $RepoPath = [string]$Cfg.Path
+    if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
+        throw "Allowlisted repository path is missing."
+    }
+
+    $TopLevel = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "--show-toplevel")
+    if ([int]$TopLevel.exit_code -ne 0) { throw "Allowlisted path is not a Git repository." }
+
+    $ExpectedRoot = [IO.Path]::GetFullPath($RepoPath).TrimEnd('\')
+    $ActualRoot = [IO.Path]::GetFullPath(([string]$TopLevel.output).Trim()).TrimEnd('\')
+    if (-not [string]::Equals($ExpectedRoot, $ActualRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Allowlisted path is not the repository root."
+    }
+
+    $Head = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("rev-parse", "HEAD")
+    if ([int]$Head.exit_code -ne 0) { throw "Unable to read repository HEAD." }
+
+    $Branch = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("symbolic-ref", "--quiet", "--short", "HEAD")
+    $BranchName = if ([int]$Branch.exit_code -eq 0) { ([string]$Branch.output).Trim() } else { "" }
+
+    $Status = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("status", "--porcelain=v1", "--untracked-files=normal")
+    if ([int]$Status.exit_code -ne 0) { throw "Unable to read repository status." }
+
+    $Conflicts = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("ls-files", "-u")
+    if ([int]$Conflicts.exit_code -ne 0) { throw "Unable to inspect repository conflicts." }
+
+    $Origin = Invoke-GitText -RepositoryPath $RepoPath -Arguments @("remote", "get-url", "origin")
+    if ([int]$Origin.exit_code -ne 0) { throw "Unable to read origin URL." }
+
+    $Clean = [string]::IsNullOrWhiteSpace([string]$Status.output)
+    $HasConflicts = -not [string]::IsNullOrWhiteSpace([string]$Conflicts.output)
+    $OriginOk = [string]::Equals(
+        ([string]$Origin.output).Trim(),
+        [string]$Cfg.OriginUrl,
+        [StringComparison]::Ordinal
+    )
+    $BranchOk = $BranchName -eq "main"
+
+    return @{
+        repo = $Alias
+        branch = $BranchName
+        head = ([string]$Head.output).Trim()
+        clean = $Clean
+        conflicts = $HasConflicts
+        origin_ok = $OriginOk
+        eligible_for_pull = ($BranchOk -and $Clean -and -not $HasConflicts -and $OriginOk)
+    }
+}
+
+function Invoke-RepositoryPull {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Cfg = Get-AllowlistedRepository -Alias $Alias
+    $Before = Get-RepositoryState -Alias $Alias
+    if ($Before.branch -ne "main") { throw "Repository is not on main." }
+    if (-not [bool]$Before.clean) { throw "Repository has local changes." }
+    if ([bool]$Before.conflicts) { throw "Repository has unresolved conflicts." }
+    if (-not [bool]$Before.origin_ok) { throw "Repository origin does not match the allowlist." }
+
+    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "--no-rebase", "origin", "main")
+    if ([int]$Pull.exit_code -ne 0) {
+        throw "git pull --ff-only failed with exit code $([int]$Pull.exit_code)."
+    }
+
+    $After = Get-RepositoryState -Alias $Alias
+    if (
+        $After.branch -ne "main" -or
+        -not [bool]$After.clean -or
+        [bool]$After.conflicts -or
+        -not [bool]$After.origin_ok
+    ) {
+        throw "Repository verification failed after pull."
+    }
+
+    return @{
+        action = "repo_pull_ff"
+        repo = $Alias
+        branch = "main"
+        before_head = [string]$Before.head
+        after_head = [string]$After.head
+        changed = ([string]$Before.head -ne [string]$After.head)
+        clean = [bool]$After.clean
+    }
+}
+
+function Get-AllowlistedScheduledTask {
+    param([Parameter(Mandatory)][string]$Alias)
+    if ($Alias -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') {
+        throw "Invalid Scheduled Task alias."
+    }
+    if (-not $HostScheduledTasks.ContainsKey($Alias)) {
+        throw "Scheduled Task alias is not allowlisted."
+    }
+
+    $Cfg = $HostScheduledTasks[$Alias]
+    $Matches = @(
+        Get-ScheduledTask -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop |
+            Where-Object {
+                [string]::Equals($_.TaskName, [string]$Cfg.TaskName, [StringComparison]::Ordinal) -and
+                [string]::Equals($_.TaskPath, [string]$Cfg.TaskPath, [StringComparison]::Ordinal)
+            }
+    )
+    if ($Matches.Count -ne 1) { throw "Allowlisted Scheduled Task was not resolved exactly once." }
+
+    return @{ Config = $Cfg; Task = $Matches[0] }
+}
+
+function Get-AllowlistedScheduledTaskState {
+    param([Parameter(Mandatory)][string]$Alias)
+
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Cfg = $Resolved.Config
+    $Task = $Resolved.Task
+    $Info = Get-ScheduledTaskInfo -TaskName ([string]$Cfg.TaskName) -TaskPath ([string]$Cfg.TaskPath) -ErrorAction Stop
+
+    $LastRunTime = $null
+    if ($Info.LastRunTime -and $Info.LastRunTime -gt [DateTime]::MinValue) {
+        $LastRunTime = $Info.LastRunTime.ToString("o")
+    }
+
+    return @{
+        task = $Alias
+        state = [string]$Task.State
+        principal = [string]$Task.Principal.UserId
+        run_level = [string]$Task.Principal.RunLevel
+        last_run_time = $LastRunTime
+        last_task_result = [uint32]$Info.LastTaskResult
+    }
+}
+
+function Wait-ScheduledTaskNotRunning {
+    param([Parameter(Mandatory)][string]$Alias,[int]$TimeoutSeconds = 10)
+    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $State = Get-AllowlistedScheduledTaskState -Alias $Alias
+        if ([string]$State.state -ne "Running") { return $State }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $Deadline)
+    throw "Scheduled Task did not stop within the bounded wait."
+}
+
+function Invoke-AllowlistedScheduledTaskControl {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][ValidateSet("start", "stop", "restart")][string]$Operation
+    )
+
+    $Before = Get-AllowlistedScheduledTaskState -Alias $Alias
+    $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+    $Task = $Resolved.Task
+
+    if ($Operation -eq "start") {
+        if ([string]$Before.state -ne "Running") {
+            $Task | Start-ScheduledTask
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    elseif ($Operation -eq "stop") {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+    }
+    else {
+        if ([string]$Before.state -eq "Running") {
+            $Task | Stop-ScheduledTask
+            [void](Wait-ScheduledTaskNotRunning -Alias $Alias)
+        }
+        $Resolved = Get-AllowlistedScheduledTask -Alias $Alias
+        $Resolved.Task | Start-ScheduledTask
+        Start-Sleep -Milliseconds 300
+    }
+
+    $After = Get-AllowlistedScheduledTaskState -Alias $Alias
+    return @{
+        action = "scheduled_task_control"
+        task = $Alias
+        operation = $Operation
+        before_state = [string]$Before.state
+        after_state = [string]$After.state
+        last_task_result = [uint32]$After.last_task_result
+    }
+}
+
+function Get-ComposeFileState {
+    $Containers = @()
+    $Drift = @()
+    $Errors = @()
+    # Compose container labels can point at a subdirectory while the reviewed
+    # allowlisted deployment uses a different project directory and .env file.
+    # Only use this fallback for exact matching Compose-file sets, and only
+    # when the label-based hash command itself failed. Never guess a match.
+    $AllowlistedDesired = $null
+
+    $Ids = @(& $Docker ps -aq)
+    if ($LASTEXITCODE -ne 0) {
+        return @{
+            containers = @()
+            drift = @()
+            errors = @(@{ error = "docker_ps_failed" })
+        }
+    }
+
+    foreach ($Id in $Ids) {
+        if ([string]::IsNullOrWhiteSpace([string]$Id)) { continue }
+
+        $InspectText = (& $Docker inspect ([string]$Id) 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($InspectText)) {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_failed" }
+            continue
+        }
+
+        try {
+            $Inspect = @($InspectText | ConvertFrom-Json)[0]
+        }
+        catch {
+            $Errors += @{ container = [string]$Id; error = "docker_inspect_invalid_json" }
+            continue
+        }
+
+        $Labels = $Inspect.Config.Labels
+        if ($null -eq $Labels) { continue }
+
+        $ProjectProp = $Labels.PSObject.Properties["com.docker.compose.project"]
+        $ServiceProp = $Labels.PSObject.Properties["com.docker.compose.service"]
+        $FilesProp = $Labels.PSObject.Properties["com.docker.compose.project.config_files"]
+        if ($null -eq $ProjectProp -or $null -eq $ServiceProp -or $null -eq $FilesProp) {
+            continue
+        }
+
+        $Project = [string]$ProjectProp.Value
+        $Service = [string]$ServiceProp.Value
+        $FilesText = [string]$FilesProp.Value
+        if ([string]::IsNullOrWhiteSpace($Project) -or [string]::IsNullOrWhiteSpace($FilesText)) {
+            continue
+        }
+
+        $WorkingDirProp = $Labels.PSObject.Properties["com.docker.compose.project.working_dir"]
+        $ConfigHashProp = $Labels.PSObject.Properties["com.docker.compose.config-hash"]
+        $WorkingDir = if ($null -ne $WorkingDirProp) { [string]$WorkingDirProp.Value } else { "" }
+        $RunningConfigHash = if ($null -ne $ConfigHashProp) { [string]$ConfigHashProp.Value } else { "" }
+
+        $CreatedUtc = $null
+        $CreatedDisplay = $null
+        try {
+            $CreatedUtc = ConvertTo-ContainerCreatedUtc -Value $Inspect.Created
+            $CreatedDisplay = $CreatedUtc.ToString(
+                "o",
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        catch {
+            $Errors += @{ project = $Project; service = $Service; error = "container_created_time_invalid" }
+        }
+
+        $ContainerFiles = @()
+        $ResolvedFiles = @()
+        $HasMissing = $false
+        $HasNewer = $false
+
+        foreach ($PathText in @($FilesText -split ",")) {
+            $Path = ([string]$PathText).Trim()
+            if ([string]::IsNullOrWhiteSpace($Path)) { continue }
+
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                $Entry = @{
+                    project = $Project
+                    service = $Service
+                    container = ([string]$Inspect.Name).TrimStart("/")
+                    compose_file = $Path
+                    status = "missing"
+                    container_created_at = $CreatedDisplay
+                    compose_file_modified_at = $null
+                }
+                $ContainerFiles += $Entry
+                $HasMissing = $true
+                continue
+            }
+
+            $File = Get-Item -LiteralPath $Path
+            $ResolvedFiles += $File.FullName
+            $ModifiedUtc = $File.LastWriteTimeUtc
+            $IsNewer = $false
+            if ($null -ne $CreatedUtc) {
+                $IsNewer = $ModifiedUtc -gt $CreatedUtc.AddSeconds(1)
+            }
+
+            $Entry = @{
+                project = $Project
+                service = $Service
+                container = ([string]$Inspect.Name).TrimStart("/")
+                compose_file = $File.FullName
+                status = if ($IsNewer) { "newer_than_container" } else { "ok" }
+                container_created_at = $CreatedDisplay
+                compose_file_modified_at = $ModifiedUtc.ToString("o")
+            }
+            $ContainerFiles += $Entry
+            if ($IsNewer) { $HasNewer = $true }
+        }
+
+        # File mtime is only a heuristic. If a Compose file is newer than the
+        # container, verify the rendered service config against the immutable
+        # config hash embedded in the container. Matching hashes are
+        # informational mtime-only changes, not deployment drift.
+        # If verification is impossible, keep the warning and explain WHY.
+        # Do not include Docker stderr, Compose variable values, or secrets.
+        $HashVerificationReason = $null
+        $HashCommandExitCode = $null
+        if ($HasNewer) {
+            if ($HasMissing) {
+                $HashVerificationReason = "compose_file_missing"
+            }
+            elseif ($ResolvedFiles.Count -eq 0) {
+                $HashVerificationReason = "compose_files_unresolved"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($WorkingDir)) {
+                $HashVerificationReason = "working_directory_label_missing"
+            }
+            elseif (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+                $HashVerificationReason = "working_directory_unavailable"
+            }
+            elseif ([string]::IsNullOrWhiteSpace($RunningConfigHash)) {
+                $HashVerificationReason = "running_config_hash_label_missing"
+            }
+            else {
+                $HashVerificationReason = "verification_not_completed"
+            }
+        }
+        if (
+            $HasNewer -and
+            -not $HasMissing -and
+            $ResolvedFiles.Count -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($WorkingDir) -and
+            (Test-Path -LiteralPath $WorkingDir -PathType Container) -and
+            -not [string]::IsNullOrWhiteSpace($RunningConfigHash)
+        ) {
+            $HashArgs = @("compose")
+            foreach ($ResolvedFile in $ResolvedFiles) {
+                $HashArgs += @("-f", $ResolvedFile)
+            }
+
+            $HashRun = $null
+            try {
+                $HashRun = Invoke-DockerText -Arguments ($HashArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            }
+            catch {
+                $HashVerificationReason = "compose_hash_invocation_failed"
+            }
+            if ($null -ne $HashRun -and [int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                $DesiredConfigHash = if ($Tokens.Count -gt 0) { [string]$Tokens[-1] } else { "" }
+
+                if (
+                    -not [string]::IsNullOrWhiteSpace($DesiredConfigHash) -and
+                    $DesiredConfigHash -eq $RunningConfigHash
+                ) {
+                    $HashVerificationReason = "service_hash_verified_match"
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "mtime_only"
+                            $Entry.config_hash_verified = $true
+                        }
+                    }
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace($DesiredConfigHash)) {
+                    $HashVerificationReason = "service_hash_verified_mismatch"
+                    foreach ($Entry in $ContainerFiles) {
+                        if ([string]$Entry.status -eq "newer_than_container") {
+                            $Entry.status = "config_hash_mismatch"
+                            $Entry.running_config_hash = $RunningConfigHash
+                            $Entry.desired_config_hash = $DesiredConfigHash
+                        }
+                    }
+                }
+                else {
+                    $HashVerificationReason = "compose_hash_output_empty"
+                }
+            }
+            elseif ($null -ne $HashRun) {
+                $HashVerificationReason = "compose_hash_command_failed"
+                $HashCommandExitCode = [int]$HashRun.exit_code
+
+                # Try the exact reviewed project allowlist if Docker's
+                # container-label working directory lacks required env context.
+                # Never let unrelated Compose-file sets claim a valid match.
+                if ($Projects.ContainsKey($Project)) {
+                    $Allowlisted = $Projects[$Project]
+                    $KnownFiles = @(
+                        $Allowlisted.Files | ForEach-Object {
+                            [IO.Path]::GetFullPath((Join-Path ([string]$Allowlisted.WorkingDir) ([string]$_))).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    $ContainerPaths = @(
+                        $ResolvedFiles | ForEach-Object {
+                            [IO.Path]::GetFullPath([string]$_).TrimEnd('\').ToLowerInvariant()
+                        } | Sort-Object -Unique
+                    )
+                    if ($KnownFiles.Count -gt 0 -and $KnownFiles.Count -eq $ContainerPaths.Count -and
+                        (@(Compare-Object -ReferenceObject $KnownFiles -DifferenceObject $ContainerPaths).Count -eq 0)) {
+                        if ($null -eq $AllowlistedDesired) {
+                            $AllowlistedDesired = Get-ComposeDesiredState
+                        }
+                        $DesiredProject = $AllowlistedDesired.projects[$Project]
+                        $DesiredService = if ($null -ne $DesiredProject) {
+                            $DesiredProject.services[$Service]
+                        } else { $null }
+                        $FallbackHash = if ($null -ne $DesiredService) {
+                            [string]$DesiredService.config_hash
+                        } else { "" }
+                        if (-not [string]::IsNullOrWhiteSpace($FallbackHash)) {
+                            $Match = ($FallbackHash -ceq $RunningConfigHash)
+                            $HashVerificationReason = if ($Match) {
+                                "service_hash_verified_match_via_allowlist"
+                            } else {
+                                "service_hash_verified_mismatch_via_allowlist"
+                            }
+                            foreach ($Entry in $ContainerFiles) {
+                                if ([string]$Entry.status -eq "newer_than_container") {
+                                    $Entry.status = if ($Match) { "mtime_only" } else { "config_hash_mismatch" }
+                                    $Entry.config_hash_verified = $true
+                                    if (-not $Match) {
+                                        $Entry.running_config_hash = $RunningConfigHash
+                                        $Entry.desired_config_hash = $FallbackHash
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($HasNewer) {
+            foreach ($Entry in $ContainerFiles) {
+                if ([string]$Entry.status -in @("newer_than_container", "mtime_only", "config_hash_mismatch")) {
+                    $Entry.hash_verification_reason = $HashVerificationReason
+                    if ($null -ne $HashCommandExitCode) {
+                        $Entry.hash_command_exit_code = $HashCommandExitCode
+                    }
+                }
+            }
+        }
+
+        foreach ($Entry in $ContainerFiles) {
+            if ([string]$Entry.status -in @("missing", "newer_than_container", "config_hash_mismatch")) {
+                $Drift += $Entry
+            }
+        }
+
+        $Containers += @{
+            project = $Project
+            service = $Service
+            container = ([string]$Inspect.Name).TrimStart("/")
+            files = $ContainerFiles
+        }
+    }
+
+    return @{
+        containers = $Containers
+        drift = $Drift
+        errors = $Errors
+    }
+}
+
+function Get-ComposeDesiredState {
+    $Desired = @{}
+    $Errors = @()
+
+    foreach ($Project in @($Projects.Keys | Sort-Object)) {
+        $Cfg = $Projects[$Project]
+        $ConfiguredFiles = @($Cfg.Files)
+        if ($ConfiguredFiles.Count -eq 0) {
+            continue
+        }
+
+        $WorkingDir = [string]$Cfg.WorkingDir
+        if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+            $Errors += @{ project = $Project; error = "working_directory_missing" }
+            continue
+        }
+
+        $BaseArgs = @("compose")
+        $MissingFile = $false
+        foreach ($File in @($Cfg.Files)) {
+            $FullPath = Join-Path $WorkingDir ([string]$File)
+            if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+                $Errors += @{ project = $Project; file = [string]$File; error = "compose_file_missing" }
+                $MissingFile = $true
+                break
+            }
+            $BaseArgs += @("-f", $FullPath)
+        }
+        if ($MissingFile) { continue }
+
+        $ConfigRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--format", "json")) -WorkingDirectory $WorkingDir
+        if ([int]$ConfigRun.exit_code -ne 0) {
+            $Errors += @{ project = $Project; error = "compose_config_failed"; detail = ([string]$ConfigRun.output).Trim() }
+            continue
+        }
+
+        try {
+            $Config = ([string]$ConfigRun.output) | ConvertFrom-Json
+        }
+        catch {
+            $Errors += @{ project = $Project; error = "compose_config_invalid_json" }
+            continue
+        }
+
+        $Services = @{}
+        $ServiceProperties = @()
+        if ($null -ne $Config.services) {
+            $ServiceProperties = @($Config.services.PSObject.Properties)
+        }
+
+        foreach ($ServiceProperty in $ServiceProperties) {
+            $Service = [string]$ServiceProperty.Name
+            $ServiceConfig = $ServiceProperty.Value
+            $Image = [string]$ServiceConfig.image
+
+            $HashRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
+            $DesiredHash = $null
+            if ([int]$HashRun.exit_code -eq 0) {
+                $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
+                if ($Tokens.Count -gt 0) {
+                    $DesiredHash = [string]$Tokens[-1]
+                }
+            }
+            else {
+                $Errors += @{ project = $Project; service = $Service; error = "compose_hash_failed"; detail = ([string]$HashRun.output).Trim() }
+            }
+
+            $Services[$Service] = @{
+                image = if ([string]::IsNullOrWhiteSpace($Image)) { $null } else { $Image }
+                config_hash = $DesiredHash
+            }
+        }
+
+        $Desired[$Project] = @{ services = $Services }
+    }
+
+    return @{ projects = $Desired; errors = $Errors }
+}
+
+function Run-ProjectRedeploy {
+    param($Job)
+
+    $Project = [string]$Job.project
+    if (-not $Projects.ContainsKey($Project)) { throw "Project is not allowlisted: $Project" }
+
+    $Cfg = $Projects[$Project]
+    $WorkingDir = [string]$Cfg.WorkingDir
+    if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
+        throw "Allowlisted working directory is missing."
+    }
+
+    $Operation = [string]$Job.operation
+    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "update_stateless")) {
+        throw "Operation is not allowlisted: $Operation"
+    }
+    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged", "update_stateless") -and [string]$Cfg.Mode -ne "script") {
+        throw "Restricted actions are never available to plain Compose projects."
+    }
+
+    $Requested = @($Job.services | ForEach-Object { [string]$_ })
+
+    if ([string]$Cfg.Mode -eq "script") {
+        if ($Operation -eq "update_stateless") {
+            $Reviewed = @("api", "mcp", "playwright-service", "browser-session-service", "playwright-public-proxy-service")
+            if ($Project -cne "firecrawl" -or
+                $Requested.Count -ne 1 -or
+                $Requested[0] -cnotin $Reviewed -or
+                $Requested[0] -cnotin @($Cfg.Services)) {
+                throw "update_stateless requires one explicitly allowlisted Firecrawl stateless service."
+            }
+        }
+        elseif ($Requested.Count -gt 0) {
+            throw "Other script-backed operations cannot accept service selections."
+        }
+        if (-not $Cfg.Operations.ContainsKey($Operation)) {
+            throw "Operation is not configured for $($Project): $Operation"
+        }
+
+        $Script = [string]$Cfg.Script
+        if (-not (Test-Path -LiteralPath $Script -PathType Leaf)) {
+            throw "Allowlisted handler script is missing."
+        }
+
+        $HandlerArgs = @($Cfg.Operations[$Operation] | ForEach-Object { [string]$_ })
+        $ExpectedAction = @{
+            sync_upstream = "sync-upstream"
+            build_only = "build-mcp"
+            deploy_staged = "redeploy-mcp"
+                        update_stateless = "maintain-stateless"
+        }
+        if ($ExpectedAction.ContainsKey($Operation) -and
+            ($HandlerArgs.Count -ne 2 -or $HandlerArgs[0] -cne "-Action" -or
+             $HandlerArgs[1] -cne $ExpectedAction[$Operation])) {
+            throw "Configured $Operation action is invalid."
+        }
+        if ($Operation -eq "update_stateless") {
+            $HandlerArgs += @("-Service", [string]$Requested[0])
+        }
+        # Builds and two Scout gates can exceed the generic 15-minute handler limit.
+        # The bound remains finite and applies to only one selected service.
+        $HandlerTimeout = if ($Operation -eq "update_stateless") { 3600 } else { $ScriptTimeoutSeconds }
+        $HandlerRun = Invoke-ScriptHandler `
+            -JobId ([string]$Job.job_id) `
+            -Project $Project `
+            -Script $Script `
+            -Arguments $HandlerArgs `
+            -WorkingDirectory $WorkingDir `
+            -TimeoutSeconds $HandlerTimeout
+
+        return @{
+            exit_code = $HandlerRun.exit_code
+            output = $HandlerRun.output
+            project = $Project
+            services = @($Cfg.Services)
+            operation = $Operation
+            execution_mode = "script"
+        }
+    }
+
+    if ($Requested.Count -eq 0) { $Requested = @($Cfg.Services) }
+
+    $Allowed = @{}
+    foreach ($Service in @($Cfg.Services)) { $Allowed[[string]$Service] = $true }
+    foreach ($Service in $Requested) {
+        if (-not $Allowed.ContainsKey($Service)) {
+            throw "Service is not allowlisted for $($Project): $Service"
+        }
+    }
+
+    $Args = @("compose")
+    foreach ($File in @($Cfg.Files)) {
+        $FullPath = Join-Path $WorkingDir ([string]$File)
+        if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+            throw "An allowlisted Compose file is missing."
+        }
+        $Args += @("-f", $FullPath)
+    }
+
+    $Args += @("up", "-d")
+    if ($Operation -eq "rebuild_and_redeploy") { $Args += "--build" }
+    $Args += "--force-recreate"
+    $Args += $Requested
+
+    # Docker Compose writes normal progress to stderr. Treat the native
+    # process exit code as authoritative instead of stderr presence.
+    $DockerRun = Invoke-DockerText -Arguments $Args -WorkingDirectory $WorkingDir
+    $Output = [string]$DockerRun.output
+    if ($Output.Length -gt 16000) { $Output = $Output.Substring($Output.Length - 16000) }
+
+    return @{
+        exit_code = [int]$DockerRun.exit_code
+        output = $Output
+        project = $Project
+        services = $Requested
+        operation = $Operation
+        execution_mode = "compose"
+    }
+}
+
+# Read-only fixed-volume telemetry; no caller paths and no mutating operations.
+function Get-HostDiskUsage {
+    $Drives = @()
+    foreach ($Drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($Drive.DriveType -ne [System.IO.DriveType]::Fixed -or -not $Drive.IsReady) { continue }
+            $Total = [int64]$Drive.TotalSize
+            $Available = [int64]$Drive.AvailableFreeSpace
+            if ($Total -le 0 -or $Available -lt 0 -or $Available -gt $Total) { continue }
+            $Letter = ([string]$Drive.Name).Substring(0, 2).ToUpperInvariant()
+            if ($Letter -notmatch '^[A-Z]:$') { continue }
+            $Used = $Total - $Available
+            $Drives += @{
+                volume = $Letter
+                total_bytes = $Total
+                available_bytes = $Available
+                used_bytes = $Used
+                used_percent = [Math]::Round((100.0 * [double]$Used / [double]$Total), 1)
+            }
+        }
+        catch { continue }
+    }
+    return @($Drives | Sort-Object volume)
+}
+
+function Invoke-RunnerSelfTest {
+    $ExpectedCreatedUtc = [DateTime]::SpecifyKind(
+        [DateTime]::new(2026, 10, 1, 2, 39, 48),
+        [DateTimeKind]::Utc
+    )
+    $JsonCreated = ('{"Created":"2026-10-01T02:39:48Z"}' | ConvertFrom-Json).Created
+    foreach ($CreatedValue in @(
+        $JsonCreated,
+        $ExpectedCreatedUtc,
+        [DateTimeOffset]::new($ExpectedCreatedUtc)
+    )) {
+        $ParsedCreatedUtc = ConvertTo-ContainerCreatedUtc -Value $CreatedValue
+        if ($ParsedCreatedUtc -ne $ExpectedCreatedUtc) {
+            throw "Container created timestamp normalization regression."
+        }
+    }
+
+    $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("dockerlocal-runner-selftest-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
+    $TestScript = Join-Path $TestRoot "handler.ps1"
+
+    try {
+        @'
+param(
+    [ValidateSet("Up", "Redeploy", "sync-upstream")]
+    [string]$Action
+)
+Write-Output "ACTION=$Action"
+Write-Host "HOST=$Action"
+'@ | Set-Content -LiteralPath $TestScript -Encoding utf8
+
+        $ZeroArgs = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @() `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$ZeroArgs.exit_code -ne 0) {
+            throw "Zero-argument script invocation regression."
+        }
+
+        $Named = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if (
+            [int]$Named.exit_code -ne 0 -or
+            [string]$Named.output -notmatch 'ACTION=Redeploy' -or
+            [string]$Named.output -notmatch 'HOST=Redeploy' -or
+            [string]$Named.output -match '#< CLIXML'
+        ) {
+            throw "Named-parameter/text-output script invocation regression."
+        }
+
+        # Exercise the generic allowlisted script action end-to-end on a
+        # temporary handler without touching Docker or any real project.
+        $Projects["selftest-upstream"] = @{
+            Mode = "script"
+            WorkingDir = $TestRoot
+            Files = @()
+            Services = @("api")
+            Script = $TestScript
+            Operations = @{ sync_upstream = @("-Action", "sync-upstream") }
+        }
+        try {
+            $Sync = Run-ProjectRedeploy -Job @{
+                job_id = [Guid]::NewGuid().ToString("N")
+                project = "selftest-upstream"
+                operation = "sync_upstream"
+                services = @()
+            }
+            if ([int]$Sync.exit_code -ne 0 -or
+                [string]$Sync.output -notmatch 'ACTION=sync-upstream') {
+                throw "Pinned-upstream script handler regression."
+            }
+            $Projects["selftest-upstream"].Operations.Remove("sync_upstream")
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'Operation is not configured'
+            }
+            if (-not $Denied) { throw "Unconfigured upstream sync was not denied." }
+
+            $Projects["selftest-upstream"].Mode = "compose"
+            $Denied = $false
+            try {
+                [void](Run-ProjectRedeploy -Job @{
+                    job_id = [Guid]::NewGuid().ToString("N")
+                    project = "selftest-upstream"
+                    operation = "sync_upstream"
+                    services = @()
+                })
+            }
+            catch {
+                $Denied = $_.Exception.Message -match 'never available to plain Compose'
+            }
+            if (-not $Denied) { throw "Compose upstream sync was not denied." }
+        }
+        finally {
+            $Projects.Remove("selftest-upstream")
+        }
+
+        $Positional = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("Redeploy") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Positional.exit_code -ne 0 -or [string]$Positional.output -notmatch 'ACTION=Redeploy') {
+            throw "Positional script invocation regression."
+        }
+
+        $Invalid = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $TestScript `
+            -Arguments @("-Action", "DefinitelyInvalid") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$Invalid.exit_code -eq 0) {
+            throw "Script failure was incorrectly reported as exit code 0."
+        }
+
+        $InternalErrorScript = Join-Path $TestRoot "handler-internal-error.ps1"
+        @'
+param([switch]$Noop)
+$ErrorActionPreference = "Continue"
+Set-StrictMode -Version Latest
+$null = $DefinitelyUnsetVariable
+'@ | Set-Content -LiteralPath $InternalErrorScript -Encoding utf8
+
+        $InternalError = Invoke-ScriptHandler `
+            -JobId ([Guid]::NewGuid().ToString("N")) `
+            -Project "selftest" `
+            -Script $InternalErrorScript `
+            -Arguments @("-Noop") `
+            -WorkingDirectory $TestRoot
+
+        if ([int]$InternalError.exit_code -eq 0) {
+            throw "Script-internal PowerShell error was incorrectly reported as exit code 0."
+        }
+
+        $GitExe = (Get-Command git.exe -ErrorAction Stop).Source
+        $OriginRepo = Join-Path $TestRoot "origin.git"
+        $SeedRepo = Join-Path $TestRoot "seed"
+        $TargetRepo = Join-Path $TestRoot "target"
+
+        & $GitExe init --bare $OriginRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test bare init failed." }
+        & $GitExe init -b main $SeedRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test seed init failed." }
+        & $GitExe -C $SeedRepo config user.name "DockerLocal SelfTest"
+        & $GitExe -C $SeedRepo config user.email "selftest@example.invalid"
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "one" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "initial" *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial commit failed." }
+        & $GitExe -C $SeedRepo remote add origin $OriginRepo
+        & $GitExe -C $SeedRepo push -u origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test initial push failed." }
+        & $GitExe clone --branch main $OriginRepo $TargetRepo *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test clone failed." }
+
+        $SelfTestOrigin = (& $GitExe -C $TargetRepo remote get-url origin | Out-String).Trim()
+        $HostRepositories["selftest-repo"] = @{
+            Path = [IO.Path]::GetFullPath($TargetRepo).TrimEnd('\')
+            OriginUrl = $SelfTestOrigin
+            Branch = "main"
+        }
+
+        $BeforeState = Get-RepositoryState -Alias "selftest-repo"
+        if (-not [bool]$BeforeState.eligible_for_pull) {
+            throw "Clean main repository was not eligible for pull."
+        }
+
+        Set-Content -LiteralPath (Join-Path $SeedRepo "version.txt") -Value "two" -Encoding ascii
+        & $GitExe -C $SeedRepo add version.txt
+        & $GitExe -C $SeedRepo commit -m "update" *> $null
+        & $GitExe -C $SeedRepo push origin main *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Git self-test update push failed." }
+
+        $PullState = Invoke-RepositoryPull -Alias "selftest-repo"
+        if (
+            -not [bool]$PullState.changed -or
+            [string]$PullState.before_head -eq [string]$PullState.after_head -or
+            -not [bool]$PullState.clean
+        ) {
+            throw "Fast-forward repository maintenance regression."
+        }
+
+        Set-Content -LiteralPath (Join-Path $TargetRepo "dirty.txt") -Value "dirty" -Encoding ascii
+        $DirtyBlocked = $false
+        try {
+            [void](Invoke-RepositoryPull -Alias "selftest-repo")
+        }
+        catch {
+            if ($_.Exception.Message -eq "Repository has local changes.") {
+                $DirtyBlocked = $true
+            }
+        }
+        if (-not $DirtyBlocked) { throw "Dirty repository pull was not blocked." }
+
+        $HostRepositories.Remove("selftest-repo")
+
+        Write-Host "maintenance runner self-test: PASS"
+    }
+    finally {
+        Remove-Item -LiteralPath $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
+# Long-running Scout/Compose jobs use one bounded child process. The dispatcher
+# stays responsive for read-only host status requests while the child runs.
+# All requests still originate in the existing fixed-schema /control queue.
+function Invoke-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId)
+
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $Job = $null
+    $Action = ""
+    try {
+        if (-not (Test-Path -LiteralPath $ProcessingPath -PathType Leaf)) {
+            throw "Dispatched job is not in processing queue."
+        }
+        $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+        if ([string]$Job.job_id -cne $JobId) { throw "Worker job ID mismatch." }
+        $Action = [string]$Job.action
+        if ($Action -notin @("scout_full_scan", "compose_redeploy")) {
+            throw "Dispatched worker action is not allowlisted."
+        }
+
+        $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        if ($Action -eq "scout_full_scan") {
+            $Result = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+            $Result.started_unix = $Started
+            $Result.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Result
+        }
+        else {
+            $Run = Run-ProjectRedeploy -Job $Job
+            $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status=$Status; started_unix=$Started
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                services=$Run.services; operation=$Run.operation
+                execution_mode=$Run.execution_mode
+                outcome_unknown=([int]$Run.exit_code -eq 124)
+            }
+        }
+    }
+    catch {
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_INTERNAL"
+            $Failure.output = "Dispatched Scout worker failed."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error="Dispatched maintenance operation failed; inspect state before retrying."
+            }
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Project)
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction Stop
+    $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $StartInfo.FileName = $PwshCommand.Source
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.CreateNoWindow = $true
+    foreach ($Argument in @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-WorkerJobId", $JobId)) {
+        [void]$StartInfo.ArgumentList.Add([string]$Argument)
+    }
+    $Child = [Diagnostics.Process]::new()
+    $Child.StartInfo = $StartInfo
+    try {
+        [void]$Child.Start()
+        Write-JsonAtomic -Path $ActiveWorkerFile -Value @{
+            job_id=$JobId; pid=$Child.Id; project=$Project
+            started_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        }
+        return $Child
+    }
+    catch {
+        if (-not $Child.HasExited) {
+            try { $Child.Kill($true) } catch { try { $Child.Kill() } catch {} }
+        }
+        $Child.Dispose()
+        throw
+    }
+}
+
+function Get-ExistingDispatchedWorker {
+    if (-not (Test-Path -LiteralPath $ActiveWorkerFile -PathType Leaf)) { return $null }
+    try {
+        $State = Get-Content -LiteralPath $ActiveWorkerFile -Raw | ConvertFrom-Json
+        $Id = [string]$State.job_id
+        if ($Id -notmatch '^[a-f0-9]{32}$') { return $null }
+        if (-not (Test-Path -LiteralPath (Join-Path $Processing "$Id.json") -PathType Leaf)) { return $null }
+        $Candidate = Get-Process -Id ([int]$State.pid) -ErrorAction SilentlyContinue
+        if ($null -eq $Candidate -or $Candidate.ProcessName -notin @("pwsh", "powershell") -or $Candidate.HasExited) {
+            return $null
+        }
+        # A recycled PID must never be adopted or killed as the previous worker.
+        $ProcessStartUnix = [DateTimeOffset]::new($Candidate.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
+        if ([Math]::Abs($ProcessStartUnix - [int64]$State.started_unix) -gt 30) {
+            return $null
+        }
+        return @{ job_id=$Id; process=$Candidate; started_unix=[int64]$State.started_unix }
+    }
+    catch { return $null }
+}
+
+function Complete-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Reason)
+
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
+        $Action = ""
+        $Job = $null
+        try {
+            $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+            $Action = [string]$Job.action
+        } catch {}
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_RUNNER_RESTART"
+            $Failure.output = "Scout worker terminated without a verified result."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error=$Reason
+            }
+        }
+    }
+    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
+
+if ($SelfTest) {
+    Invoke-RunnerSelfTest
+    exit 0
+}
+
+if ($WorkerJobId) {
+    Invoke-DispatchedWorker -JobId $WorkerJobId
+    exit 0
+}
+
+$Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenanceRunner")
+if (-not $Mutex.WaitOne(0)) { exit 0 }
+
+$ActiveWorker = Get-ExistingDispatchedWorker
+$ActiveLongJobId = if ($ActiveWorker) { [string]$ActiveWorker.job_id } else { "" }
+$ActiveLongProcess = if ($ActiveWorker) { $ActiveWorker.process } else { $null }
+$ActiveLongStarted = if ($ActiveWorker) { [int64]$ActiveWorker.started_unix } else { 0 }
+Recover-OrphanedJobs -SkipJobId $ActiveLongJobId
+if (-not $ActiveWorker) {
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
+Remove-StaleScoutJobDirectories
+Write-RunnerLog "runner started"
+
+try {
+    while ($true) {
+        if ($null -ne $ActiveLongProcess) {
+            $ActiveLongProcess.Refresh()
+            $WorkerExpired = (
+                [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $ActiveLongStarted
+            ) -gt $WorkerTimeoutSeconds
+            if ($WorkerExpired -and -not $ActiveLongProcess.HasExited) {
+                try { $ActiveLongProcess.Kill($true) } catch { try { $ActiveLongProcess.Kill() } catch {} }
+                try { $ActiveLongProcess.WaitForExit(5000) | Out-Null } catch {}
+            }
+            if ($ActiveLongProcess.HasExited) {
+                $Reason = if ($WorkerExpired) {
+                    "Maintenance worker exceeded its time limit; outcome is unverified."
+                } else {
+                    "Maintenance worker exited without writing a verified result."
+                }
+                Complete-DispatchedWorker -JobId $ActiveLongJobId -Reason $Reason
+                $ActiveLongProcess.Dispose()
+                $ActiveLongProcess = $null
+                $ActiveLongJobId = ""
+                $ActiveLongStarted = 0
+            }
+        }
+        Write-JsonAtomic -Path $Heartbeat -Value @{
+            status = "running"
+            pid = $PID
+            updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        }
+
+        foreach ($RequestFile in @(Get-ChildItem -LiteralPath $Requests -Filter "*.json" -File -ErrorAction SilentlyContinue | Sort-Object CreationTimeUtc)) {
+            $JobId = [IO.Path]::GetFileNameWithoutExtension($RequestFile.Name)
+            if ($JobId -notmatch '^[a-f0-9]{32}$') {
+                Remove-Item -LiteralPath $RequestFile.FullName -Force -ErrorAction SilentlyContinue
+                continue
+            }
+
+            $ProcessingPath = Join-Path $Processing $RequestFile.Name
+            $Action = ""
+            $Job = $null
+            $WorkerDispatched = $false
+            try {
+                # Defer only long jobs while a long worker is active; let every
+                # bounded status/control request behind them run without delay.
+                if ($null -ne $ActiveLongProcess) {
+                    $WaitingJob = Get-Content -LiteralPath $RequestFile.FullName -Raw | ConvertFrom-Json
+                    if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy")) {
+                        continue
+                    }
+                }
+                Move-Item -LiteralPath $RequestFile.FullName -Destination $ProcessingPath -Force
+                $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+                if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
+                $Action = [string]$Job.action
+                if ($Action -notin @(
+                    "compose_redeploy",
+                    "compose_desired_state",
+                    "compose_file_state",
+                    "repo_status",
+                    "repo_pull_ff",
+                    "port_registry_status",
+                    "scheduled_task_status",
+                    "scheduled_task_control",
+                    "airsea_coverage_report",
+                    "host_disk_usage",
+                    "scout_full_scan"
+                )) { throw "Action is not allowlisted." }
+
+                Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
+                if ($Action -in @("scout_full_scan", "compose_redeploy")) {
+                    # Image scans are not associated with any Compose project.
+                    # PowerShell Mandatory string parameters reject an empty
+                    # value, so use a fixed telemetry-only name for scan jobs.
+                    $DispatchProject = if ($Action -eq "scout_full_scan") {
+                        "image-scan"
+                    } else { [string]$Job.project }
+                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project $DispatchProject
+                    $ActiveLongJobId = $JobId
+                    $ActiveLongStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    $WorkerDispatched = $true
+                    continue
+                }
+                $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "busy"
+                    pid = $PID
+                    job_id = $JobId
+                    project = [string]$Job.project
+                    updated_unix = $Started
+                }
+
+                if ($Action -eq "compose_desired_state") {
+                    $Desired = Get-ComposeDesiredState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        projects=$Desired.projects; errors=$Desired.errors
+                    }
+                }
+                elseif ($Action -eq "compose_file_state") {
+                    $FileState = Get-ComposeFileState
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        containers=$FileState.containers; drift=$FileState.drift; errors=$FileState.errors
+                    }
+                }
+                elseif ($Action -eq "repo_status") {
+                    $State = Get-RepositoryState -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        repo=$State.repo; branch=$State.branch; head=$State.head
+                        clean=$State.clean; conflicts=$State.conflicts
+                        origin_ok=$State.origin_ok; eligible_for_pull=$State.eligible_for_pull
+                    }
+                }
+                elseif ($Action -eq "repo_pull_ff") {
+                    $Run = Invoke-RepositoryPull -Alias ([string]$Job.repo)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; repo=$Run.repo; branch=$Run.branch
+                        before_head=$Run.before_head; after_head=$Run.after_head
+                        changed=$Run.changed; clean=$Run.clean
+                    }
+                }
+                elseif ($Action -eq "port_registry_status") {
+                    $State = Get-McpPortRegistryStatus
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        version=$State.version; range_start=$State.range_start; range_end=$State.range_end
+                        services=$State.services; docker_reserved_ports=$State.docker_reserved_ports; unregistered_listeners=$State.unregistered_listeners
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_status") {
+                    $State = Get-AllowlistedScheduledTaskState -Alias ([string]$Job.task)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        task=$State.task; state=$State.state
+                        principal=$State.principal; run_level=$State.run_level
+                        last_run_time=$State.last_run_time; last_task_result=$State.last_task_result
+                    }
+                }
+                elseif ($Action -eq "scheduled_task_control") {
+                    $Run = Invoke-AllowlistedScheduledTaskControl -Alias ([string]$Job.task) -Operation ([string]$Job.operation)
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        action=$Run.action; task=$Run.task; operation=$Run.operation
+                        before_state=$Run.before_state; after_state=$Run.after_state
+                        last_task_result=$Run.last_task_result
+                    }
+                }
+                elseif ($Action -eq "airsea_coverage_report") {
+                    # Explicitly opt-in by the existing local-only scheduled-task
+                    # allowlist. No caller paths, SQL or arbitrary host commands.
+                    if (-not $HostScheduledTasks.ContainsKey("MarketObservationPilotShadow")) {
+                        throw "AIRSEA_REPORT_NOT_ALLOWLISTED"
+                    }
+                    $ReportScript = Join-Path $Root "airsea-coverage-report.py"
+                    if (-not (Test-Path -LiteralPath $ReportScript -PathType Leaf)) {
+                        throw "AIRSEA_REPORT_HELPER_NOT_INSTALLED"
+                    }
+                    $PythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
+                    if ($null -eq $PythonCommand) { throw "AIRSEA_PYTHON_NOT_AVAILABLE" }
+                    $RawReport = (& $PythonCommand.Source -I -B $ReportScript 2>$null | Out-String).Trim()
+                    if ($LASTEXITCODE -ne 0) { throw "AIRSEA_REPORT_NOT_AVAILABLE" }
+                    try {
+                        $Report = $RawReport | ConvertFrom-Json -ErrorAction Stop
+                    } catch {
+                        throw "AIRSEA_REPORT_INVALID_JSON"
+                    }
+                    if ($null -eq $Report -or [string]$Report.status -cne "succeeded") {
+                        throw "AIRSEA_REPORT_UNAVAILABLE"
+                    }
+                    # The Python helper has an exact immutable query surface
+                    # and cannot return raw observation tables. The server
+                    # performs independent strict field whitelisting.
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        report=$Report
+                    }
+                }
+                elseif ($Action -eq "host_disk_usage") {
+                    # No client-supplied disk paths. Return aggregate capacity only.
+                    $Drives = @(Get-HostDiskUsage)
+                    $MeasurementStatus = if ($Drives.Count -gt 0) { "measured" } else { "unknown" }
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        measurement_status=$MeasurementStatus
+                        measured_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        drives=$Drives
+                    }
+                }
+                elseif ($Action -eq "scout_full_scan") {
+                    $Run = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+                    $Run.started_unix = $Started
+                    $Run.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Run
+                }
+                else {
+                    $Run = Run-ProjectRedeploy -Job $Job
+                    $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status=$Status; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                        services=$Run.services; operation=$Run.operation
+                        execution_mode=$Run.execution_mode
+                    }
+                }
+            }
+            catch {
+                Write-RunnerLog "job $JobId failed: $($_.Exception.Message)"
+                if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+                    $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+                    $Failure.status = "failed"
+                    $Failure.scan_complete = $false
+                    $Failure.error_code = "SCAN_FAILED_INTERNAL"
+                    $Failure.output = $_.Exception.Message
+                    $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $Failure
+                }
+                else {
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value @{
+                        job_id=$JobId; status="failed"
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                        error=$_.Exception.Message
+                    }
+                }
+            }
+            finally {
+                if (-not $WorkerDispatched) {
+                    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+                }
+                Write-JsonAtomic -Path $Heartbeat -Value @{
+                    status = "running"
+                    pid = $PID
+                    updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                }
+            }
+        }
+
+        Get-ChildItem -LiteralPath $Results -Filter "*.json" -File -ErrorAction SilentlyContinue |
+            Where-Object LastWriteTimeUtc -lt (Get-Date).ToUniversalTime().AddDays(-7) |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+        Start-Sleep -Seconds 2
+    }
+}
+finally {
+    try { $Mutex.ReleaseMutex() } catch {}
+    $Mutex.Dispose()
+}) { continue }
+        $Entry = "$Name@$Version ($Ecosystem)"
+        if (-not $Unique.Contains($Entry)) { $Unique[$Entry] = $true }
+        if ($Unique.Count -ge 100) { break }
+    }
+    if ($Unique.Count -eq 0) { return 'SCOUT_DIAGNOSTIC_PACKAGES: unavailable' }
+    return 'SCOUT_DIAGNOSTIC_PACKAGES (scan NOT approved): ' + ((@($Unique.Keys)) -join ', ')
+}
+
 function ConvertFrom-ScoutGitLabReport {
     param([AllowEmptyString()][string]$JsonText)
 
