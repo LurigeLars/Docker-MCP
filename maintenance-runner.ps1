@@ -25,7 +25,7 @@ $ScoutUserDpapi = Join-Path $Root "secrets\scout_hub_user.dpapi"
 $ScoutPasswordDpapi = Join-Path $Root "secrets\scout_hub_password.dpapi"
 $ScoutTimeoutSeconds = 600
 $ScriptTimeoutSeconds = 900
-$WorkerTimeoutSeconds = 1800
+$WorkerTimeoutSeconds = 4200
 $ActiveWorkerFile = Join-Path $Control "active-worker.json"
 $ScoutOutputLimit = 16000
 $ScoutImageRefPattern = '^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$'
@@ -93,7 +93,7 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
 
             $OperationConfig = $OperationsProperty.Value
             $Operations = @{}
-            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged")) {
+            foreach ($OperationName in @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "update_stateless")) {
                 $OperationProperty = $OperationConfig.PSObject.Properties[$OperationName]
                 if ($null -ne $OperationProperty) {
                     $Arguments = @($OperationProperty.Value | ForEach-Object { [string]$_ })
@@ -103,8 +103,7 @@ if (Test-Path -LiteralPath $LocalProjectConfig -PathType Leaf) {
                         sync_upstream = "sync-upstream"
                         build_only = "build-mcp"
                         deploy_staged = "redeploy-mcp"
-                        api_build_only = "stage-api"
-                        api_deploy_staged = "deploy-api"
+                        update_stateless = "maintain-stateless"
                     }
                     if ($FixedScriptActions.ContainsKey($OperationName) -and
                         ($Arguments.Count -ne 2 -or $Arguments[0] -cne "-Action" -or
@@ -828,7 +827,8 @@ function Invoke-ScriptHandler {
         [Parameter(Mandatory)][string]$Project,
         [Parameter(Mandatory)][string]$Script,
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments,
-        [Parameter(Mandatory)][string]$WorkingDirectory
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [int]$TimeoutSeconds = $ScriptTimeoutSeconds
     )
 
     $PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
@@ -881,7 +881,7 @@ function Invoke-ScriptHandler {
             -RedirectStandardError $StdErrPath `
             -PassThru
 
-        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($ScriptTimeoutSeconds)
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
         while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
             if (-not $WorkerJobId) {
             Write-JsonAtomic -Path $Heartbeat -Value @{
@@ -1551,18 +1551,27 @@ function Run-ProjectRedeploy {
     }
 
     $Operation = [string]$Job.operation
-    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged")) {
+    if ($Operation -notin @("redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "update_stateless")) {
         throw "Operation is not allowlisted: $Operation"
     }
-    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged", "api_build_only", "api_deploy_staged") -and [string]$Cfg.Mode -ne "script") {
+    if ($Operation -in @("sync_upstream", "build_only", "deploy_staged", "update_stateless") -and [string]$Cfg.Mode -ne "script") {
         throw "Restricted actions are never available to plain Compose projects."
     }
 
     $Requested = @($Job.services | ForEach-Object { [string]$_ })
 
     if ([string]$Cfg.Mode -eq "script") {
-        if ($Requested.Count -gt 0) {
-            throw "Script-backed project $Project only supports whole-project actions; omit services."
+        if ($Operation -eq "update_stateless") {
+            $Reviewed = @("api", "mcp", "playwright-service", "browser-session-service", "playwright-public-proxy-service")
+            if ($Project -cne "firecrawl" -or
+                $Requested.Count -ne 1 -or
+                $Requested[0] -cnotin $Reviewed -or
+                $Requested[0] -cnotin @($Cfg.Services)) {
+                throw "update_stateless requires one explicitly allowlisted Firecrawl stateless service."
+            }
+        }
+        elseif ($Requested.Count -gt 0) {
+            throw "Other script-backed operations cannot accept service selections."
         }
         if (-not $Cfg.Operations.ContainsKey($Operation)) {
             throw "Operation is not configured for $($Project): $Operation"
@@ -1578,20 +1587,26 @@ function Run-ProjectRedeploy {
             sync_upstream = "sync-upstream"
             build_only = "build-mcp"
             deploy_staged = "redeploy-mcp"
-                        api_build_only = "stage-api"
-                        api_deploy_staged = "deploy-api"
+                        update_stateless = "maintain-stateless"
         }
         if ($ExpectedAction.ContainsKey($Operation) -and
             ($HandlerArgs.Count -ne 2 -or $HandlerArgs[0] -cne "-Action" -or
              $HandlerArgs[1] -cne $ExpectedAction[$Operation])) {
             throw "Configured $Operation action is invalid."
         }
+        if ($Operation -eq "update_stateless") {
+            $HandlerArgs += @("-Service", [string]$Requested[0])
+        }
+        # Builds and two Scout gates can exceed the generic 15-minute handler limit.
+        # The bound remains finite and applies to only one selected service.
+        $HandlerTimeout = if ($Operation -eq "update_stateless") { 3600 } else { $ScriptTimeoutSeconds }
         $HandlerRun = Invoke-ScriptHandler `
             -JobId ([string]$Job.job_id) `
             -Project $Project `
             -Script $Script `
             -Arguments $HandlerArgs `
-            -WorkingDirectory $WorkingDir
+            -WorkingDirectory $WorkingDir `
+            -TimeoutSeconds $HandlerTimeout
 
         return @{
             exit_code = $HandlerRun.exit_code
