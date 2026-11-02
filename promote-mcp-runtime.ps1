@@ -262,6 +262,63 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         })
         $Changed = $true
     }
+    # Generic host-approved Python projects. Configure once; subsequent
+    # version bumps only require a clean Git fast-forward and uv.lock.
+    $PythonHandler = Join-Path $SourceRoot 'maintain-python-project.ps1'
+    Require-File $PythonHandler
+    $PythonSource = Get-Content -LiteralPath $PythonHandler -Raw
+    if ($PythonSource -notmatch 'sync --locked --no-dev' -or
+        $PythonSource -notmatch 'Get-ScheduledTask -TaskName' -or
+        $PythonSource -notmatch 'remote get-url origin' -or
+        $PythonSource -notmatch 'Project maintenance script binding changed') {
+        throw 'Generic Python MCP maintenance handler failed reviewed preflight.'
+    }
+    $PythonProjects = [ordered]@{
+        'avanza-python-mcp' = @{ repository='avanza-mcp'; task='AvanzaMcpHttpServer'; port=8767 }
+        'yfinance-python-mcp' = @{ repository='yfinance-mcp'; task='YFinanceMcpHttpServer'; port=8772 }
+    }
+    foreach ($Alias in $PythonProjects.Keys) {
+        $Definition = $PythonProjects[$Alias]
+        $RootPath = Join-Path 'C:\ClaudeCode' $Definition.repository
+        $ExpectedArgs = @('-Project',$Alias)
+        $Known = $Cfg.PSObject.Properties[$Alias]
+        if ($null -ne $Known) {
+            $Entry = $Known.Value
+            $ConfiguredArgs = @($Entry.handler.operations.rebuild_and_redeploy)
+            if ([string]$Entry.working_dir -ine $RootPath -or
+                [string]$Entry.handler.script -ine $PythonHandler -or
+                @($Entry.services).Count -ne 1 -or [string]$Entry.services[0] -cne 'http' -or
+                [string]$Entry.python.repository -cne [string]$Definition.repository -or
+                [string]$Entry.python.task_name -cne [string]$Definition.task -or
+                [int]$Entry.python.port -ne [int]$Definition.port -or
+                $ConfiguredArgs.Count -ne 2 -or
+                $ConfiguredArgs[0] -cne $ExpectedArgs[0] -or
+                $ConfiguredArgs[1] -cne $ExpectedArgs[1]) {
+                throw "Existing Python MCP policy differs from approved project definition: $Alias"
+            }
+            continue
+        }
+        foreach ($File in @('pyproject.toml','uv.lock')) {
+            Require-File (Join-Path $RootPath $File)
+        }
+        $Cfg | Add-Member -NotePropertyName $Alias -NotePropertyValue ([pscustomobject]@{
+            working_dir = $RootPath
+            files = @('pyproject.toml','uv.lock')
+            services = @('http')
+            python = [pscustomobject]@{
+                repository = [string]$Definition.repository
+                task_name = [string]$Definition.task
+                port = [int]$Definition.port
+            }
+            handler = [pscustomobject]@{
+                script = $PythonHandler
+                operations = [pscustomobject]@{
+                    rebuild_and_redeploy = $ExpectedArgs
+                }
+            }
+        })
+        $Changed = $true
+    }
     if (-not $Changed) {
         Write-Output 'FIRECRAWL_PLAYWRIGHT_ACTIONS_ALREADY_ENABLED'
         return

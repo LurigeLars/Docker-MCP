@@ -51,6 +51,28 @@ $Definitions = [ordered]@{
         files = @('compose.public.yaml')
         services = @('gateway')
     }
+    # Add each Python MCP project once. Future locked dependency updates use
+    # the shared routine; there are no per-version or per-package host actions.
+    'avanza-python-mcp' = @{
+        working_dir = (Join-Path $ClaudeRoot 'avanza-mcp')
+        files = @('pyproject.toml', 'uv.lock')
+        services = @('http')
+        python = @{ repository='avanza-mcp'; task_name='AvanzaMcpHttpServer'; port=8767 }
+        handler = @{
+            script = (Join-Path $PSScriptRoot 'maintain-python-project.ps1')
+            operations = @{ rebuild_and_redeploy = @('-Project','avanza-python-mcp') }
+        }
+    }
+    'yfinance-python-mcp' = @{
+        working_dir = (Join-Path $ClaudeRoot 'yfinance-mcp')
+        files = @('pyproject.toml', 'uv.lock')
+        services = @('http')
+        python = @{ repository='yfinance-mcp'; task_name='YFinanceMcpHttpServer'; port=8772 }
+        handler = @{
+            script = (Join-Path $PSScriptRoot 'maintain-python-project.ps1')
+            operations = @{ rebuild_and_redeploy = @('-Project','yfinance-python-mcp') }
+        }
+    }
     'influencerresearch' = @{
         working_dir = (Join-Path $ClaudeRoot 'InfluencerResearch')
         files = @('compose.yaml')
