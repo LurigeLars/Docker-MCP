@@ -161,6 +161,26 @@ if ($Added.Count -eq 0) {
     return
 }
 
+# Installing restarts the local maintenance runner. Refuse to interrupt a dispatched job.
+$ControlPath = Join-Path $LocalRoot 'control'
+$ActiveWorker = Join-Path $ControlPath 'active-worker.json'
+$ProcessingDir = Join-Path $ControlPath 'processing'
+$HeartbeatPath = Join-Path $ControlPath 'runner-heartbeat.json'
+if (Test-Path -LiteralPath $ActiveWorker -PathType Leaf) {
+    throw 'An active maintenance worker is registered. No allowlist changes made.'
+}
+if (Test-Path -LiteralPath $ProcessingDir -PathType Container) {
+    if (@(Get-ChildItem -LiteralPath $ProcessingDir -Filter '*.json' -File).Count -gt 0) {
+        throw 'Maintenance jobs are currently processing. No allowlist changes made.'
+    }
+}
+if (Test-Path -LiteralPath $HeartbeatPath -PathType Leaf) {
+    $CurrentHeartbeat = Get-Content -LiteralPath $HeartbeatPath -Raw | ConvertFrom-Json
+    if ([string]$CurrentHeartbeat.status -eq 'busy') {
+        throw 'Maintenance runner is busy. No allowlist changes made.'
+    }
+}
+
 New-Item -ItemType Directory -Path $LocalRoot -Force | Out-Null
 $Timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Backup = "$ConfigPath.backup-$Timestamp"
