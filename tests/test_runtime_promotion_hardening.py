@@ -97,3 +97,24 @@ def test_self_refresh_has_preflight_backup_and_bounded_rollback():
     assert "$ProcessFiles.Count -ne 1" in PROMOTE
     assert "$OtherRequests.Count -gt 0" in PROMOTE
     assert "Source repository origin does not match the reviewed GitHub repository." in PROMOTE
+
+
+def test_playwright_host_allowlist_migration_is_six_exact_actions():
+    assert "Enable-ReviewedFirecrawlPlaywrightActions" in PROMOTE
+    for alias in (
+        "firecrawl-playwright-stage", "firecrawl-browser-stage",
+        "firecrawl-proxy-stage", "firecrawl-playwright-deploy",
+        "firecrawl-browser-deploy", "firecrawl-proxy-deploy"
+    ):
+        assert alias in PROMOTE
+    for action in (
+        "stage-playwright", "stage-browser", "stage-proxy",
+        "deploy-playwright", "deploy-browser", "deploy-proxy"
+    ):
+        assert action in PROMOTE
+    assert "[string]$Existing.Value.handler.script" in PROMOTE
+    assert "'dockerlocal-runtime-promotion'" in PROMOTE
+    assert "another maintenance job is active or queued" in PROMOTE
+    assert "maintenance-projects.local.json" in PROMOTE
+    assert "files = @()" in PROMOTE
+    assert "FIRECRAWL_PLAYWRIGHT_ACTIONS_ENABLED" in PROMOTE
