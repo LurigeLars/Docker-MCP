@@ -39,7 +39,7 @@ class NonblockingMaintenanceRunnerTests(unittest.TestCase):
     def test_bounded_child_lifetime_and_tree_termination(self):
         self.assertIn('$ScoutTimeoutSeconds = 600', SOURCE)
         self.assertIn('$ScriptTimeoutSeconds = 900', SOURCE)
-        self.assertIn('$WorkerTimeoutSeconds = 1800', SOURCE)
+        self.assertIn('$WorkerTimeoutSeconds = 4200', SOURCE)
         self.assertIn('$Process.Kill($true)', SOURCE)
         self.assertIn('$ActiveLongProcess.Kill($true)', SOURCE)
         self.assertIn('exit_code = 124', SOURCE)

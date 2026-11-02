@@ -89,6 +89,52 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertIn('if (-not $Cfg.Operations.ContainsKey($Operation))', runner)
         self.assertNotIn('Invoke-Expression', runner)
 
+    def test_one_operation_per_allowlisted_stateless_firecrawl_service(self):
+        reviewed = ("api", "mcp", "playwright-service",
+                    "browser-session-service", "playwright-public-proxy-service")
+        for service in reviewed:
+            with self.subTest(service=service):
+                with unittest.mock.patch.object(server, "_write_job", return_value="a" * 32) as enqueue:
+                    result = json.loads(server.compose_redeploy(
+                        "firecrawl", services=[service], operation="update_stateless"
+                    ))
+                self.assertEqual(result["operation"], "update_stateless")
+                enqueue.assert_called_once_with({
+                    "action": "compose_redeploy",
+                    "project": "firecrawl",
+                    "services": [service],
+                    "operation": "update_stateless",
+                })
+        for project, services in (
+            ("firecrawl", []),
+            ("firecrawl", ["api", "mcp"]),
+            ("firecrawl", ["redis"]),
+            ("firecrawl", ["rabbitmq"]),
+            ("firecrawl", ["nuq-postgres"]),
+            ("firecrawl", ["searxng"]),
+            ("influencerresearch", ["camofox"]),
+        ):
+            with self.subTest(project=project, services=services):
+                with unittest.mock.patch.object(server, "_write_job") as enqueue:
+                    with self.assertRaises(ValueError):
+                        server.compose_redeploy(
+                            project, services=services, operation="update_stateless"
+                        )
+                    enqueue.assert_not_called()
+
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        runner = (root / "maintenance-runner.ps1").read_text()
+        optin = (root / "enable-project-staged-rollout.ps1").read_text()
+        self.assertIn('update_stateless = "maintain-stateless"', runner)
+        self.assertIn('$Required["update_stateless"] = "maintain-stateless"', optin)
+        self.assertIn('if ($Project -ceq "firecrawl")', optin)
+        self.assertIn('$Requested.Count -ne 1', runner)
+        self.assertIn('$Requested[0] -cnotin @($Cfg.Services)', runner)
+        self.assertIn('$HandlerArgs += @("-Service", [string]$Requested[0])', runner)
+        self.assertIn('3600', runner)
+        self.assertNotIn('Invoke-Expression', runner)
+
     def test_repo_status_uses_alias_only_and_compacts_result(self):
         raw = {
             "job_id": "a" * 32,

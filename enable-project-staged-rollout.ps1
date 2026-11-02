@@ -60,7 +60,23 @@ $Required = @{
     build_only = "build-mcp"
     deploy_staged = "redeploy-mcp"
 }
-foreach ($Name in @("build_only", "deploy_staged")) {
+# Firecrawl's one-command maintenance may target ONLY this fixed stateless list.
+# This opt-in changes the local allowlist, never the running containers.
+if ($Project -ceq "firecrawl") {
+    $ApiStage = Join-Path $WorkingDir "security\staged-api-image.ps1"
+    if (-not (Test-Path -LiteralPath $ApiStage -PathType Leaf) -or
+        $ScriptSource -notmatch "'maintain-stateless'\s*\{" -or
+        $ScriptSource -notmatch "Invoke-ApiStage" -or
+        $ScriptSource -notmatch "Invoke-PlaywrightStage" -or
+        $ScriptSource -notmatch "Invoke-McpStageSecurityCheck") {
+        throw "Firecrawl stateless maintenance handler is missing or unreviewed."
+    }
+    $Required["update_stateless"] = "maintain-stateless"
+    $Reviewed = @("api", "mcp", "playwright-service", "browser-session-service", "playwright-public-proxy-service")
+    $Configured = @($Cfg.services | ForEach-Object { [string]$_ })
+    $Cfg.services = @($Configured + $Reviewed | Select-Object -Unique)
+}
+foreach ($Name in @($Required.Keys)) {
     $Expected = [string]$Required[$Name]
     $Existing = $Operations.PSObject.Properties[$Name]
     if ($null -ne $Existing) {
@@ -93,4 +109,4 @@ catch {
 finally {
     Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
 }
-Write-Host "Reviewed build_only and deploy_staged enabled for $Project; no image changed."
+Write-Host "Reviewed staged rollout operations enabled for $Project; no image changed."

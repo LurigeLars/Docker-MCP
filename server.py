@@ -832,7 +832,7 @@ def cleanup_superseded_images(image_refs: list[str]):
 def compose_redeploy(
     project: str,
     services: list[str] | None = None,
-    operation: Literal["redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged"] = "rebuild_and_redeploy",
+    operation: Literal["redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "update_stateless"] = "rebuild_and_redeploy",
 ):
     """Queue a reviewed allowlisted project action; no paths, commands or image refs accepted."""
     project = _project(project)
@@ -842,10 +842,18 @@ def compose_redeploy(
             raise ValueError("Invalid service name")
         clean_services.append(service)
 
-    if operation not in {"redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged"}:
+    if operation not in {"redeploy_current", "rebuild_and_redeploy", "sync_upstream", "build_only", "deploy_staged", "update_stateless"}:
         raise ValueError("Unsupported maintenance operation")
     if operation in {"sync_upstream", "build_only", "deploy_staged"} and clean_services:
         raise ValueError("Restricted script-backed operations cannot accept services")
+    # One operation per explicitly reviewed stateless Firecrawl service.
+    if operation == "update_stateless":
+        stateless = {
+            "api", "mcp", "playwright-service", "browser-session-service",
+            "playwright-public-proxy-service",
+        }
+        if project != "firecrawl" or len(clean_services) != 1 or clean_services[0] not in stateless:
+            raise ValueError("Stateful or unreviewed service cannot use update_stateless")
 
     job_id = _write_job(
         {
