@@ -170,7 +170,7 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
     # and no generic shell/build/restart privilege granted to the container.
     $FirecrawlRoot = 'C:\ClaudeCode\firecrawl-local'
     Assert-CleanSource -Path $FirecrawlRoot -Repository 'firecrawl-local-mcp'
-    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security','security\refresh-ephemeral.ps1')) {
+    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security','security\refresh-ephemeral.ps1','security\refresh-searxng.ps1')) {
         Require-File (Join-Path $FirecrawlRoot $Relative)
     }
     $FcText = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'fc.ps1') -Raw
@@ -179,6 +179,12 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         $RefreshSource -notmatch '--no-deps --no-build --force-recreate' -or
         $RefreshSource -notmatch 'scout cves --only-severity critical,high --only-fixed --exit-code') {
         throw 'Reviewed Firecrawl ephemeral refresh implementation not present.'
+    }
+    $SearchRefresh = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'security\refresh-searxng.ps1') -Raw
+    if ($SearchRefresh -notmatch 'function Invoke-FirecrawlSearchBackendRefresh' -or
+        $SearchRefresh -notmatch '--no-deps --no-build --force-recreate' -or
+        $SearchRefresh -notmatch 'scout cves --only-severity critical,high --only-fixed --exit-code') {
+        throw 'Reviewed Firecrawl SearXNG refresh implementation not present.'
     }
     $ServiceMap = [ordered]@{
         'firecrawl-playwright-stage' = @('stage-playwright','playwright-service')
@@ -189,6 +195,7 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         'firecrawl-proxy-deploy' = @('deploy-proxy','playwright-public-proxy-service')
         'firecrawl-redis-refresh' = @('refresh-redis','redis')
         'firecrawl-rabbitmq-refresh' = @('refresh-rabbitmq','rabbitmq')
+        'firecrawl-searxng-refresh' = @('refresh-searxng','searxng')
     }
     $ConfigPath = Join-Path $LocalRoot 'maintenance-projects.local.json'
     Require-File $ConfigPath
