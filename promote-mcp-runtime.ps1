@@ -170,10 +170,16 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
     # and no generic shell/build/restart privilege granted to the container.
     $FirecrawlRoot = 'C:\ClaudeCode\firecrawl-local'
     Assert-CleanSource -Path $FirecrawlRoot -Repository 'firecrawl-local-mcp'
-    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security')) {
+    foreach ($Relative in @('fc.ps1','security\staged-playwright-image.ps1','security\Dockerfile.playwright-security','security\refresh-ephemeral.ps1')) {
         Require-File (Join-Path $FirecrawlRoot $Relative)
     }
     $FcText = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'fc.ps1') -Raw
+    $RefreshSource = Get-Content -LiteralPath (Join-Path $FirecrawlRoot 'security\refresh-ephemeral.ps1') -Raw
+    if ($RefreshSource -notmatch 'function Invoke-FirecrawlEphemeralRefresh' -or
+        $RefreshSource -notmatch '--no-deps --no-build --force-recreate' -or
+        $RefreshSource -notmatch 'scout cves --only-severity critical,high --only-fixed --exit-code') {
+        throw 'Reviewed Firecrawl ephemeral refresh implementation not present.'
+    }
     $ServiceMap = [ordered]@{
         'firecrawl-playwright-stage' = @('stage-playwright','playwright-service')
         'firecrawl-browser-stage' = @('stage-browser','browser-session-service')
@@ -181,6 +187,8 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         'firecrawl-playwright-deploy' = @('deploy-playwright','playwright-service')
         'firecrawl-browser-deploy' = @('deploy-browser','browser-session-service')
         'firecrawl-proxy-deploy' = @('deploy-proxy','playwright-public-proxy-service')
+        'firecrawl-redis-refresh' = @('refresh-redis','redis')
+        'firecrawl-rabbitmq-refresh' = @('refresh-rabbitmq','rabbitmq')
     }
     $ConfigPath = Join-Path $LocalRoot 'maintenance-projects.local.json'
     Require-File $ConfigPath
