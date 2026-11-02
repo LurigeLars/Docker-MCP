@@ -1,4 +1,4 @@
-param([switch]$SelfTest)
+param([switch]$SelfTest, [ValidatePattern("^[a-f0-9]{32}$")][string]$WorkerJobId)
 
 $ErrorActionPreference = "Stop"
 
@@ -21,6 +21,9 @@ $ScoutJobsRoot = Join-Path $Root "scout-jobs"
 $ScoutUserDpapi = Join-Path $Root "secrets\scout_hub_user.dpapi"
 $ScoutPasswordDpapi = Join-Path $Root "secrets\scout_hub_password.dpapi"
 $ScoutTimeoutSeconds = 600
+$ScriptTimeoutSeconds = 900
+$WorkerTimeoutSeconds = 1800
+$ActiveWorkerFile = Join-Path $Control "active-worker.json"
 $ScoutOutputLimit = 16000
 $ScoutImageRefPattern = '^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$'
 $ScoutSeverities = @("critical", "high", "medium", "low", "unspecified")
@@ -245,8 +248,10 @@ function ConvertTo-ContainerCreatedUtc {
 }
 
 function Recover-OrphanedJobs {
+    param([string]$SkipJobId = "")
     foreach ($ProcessingFile in @(Get-ChildItem -LiteralPath $Processing -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
         $JobId = [IO.Path]::GetFileNameWithoutExtension($ProcessingFile.Name)
+        if ($JobId -ceq $SkipJobId) { continue }
         if ($JobId -notmatch '^[a-f0-9]{32}$') {
             Write-RunnerLog "removed invalid orphaned processing file: $($ProcessingFile.Name)"
             Remove-Item -LiteralPath $ProcessingFile.FullName -Force -ErrorAction SilentlyContinue
@@ -674,6 +679,7 @@ function Invoke-ScoutFullScan {
         $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($ScoutTimeoutSeconds)
 
         while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
             Write-JsonAtomic -Path $Heartbeat -Value @{
                 status = "busy"
                 pid = $PID
@@ -681,6 +687,7 @@ function Invoke-ScoutFullScan {
                 project = "scout_full_scan"
                 child_pid = $Process.Id
                 updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            }
             }
             Start-Sleep -Seconds 1
             $Process.Refresh()
@@ -830,7 +837,9 @@ function Invoke-ScriptHandler {
             -RedirectStandardError $StdErrPath `
             -PassThru
 
-        while (-not $Process.HasExited) {
+        $Deadline = [DateTimeOffset]::UtcNow.AddSeconds($ScriptTimeoutSeconds)
+        while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+            if (-not $WorkerJobId) {
             Write-JsonAtomic -Path $Heartbeat -Value @{
                 status = "busy"
                 pid = $PID
@@ -839,8 +848,15 @@ function Invoke-ScriptHandler {
                 child_pid = $Process.Id
                 updated_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             }
+            }
             Start-Sleep -Seconds 2
             $Process.Refresh()
+        }
+
+        if (-not $Process.HasExited) {
+            try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            try { $Process.WaitForExit(5000) | Out-Null } catch {}
+            return @{ exit_code = 124; output = "Script-backed maintenance timed out; completion is unverified." }
         }
 
         $ExitCode = [int]$Process.ExitCode
@@ -855,7 +871,12 @@ function Invoke-ScriptHandler {
         return @{ exit_code = $ExitCode; output = $Output }
     }
     finally {
-        if ($Process) { $Process.Dispose() }
+        if ($Process) {
+            if (-not $Process.HasExited) {
+                try { $Process.Kill($true) } catch { try { $Process.Kill() } catch {} }
+            }
+            $Process.Dispose()
+        }
         Remove-Item -LiteralPath $StdOutPath, $StdErrPath -Force -ErrorAction SilentlyContinue
     }
 }
@@ -1771,20 +1792,200 @@ $null = $DefinitelyUnsetVariable
     }
 }
 
+
+# Long-running Scout/Compose jobs use one bounded child process. The dispatcher
+# stays responsive for read-only host status requests while the child runs.
+# All requests still originate in the existing fixed-schema /control queue.
+function Invoke-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId)
+
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $Job = $null
+    $Action = ""
+    try {
+        if (-not (Test-Path -LiteralPath $ProcessingPath -PathType Leaf)) {
+            throw "Dispatched job is not in processing queue."
+        }
+        $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+        if ([string]$Job.job_id -cne $JobId) { throw "Worker job ID mismatch." }
+        $Action = [string]$Job.action
+        if ($Action -notin @("scout_full_scan", "compose_redeploy")) {
+            throw "Dispatched worker action is not allowlisted."
+        }
+
+        $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        if ($Action -eq "scout_full_scan") {
+            $Result = Invoke-ScoutFullScan -JobId $JobId -Job $Job
+            $Result.started_unix = $Started
+            $Result.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Result
+        }
+        else {
+            $Run = Run-ProjectRedeploy -Job $Job
+            $Status = if ([int]$Run.exit_code -eq 0) { "succeeded" } else { "failed" }
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status=$Status; started_unix=$Started
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                exit_code=$Run.exit_code; output=$Run.output; project=$Run.project
+                services=$Run.services; operation=$Run.operation
+                execution_mode=$Run.execution_mode
+                outcome_unknown=([int]$Run.exit_code -eq 124)
+            }
+        }
+    }
+    catch {
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_INTERNAL"
+            $Failure.output = "Dispatched Scout worker failed."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error="Dispatched maintenance operation failed; inspect state before retrying."
+            }
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Project)
+
+    $PwshCommand = Get-Command pwsh.exe -ErrorAction Stop
+    $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $StartInfo.FileName = $PwshCommand.Source
+    $StartInfo.UseShellExecute = $false
+    $StartInfo.CreateNoWindow = $true
+    foreach ($Argument in @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath, "-WorkerJobId", $JobId)) {
+        [void]$StartInfo.ArgumentList.Add([string]$Argument)
+    }
+    $Child = [Diagnostics.Process]::new()
+    $Child.StartInfo = $StartInfo
+    try {
+        [void]$Child.Start()
+        Write-JsonAtomic -Path $ActiveWorkerFile -Value @{
+            job_id=$JobId; pid=$Child.Id; project=$Project
+            started_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        }
+        return $Child
+    }
+    catch {
+        if (-not $Child.HasExited) {
+            try { $Child.Kill($true) } catch { try { $Child.Kill() } catch {} }
+        }
+        $Child.Dispose()
+        throw
+    }
+}
+
+function Get-ExistingDispatchedWorker {
+    if (-not (Test-Path -LiteralPath $ActiveWorkerFile -PathType Leaf)) { return $null }
+    try {
+        $State = Get-Content -LiteralPath $ActiveWorkerFile -Raw | ConvertFrom-Json
+        $Id = [string]$State.job_id
+        if ($Id -notmatch '^[a-f0-9]{32}$') { return $null }
+        if (-not (Test-Path -LiteralPath (Join-Path $Processing "$Id.json") -PathType Leaf)) { return $null }
+        $Candidate = Get-Process -Id ([int]$State.pid) -ErrorAction SilentlyContinue
+        if ($null -eq $Candidate -or $Candidate.ProcessName -notin @("pwsh", "powershell") -or $Candidate.HasExited) {
+            return $null
+        }
+        return @{ job_id=$Id; process=$Candidate; started_unix=[int64]$State.started_unix }
+    }
+    catch { return $null }
+}
+
+function Complete-DispatchedWorker {
+    param([Parameter(Mandatory)][string]$JobId,
+          [Parameter(Mandatory)][string]$Reason)
+
+    $ResultPath = Join-Path $Results "$JobId.json"
+    $ProcessingPath = Join-Path $Processing "$JobId.json"
+    if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
+        $Action = ""
+        $Job = $null
+        try {
+            $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
+            $Action = [string]$Job.action
+        } catch {}
+        if ($Action -eq "scout_full_scan" -and $null -ne $Job) {
+            $Failure = New-ScoutFullScanResult -JobId $JobId -Image ([string]$Job.image) -Severity @($Job.severity) -OnlyFixed ([bool]$Job.only_fixed) -CisaKev ([bool]$Job.cisa_kev)
+            $Failure.status = "failed"
+            $Failure.scan_complete = $false
+            $Failure.error_code = "SCAN_FAILED_RUNNER_RESTART"
+            $Failure.output = "Scout worker terminated without a verified result."
+            $Failure.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Failure
+        }
+        else {
+            Write-JsonAtomic -Path $ResultPath -Value @{
+                job_id=$JobId; status="failed"; outcome_unknown=$true
+                finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                error=$Reason
+            }
+        }
+    }
+    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
+
 if ($SelfTest) {
     Invoke-RunnerSelfTest
+    exit 0
+}
+
+if ($WorkerJobId) {
+    Invoke-DispatchedWorker -JobId $WorkerJobId
     exit 0
 }
 
 $Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenanceRunner")
 if (-not $Mutex.WaitOne(0)) { exit 0 }
 
-Recover-OrphanedJobs
+$ActiveWorker = Get-ExistingDispatchedWorker
+$ActiveLongJobId = if ($ActiveWorker) { [string]$ActiveWorker.job_id } else { "" }
+$ActiveLongProcess = if ($ActiveWorker) { $ActiveWorker.process } else { $null }
+$ActiveLongStarted = if ($ActiveWorker) { [int64]$ActiveWorker.started_unix } else { 0 }
+Recover-OrphanedJobs -SkipJobId $ActiveLongJobId
+if (-not $ActiveWorker) {
+    Remove-Item -LiteralPath $ActiveWorkerFile -Force -ErrorAction SilentlyContinue
+}
 Remove-StaleScoutJobDirectories
 Write-RunnerLog "runner started"
 
 try {
     while ($true) {
+        if ($null -ne $ActiveLongProcess) {
+            $ActiveLongProcess.Refresh()
+            $WorkerExpired = (
+                [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $ActiveLongStarted
+            ) -gt $WorkerTimeoutSeconds
+            if ($WorkerExpired -and -not $ActiveLongProcess.HasExited) {
+                try { $ActiveLongProcess.Kill($true) } catch { try { $ActiveLongProcess.Kill() } catch {} }
+                try { $ActiveLongProcess.WaitForExit(5000) | Out-Null } catch {}
+            }
+            if ($ActiveLongProcess.HasExited) {
+                $Reason = if ($WorkerExpired) {
+                    "Maintenance worker exceeded its time limit; outcome is unverified."
+                } else {
+                    "Maintenance worker exited without writing a verified result."
+                }
+                Complete-DispatchedWorker -JobId $ActiveLongJobId -Reason $Reason
+                $ActiveLongProcess.Dispose()
+                $ActiveLongProcess = $null
+                $ActiveLongJobId = ""
+                $ActiveLongStarted = 0
+            }
+        }
         Write-JsonAtomic -Path $Heartbeat -Value @{
             status = "running"
             pid = $PID
@@ -1801,7 +2002,16 @@ try {
             $ProcessingPath = Join-Path $Processing $RequestFile.Name
             $Action = ""
             $Job = $null
+            $WorkerDispatched = $false
             try {
+                # Defer only long jobs while a long worker is active; let every
+                # bounded status/control request behind them run without delay.
+                if ($null -ne $ActiveLongProcess) {
+                    $WaitingJob = Get-Content -LiteralPath $RequestFile.FullName -Raw | ConvertFrom-Json
+                    if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy")) {
+                        continue
+                    }
+                }
                 Move-Item -LiteralPath $RequestFile.FullName -Destination $ProcessingPath -Force
                 $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
                 if ([string]$Job.job_id -ne $JobId) { throw "Job id does not match request filename." }
@@ -1821,6 +2031,13 @@ try {
                 )) { throw "Action is not allowlisted." }
 
                 Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
+                if ($Action -in @("scout_full_scan", "compose_redeploy")) {
+                    $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project ([string]$Job.project)
+                    $ActiveLongJobId = $JobId
+                    $ActiveLongStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    $WorkerDispatched = $true
+                    continue
+                }
                 $Started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                 Write-JsonAtomic -Path $Heartbeat -Value @{
                     status = "busy"
@@ -1977,7 +2194,9 @@ try {
                 }
             }
             finally {
-                Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+                if (-not $WorkerDispatched) {
+                    Remove-Item -LiteralPath $ProcessingPath -Force -ErrorAction SilentlyContinue
+                }
                 Write-JsonAtomic -Path $Heartbeat -Value @{
                     status = "running"
                     pid = $PID
