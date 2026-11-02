@@ -880,7 +880,10 @@ function Invoke-ScriptHandler {
         '$Error.Clear()'
         'try {'
         "    $Command"
-        '    if (-not $? -or $Error.Count -gt 0) { exit 1 }'
+                # Caught probe failures stay in PowerShell's $Error history. Do not
+        # turn them into a failed job after the script has verified success.
+        # Unhandled terminating errors still hit the catch block below.
+        '    if (-not $?) { exit 1 }'
         '    exit 0'
         '}'
         'catch {'
