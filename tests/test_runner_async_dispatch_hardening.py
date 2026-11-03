@@ -44,6 +44,18 @@ class NonblockingMaintenanceRunnerTests(unittest.TestCase):
         self.assertIn('$ActiveLongProcess.Kill($true)', SOURCE)
         self.assertIn('exit_code = 124', SOURCE)
 
+    def test_abandoned_mutex_does_not_crash_runner_restart(self):
+        self.assertIn('catch [System.Threading.AbandonedMutexException]', SOURCE)
+        self.assertIn('$MutexAcquired = $true', SOURCE)
+        self.assertIn('Recover-OrphanedJobs -SkipJobId $ActiveLongJobId', SOURCE)
+        self.assertIn('if (-not $MutexAcquired)', SOURCE)
+        self.assertIn('$Mutex.Dispose()', SOURCE)
+
+    def test_runner_startup_failure_is_logged_locally(self):
+        self.assertIn('runner-startup-errors.log', SOURCE)
+        self.assertIn('trap {', SOURCE)
+        self.assertIn('if ($Detail.Length -gt 500)', SOURCE)
+
     def test_worker_does_not_publish_false_busy_heartbeat(self):
         self.assertIn('if (-not $WorkerJobId)', SOURCE)
         self.assertIn('status = "running"', MAIN)
