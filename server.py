@@ -570,6 +570,7 @@ def mcp_deployment_audit():
     stopped_or_unhealthy: list[dict[str, Any]] = []
     image_drift: list[dict[str, Any]] = []
     compose_config_drift: list[dict[str, Any]] = []
+    custom_running_images: dict[str, dict[str, str]] = {}
     # Suppress mtime-only warnings solely when this exact container's rendered
     # Compose hash and configured image match the desired state.
     verified_desired_containers: set[str] = set()
@@ -594,6 +595,13 @@ def mcp_deployment_audit():
         inspect_labels = config.get("Labels") or labels
         configured_image = str(config.get("Image") or row.get("Image") or "")
         running_image_id = str(inspect.get("Image") or row.get("ImageID") or "")
+        # Restrict provenance reporting to images built specifically for this
+        # local stack, not published third-party images with immutable digests.
+        if configured_image.startswith(("dockerlocal-", "firecrawl-", "influencerresearch-")):
+            custom_running_images[running_image_id] = {
+                "image": configured_image,
+                "image_id": running_image_id,
+            }
         running_config_hash = str(inspect_labels.get("com.docker.compose.config-hash") or "")
 
         desired_project = (desired_state.get("projects") or {}).get(str(project or ""), {})
@@ -685,6 +693,33 @@ def mcp_deployment_audit():
                 }
             )
 
+    # OCI image metadata is a recorded build claim, not a cryptographic
+    # attestation. Keep unlabeled images explicitly UNKNOWN; never guess a SHA
+    # from image creation timestamps, tags or a checkout's current HEAD.
+    image_provenance: list[dict[str, Any]] = []
+    for image_id, entry in sorted(custom_running_images.items()):
+        item: dict[str, Any] = {
+            "image": entry["image"],
+            "image_id": image_id or None,
+            "status": "unknown",
+            "source": None,
+            "revision": None,
+        }
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+            try:
+                raw_image = _json("GET", f"/images/{_quote(image_id)}/json") or {}
+                labels = (raw_image.get("Config") or {}).get("Labels") or {}
+                revision = str(labels.get("org.opencontainers.image.revision") or "")
+                source = str(labels.get("org.opencontainers.image.source") or "")
+                if (
+                    re.fullmatch(r"[0-9a-f]{40}", revision)
+                    and re.fullmatch(r"https://github[.]com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source)
+                ):
+                    item.update(status="recorded", source=source, revision=revision)
+            except Exception:
+                item["status"] = "unavailable"
+        image_provenance.append(item)
+
     seen_projects = set(projects)
     expected = set(EXPECTED_MCP_PROJECTS)
     missing_expected = sorted(expected - seen_projects)
@@ -704,6 +739,7 @@ def mcp_deployment_audit():
         "unmanaged_containers": unmanaged,
         "stopped_or_unhealthy": stopped_or_unhealthy,
         "local_image_drift": image_drift,
+        "image_provenance": image_provenance,
         "compose_desired_state": {
             "status": desired_state.get("status"),
             "errors": desired_state.get("errors") or [],
@@ -725,6 +761,9 @@ def mcp_deployment_audit():
             "unmanaged_containers": len(unmanaged),
             "stopped_or_unhealthy": len(stopped_or_unhealthy),
             "local_image_drift": len(image_drift),
+            "local_images_without_recorded_revision": sum(
+                item["status"] != "recorded" for item in image_provenance
+            ),
             "compose_config_drift": len(compose_config_drift),
             "compose_file_drift": len(compose_file_drift),
             "runtime_source_drift": len(source_audit.get("drift") or []),
