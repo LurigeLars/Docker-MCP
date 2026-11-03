@@ -281,11 +281,7 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertIn('ARG SOURCE_REVISION=unknown', dockerfile)
         self.assertIn('org.opencontainers.image.revision=', dockerfile)
         self.assertIn('docker.exe build --build-arg "SOURCE_REVISION=$Head"', refresh)
-        self.assertIn("Source checkout has uncommitted changes", refresh.replace(
-            "Source checkout has uncommitted changes", "Source checkout has uncommitted changes"
-        )) if "Source checkout has uncommitted changes" in refresh else self.assertIn(
-            "source checkout has uncommitted changes", refresh.lower()
-        )
+        self.assertIn("source checkout has uncommitted changes", refresh.lower())
 
     def test_reports_compose_file_drift_from_any_project(self):
         desired = {"status": "succeeded", "projects": {}, "errors": []}
