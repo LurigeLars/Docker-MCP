@@ -2,6 +2,12 @@ FROM docker/scout-cli:1.29 AS scout
 
 FROM python:3.12.15-slim
 
+# Exact reviewed commit is supplied by refresh-public-runtime.ps1.
+# Other builds remain explicitly "unknown" rather than asserting a false SHA.
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/LurigeLars/Docker-MCP" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
