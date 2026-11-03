@@ -1421,11 +1421,13 @@ function Get-ComposeFileState {
             elseif ($null -ne $HashRun) {
                 $HashVerificationReason = "compose_hash_command_failed"
                 $HashCommandExitCode = [int]$HashRun.exit_code
+                $HashFallbackReason = "project_not_allowlisted"
 
                 # Try the exact reviewed project allowlist if Docker's
                 # container-label working directory lacks required env context.
                 # Never let unrelated Compose-file sets claim a valid match.
                 if ($Projects.ContainsKey($Project)) {
+                    $HashFallbackReason = "allowlist_compose_file_set_mismatch"
                     $Allowlisted = $Projects[$Project]
                     $KnownFiles = @(
                         $Allowlisted.Files | ForEach-Object {
@@ -1439,6 +1441,7 @@ function Get-ComposeFileState {
                     )
                     if ($KnownFiles.Count -gt 0 -and $KnownFiles.Count -eq $ContainerPaths.Count -and
                         (@(Compare-Object -ReferenceObject $KnownFiles -DifferenceObject $ContainerPaths).Count -eq 0)) {
+                        $HashFallbackReason = "allowlist_desired_hash_unavailable"
                         if ($null -eq $AllowlistedDesired) {
                             $AllowlistedDesired = Get-ComposeDesiredState
                         }
@@ -1450,6 +1453,7 @@ function Get-ComposeFileState {
                             [string]$DesiredService.config_hash
                         } else { "" }
                         if (-not [string]::IsNullOrWhiteSpace($FallbackHash)) {
+                            $HashFallbackReason = "allowlist_desired_hash_available"
                             $Match = ($FallbackHash -ceq $RunningConfigHash)
                             $HashVerificationReason = if ($Match) {
                                 "service_hash_verified_match_via_allowlist"
@@ -1478,6 +1482,9 @@ function Get-ComposeFileState {
                     $Entry.hash_verification_reason = $HashVerificationReason
                     if ($null -ne $HashCommandExitCode) {
                         $Entry.hash_command_exit_code = $HashCommandExitCode
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$HashFallbackReason)) {
+                        $Entry.hash_fallback_reason = [string]$HashFallbackReason
                     }
                 }
             }
@@ -1512,6 +1519,16 @@ function Get-ComposeDesiredState {
         $Cfg = $Projects[$Project]
         $ConfiguredFiles = @($Cfg.Files)
         if ($ConfiguredFiles.Count -eq 0) {
+            continue
+        }
+        # Script-backed Python projects use pyproject.toml/uv.lock as dependency
+        # inputs, not Docker Compose files. Never feed those files to 'compose config'.
+        # Script-backed projects with actual Compose YAML files (IR, Firecrawl)
+        # remain eligible for desired-config verification.
+        if ([string]$Cfg.Mode -eq "script" -and
+            @($ConfiguredFiles | Where-Object {
+                [IO.Path]::GetExtension([string]$_).ToLowerInvariant() -notin @(".yaml", ".yml")
+            }).Count -gt 0) {
             continue
         }
 
