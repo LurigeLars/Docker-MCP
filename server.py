@@ -692,7 +692,8 @@ def mcp_deployment_audit():
     compose_file_drift = [
         item
         for item in (compose_file_state.get("drift") or [])
-        if str(item.get("container") or "") not in verified_desired_containers
+        if (str(item.get("status") or "") != "newer_than_container"
+            or str(item.get("container") or "") not in verified_desired_containers)
     ]
 
     payload = {
