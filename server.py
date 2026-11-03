@@ -724,12 +724,18 @@ def mcp_deployment_audit():
     expected = set(EXPECTED_MCP_PROJECTS)
     missing_expected = sorted(expected - seen_projects)
 
-    compose_file_drift = [
-        item
-        for item in (compose_file_state.get("drift") or [])
-        if (str(item.get("status") or "") != "newer_than_container"
-            or str(item.get("container") or "") not in verified_desired_containers)
-    ]
+    # mtime alone cannot establish that a running service differs from its
+    # reviewed Compose configuration. Keep age-only changes visible as
+    # unverifiable, but reserve 'drift' for missing inputs and proven mismatch.
+    # This does not mark any unverified service as current.
+    compose_file_drift: list[dict[str, Any]] = []
+    compose_file_unverified: list[dict[str, Any]] = []
+    for item in (compose_file_state.get("drift") or []):
+        if str(item.get("status") or "") == "newer_than_container":
+            if str(item.get("container") or "") not in verified_desired_containers:
+                compose_file_unverified.append(item)
+        else:
+            compose_file_drift.append(item)
 
     payload = {
         "timestamp_unix": int(time.time()),
@@ -750,6 +756,7 @@ def mcp_deployment_audit():
             "errors": compose_file_state.get("errors") or [],
         },
         "compose_file_drift": compose_file_drift,
+        "compose_file_unverified": compose_file_unverified,
         "runtime_source_audit": {
             "status": source_audit.get("status"),
             "checked_files": int(source_audit.get("checked_files") or 0),
@@ -766,6 +773,7 @@ def mcp_deployment_audit():
             ),
             "compose_config_drift": len(compose_config_drift),
             "compose_file_drift": len(compose_file_drift),
+            "compose_file_unverified": len(compose_file_unverified),
             "runtime_source_drift": len(source_audit.get("drift") or []),
             "missing_expected_projects": len(missing_expected),
         },
