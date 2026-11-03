@@ -168,14 +168,15 @@ if (Test-Path -LiteralPath $HostMaintenanceConfig -PathType Leaf) {
             if ($OriginUrl -notmatch '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
                 throw "Repository $Alias origin_url must be an HTTPS github.com repository URL."
             }
-            if (-not [string]::IsNullOrWhiteSpace($ConfiguredBranch) -and $ConfiguredBranch -ne "main") {
-                throw "Repository $Alias may only use branch main."
+            if (-not [string]::IsNullOrWhiteSpace($ConfiguredBranch) -and $ConfiguredBranch -notin @("main", "master")) {
+                throw "Repository $Alias may only use branch main or master."
             }
+            $ApprovedBranch = if ([string]::IsNullOrWhiteSpace($ConfiguredBranch)) { "main" } else { $ConfiguredBranch }
 
             $HostRepositories[$Alias] = @{
                 Path = [IO.Path]::GetFullPath($RepoPath).TrimEnd('\')
                 OriginUrl = $OriginUrl
-                Branch = "main"
+                Branch = $ApprovedBranch
             }
         }
     }
@@ -1059,7 +1060,7 @@ function Get-RepositoryState {
         [string]$Cfg.OriginUrl,
         [StringComparison]::Ordinal
     )
-    $BranchOk = $BranchName -eq "main"
+    $BranchOk = $BranchName -ceq [string]$Cfg.Branch
 
     return @{
         repo = $Alias
@@ -1077,19 +1078,20 @@ function Invoke-RepositoryPull {
 
     $Cfg = Get-AllowlistedRepository -Alias $Alias
     $Before = Get-RepositoryState -Alias $Alias
-    if ($Before.branch -ne "main") { throw "Repository is not on main." }
+    $ExpectedBranch = [string]$Cfg.Branch
+    if ($Before.branch -cne $ExpectedBranch) { throw "Repository is not on its allowlisted branch." }
     if (-not [bool]$Before.clean) { throw "Repository has local changes." }
     if ([bool]$Before.conflicts) { throw "Repository has unresolved conflicts." }
     if (-not [bool]$Before.origin_ok) { throw "Repository origin does not match the allowlist." }
 
-    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "--no-rebase", "origin", "main")
+    $Pull = Invoke-GitText -RepositoryPath ([string]$Cfg.Path) -Arguments @("pull", "--ff-only", "--no-rebase", "origin", $ExpectedBranch)
     if ([int]$Pull.exit_code -ne 0) {
         throw "git pull --ff-only failed with exit code $([int]$Pull.exit_code)."
     }
 
     $After = Get-RepositoryState -Alias $Alias
     if (
-        $After.branch -ne "main" -or
+        $After.branch -cne $ExpectedBranch -or
         -not [bool]$After.clean -or
         [bool]$After.conflicts -or
         -not [bool]$After.origin_ok
@@ -1100,7 +1102,7 @@ function Invoke-RepositoryPull {
     return @{
         action = "repo_pull_ff"
         repo = $Alias
-        branch = "main"
+        branch = $ExpectedBranch
         before_head = [string]$Before.head
         after_head = [string]$After.head
         changed = ([string]$Before.head -ne [string]$After.head)

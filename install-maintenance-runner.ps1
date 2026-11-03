@@ -42,6 +42,7 @@ if (Test-Path -LiteralPath $Heartbeat) {
         $ExistingProcess = Get-Process -Id $ExistingPid -ErrorAction SilentlyContinue
         if ($ExistingProcess -and $ExistingProcess.ProcessName -match '^(pwsh|powershell)$') {
             Stop-Process -Id $ExistingPid -Force -ErrorAction SilentlyContinue
+            Wait-Process -Id $ExistingPid -Timeout 5 -ErrorAction SilentlyContinue
             Start-Sleep -Milliseconds 500
         }
     } catch {}
@@ -73,7 +74,7 @@ Set-ItemProperty -Path $RunKey -Name "DockerLocalMaintenanceRunner" -Value $RunV
 
 Start-Process -FilePath $Wscript -ArgumentList @('"' + $Launcher + '"') -WindowStyle Hidden
 
-$Deadline = (Get-Date).AddSeconds(10)
+$Deadline = (Get-Date).AddSeconds(30)
 while (-not (Test-Path -LiteralPath $Heartbeat) -and (Get-Date) -lt $Deadline) {
     Start-Sleep -Milliseconds 250
 }

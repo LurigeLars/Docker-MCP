@@ -303,5 +303,27 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
         self.assertEqual(result, {"status": "timeout", "job_id": "b" * 32})
 
 
+    def test_allowlisted_master_branch_and_runner_startup_grace(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        runner = (root / "maintenance-runner.ps1").read_text()
+        register = (root / "add-host-maintenance-repository.ps1").read_text()
+        enable = (root / "enable-host-maintenance.ps1").read_text()
+        install = (root / "install-maintenance-runner.ps1").read_text()
+        self.assertIn('$ConfiguredBranch -notin @("main", "master")', runner)
+        self.assertIn('Branch = $ApprovedBranch', runner)
+        self.assertIn('$BranchName -ceq [string]$Cfg.Branch', runner)
+        self.assertIn('$Before.branch -cne $ExpectedBranch', runner)
+        self.assertIn('@("pull", "--ff-only", "--no-rebase", "origin", $ExpectedBranch)', runner)
+        self.assertIn('$After.branch -cne $ExpectedBranch', runner)
+        self.assertIn('branch = $ExpectedBranch', runner)
+        self.assertIn('$OriginOk', runner)
+        self.assertIn('if ($Branch -notin @("main", "master"))', register)
+        self.assertIn('branch = $Branch', register)
+        self.assertIn('if ($Branch -notin @("main", "master"))', enable)
+        self.assertIn('branch = $Branch', enable)
+        self.assertIn('Wait-Process -Id $ExistingPid -Timeout 5', install)
+        self.assertIn('AddSeconds(30)', install)
+
 if __name__ == "__main__":
     unittest.main()
