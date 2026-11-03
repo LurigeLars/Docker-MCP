@@ -166,6 +166,7 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertEqual(payload["compose_config_drift"], [])
         self.assertEqual(payload["compose_file_drift"], [])
         self.assertEqual(payload["summary"]["compose_file_drift"], 0)
+        self.assertEqual(payload["summary"]["compose_file_unverified"], 0)
 
     def test_unverified_compose_project_cannot_hide_file_warnings(self):
         for desired_hash in ("", "different-hash"):
@@ -193,8 +194,10 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
                 with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
                     payload = json.loads(server.mcp_deployment_audit())
-            self.assertEqual(payload["summary"]["compose_file_drift"], 1)
-            self.assertEqual(payload["compose_file_drift"][0]["status"], "newer_than_container")
+            # An age-only change is an unresolved diagnostic, not proven drift.
+            self.assertEqual(payload["summary"]["compose_file_drift"], 0)
+            self.assertEqual(payload["summary"]["compose_file_unverified"], 1)
+            self.assertEqual(payload["compose_file_unverified"][0]["status"], "newer_than_container")
 
     def test_confirmed_compose_mismatch_is_never_suppressed(self):
         desired = {
@@ -221,6 +224,22 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
                 payload = json.loads(server.mcp_deployment_audit())
         self.assertEqual(payload["summary"]["compose_file_drift"], 1)
         self.assertEqual(payload["compose_file_drift"][0]["status"], "config_hash_mismatch")
+
+    def test_missing_compose_file_is_confirmed_drift(self):
+        desired = {"status": "succeeded", "projects": {}, "errors": []}
+        file_state = {"status": "succeeded", "drift": [{
+            "project": "firecrawl",
+            "service": "api",
+            "container": "firecrawl-api-1",
+            "compose_file": "missing-compose.yaml",
+            "status": "missing",
+        }], "errors": []}
+        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
+                payload = json.loads(server.mcp_deployment_audit())
+        self.assertEqual(payload["summary"]["compose_file_drift"], 1)
+        self.assertEqual(payload["summary"]["compose_file_unverified"], 0)
+        self.assertEqual(payload["compose_file_drift"][0]["status"], "missing")
 
     def test_local_image_revision_is_recorded_but_never_inferred(self):
         image_sha = "sha256:" + ("2" * 64)
@@ -307,8 +326,9 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             ):
                 payload = json.loads(server.mcp_deployment_audit())
 
-        self.assertEqual(payload["summary"]["compose_file_drift"], 1)
-        self.assertEqual(payload["compose_file_drift"][0]["project"], "firecrawl")
+        self.assertEqual(payload["summary"]["compose_file_drift"], 0)
+        self.assertEqual(payload["summary"]["compose_file_unverified"], 1)
+        self.assertEqual(payload["compose_file_unverified"][0]["project"], "firecrawl")
         self.assertEqual(payload["compose_file_state"]["status"], "succeeded")
 
 if __name__ == "__main__":
