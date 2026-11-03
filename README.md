@@ -124,7 +124,8 @@ The maintained deployment uses several layers rather than trusting one gateway:
 - `container_inspect` deliberately omits environment variables and command lines while
   still exposing fields needed for privilege audits;
 - repository maintenance is fail-closed: exact local root, clean checkout, expected
-  HTTPS GitHub origin, `main` branch and fast-forward-only update;
+  HTTPS GitHub origin, explicitly allowlisted `main` or `master` branch, and fast-forward-only update;
+  each branch is pinned in host-only configuration and must match the local checkout;
 - host maintenance resolves aliases from ignored local configuration.
 - public access, when enabled, is authenticated through Cloudflare Access and a reviewed
   gateway;
