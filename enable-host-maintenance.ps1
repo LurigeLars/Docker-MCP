@@ -52,7 +52,7 @@ if (-not [string]::Equals($RepoPath, $ActualRoot, [StringComparison]::OrdinalIgn
 }
 
 $Branch = Invoke-GitCapture -Arguments @("-C", $RepoPath, "branch", "--show-current")
-if ($Branch -ne "main") { throw "Repository must be on main before it can be allowlisted." }
+if ($Branch -notin @("main", "master")) { throw "Repository must be on main or master before it can be allowlisted." }
 
 $OriginUrl = Invoke-GitCapture -Arguments @("-C", $RepoPath, "remote", "get-url", "origin")
 if ($OriginUrl -notmatch '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
@@ -107,7 +107,7 @@ if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
 $Repositories[$RepositoryAlias] = [ordered]@{
     path = $RepoPath
     origin_url = $OriginUrl
-    branch = "main"
+    branch = $Branch
 }
 $ScheduledTasks[$ScheduledTaskAlias] = [ordered]@{
     task_name = $ScheduledTaskName
