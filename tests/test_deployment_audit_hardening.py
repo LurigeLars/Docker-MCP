@@ -222,6 +222,67 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["compose_file_drift"], 1)
         self.assertEqual(payload["compose_file_drift"][0]["status"], "config_hash_mismatch")
 
+    def test_local_image_revision_is_recorded_but_never_inferred(self):
+        image_sha = "sha256:" + ("2" * 64)
+        revision = "3" * 40
+
+        def docker_api(method, path, **kwargs):
+            if path == "/containers/json":
+                return [{
+                    "Id": "a" * 64, "Names": ["/dockerlocal-mcp-http"],
+                    "Image": "dockerlocal-mcp:local", "State": "running",
+                    "Status": "Up", "Labels": {
+                        "com.docker.compose.project": "dockerlocal-public",
+                        "com.docker.compose.service": "mcp",
+                    },
+                }]
+            if path == "/images/json":
+                return []
+            if path.startswith("/containers/") and path.endswith("/json"):
+                return {"Image": image_sha, "Config": {
+                    "Image": "dockerlocal-mcp:local", "Labels": {}
+                }}
+            if path.startswith("/images/") and path.endswith("/json"):
+                return {"Config": {"Labels": {
+                    "org.opencontainers.image.revision": revision,
+                    "org.opencontainers.image.source": "https://github.com/LurigeLars/Docker-MCP",
+                    "secret": "NEVER_EXPOSE_ME",
+                }}}
+            if path == "/dockerlocal/runtime-source-drift":
+                return {"status": "ok", "checked_files": 0, "drift": [], "errors": []}
+            raise AssertionError(path)
+
+        desired = {"status": "succeeded", "projects": {}, "errors": []}
+        file_state = {"status": "succeeded", "drift": [], "errors": []}
+        with unittest.mock.patch.object(server, "_json", side_effect=docker_api):
+            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
+                payload = json.loads(server.mcp_deployment_audit())
+        self.assertEqual(payload["image_provenance"][0]["revision"], revision)
+        self.assertEqual(payload["image_provenance"][0]["status"], "recorded")
+        self.assertEqual(payload["summary"]["local_images_without_recorded_revision"], 0)
+        self.assertNotIn("NEVER_EXPOSE_ME", json.dumps(payload))
+
+        def missing_metadata(method, path, **kwargs):
+            if path != "/images/json" and path.startswith("/images/") and path.endswith("/json"):
+                return {"Config": {"Labels": {}}}
+            return docker_api(method, path, **kwargs)
+        with unittest.mock.patch.object(server, "_json", side_effect=missing_metadata):
+            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
+                payload = json.loads(server.mcp_deployment_audit())
+        self.assertEqual(payload["image_provenance"][0]["status"], "unknown")
+        self.assertIsNone(payload["image_provenance"][0]["revision"])
+        self.assertEqual(payload["summary"]["local_images_without_recorded_revision"], 1)
+
+    def test_dockerlocal_build_uses_reviewed_source_head(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "Dockerfile").read_text()
+        refresh = (root / "refresh-public-runtime.ps1").read_text()
+        self.assertIn('ARG SOURCE_REVISION=unknown', dockerfile)
+        self.assertIn('org.opencontainers.image.revision=', dockerfile)
+        self.assertIn('docker.exe build --build-arg "SOURCE_REVISION=$Head"', refresh)
+        self.assertIn("source checkout has uncommitted changes", refresh.lower())
+
     def test_reports_compose_file_drift_from_any_project(self):
         desired = {"status": "succeeded", "projects": {}, "errors": []}
         file_state = {

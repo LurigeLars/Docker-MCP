@@ -98,7 +98,7 @@ if ((Get-FileHash -LiteralPath $ComposePath -Algorithm SHA256).Hash -ne $Compose
 # Docker-MCP compose_redeploy tool cannot rebuild the Python MCP image.
 Push-Location $Target
 try {
-    & docker.exe build -t dockerlocal-mcp:local .
+    & docker.exe build --build-arg "SOURCE_REVISION=$Head" -t dockerlocal-mcp:local .
     if ($LASTEXITCODE -ne 0) { throw 'Docker image build failed; no stack restart attempted.' }
     & docker.exe compose -f compose.public.yaml config --quiet
     if ($LASTEXITCODE -ne 0) { throw 'Compose config invalid; no stack restart attempted.' }
