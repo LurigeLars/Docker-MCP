@@ -1348,6 +1348,7 @@ function Get-ComposeFileState {
         # Do not include Docker stderr, Compose variable values, or secrets.
         $HashVerificationReason = $null
         $HashCommandExitCode = $null
+        $HashFallbackReason = $null
         if ($HasNewer) {
             if ($HasMissing) {
                 $HashVerificationReason = "compose_file_missing"
