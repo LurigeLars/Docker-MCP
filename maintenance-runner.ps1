@@ -5,6 +5,21 @@ param([switch]$SelfTest, [ValidatePattern("^[a-f0-9]{32}$")][string]$WorkerJobId
 
 $ErrorActionPreference = "Stop"
 
+# Errors before the first heartbeat otherwise disappear inside hidden WScript launch.
+# Keep diagnostics local; never expose them through the public MCP response.
+trap {
+    try {
+        $DiagControl = Join-Path $env:LOCALAPPDATA "DockerLocalMCP\control"
+        New-Item -ItemType Directory -Path $DiagControl -Force | Out-Null
+        $Kind = $_.Exception.GetType().Name
+        $Detail = ([string]$_.Exception.Message -replace '[\r\n]+', ' ')
+        if ($Detail.Length -gt 500) { $Detail = $Detail.Substring(0, 500) }
+        Add-Content -LiteralPath (Join-Path $DiagControl "runner-startup-errors.log") -Value ("{0} {1}: {2}" -f (Get-Date -Format o), $Kind, $Detail) -Encoding utf8
+    }
+    catch {}
+    break
+}
+
 $Root = Join-Path $env:LOCALAPPDATA "DockerLocalMCP"
 $PortRegistryHelper = Join-Path $PSScriptRoot "port-registry.ps1"
 if (-not (Test-Path -LiteralPath $PortRegistryHelper -PathType Leaf)) {
@@ -2098,7 +2113,20 @@ if ($WorkerJobId) {
 }
 
 $Mutex = New-Object System.Threading.Mutex($false, "Local\DockerLocalMaintenanceRunner")
-if (-not $Mutex.WaitOne(0)) { exit 0 }
+$MutexAcquired = $false
+try {
+    $MutexAcquired = $Mutex.WaitOne(0)
+}
+catch [System.Threading.AbandonedMutexException] {
+    # The installer can terminate the prior owner during a reviewed restart.
+    # Ownership transfers to this process; orphaned job state is reconciled below.
+    $MutexAcquired = $true
+    Write-RunnerLog "recovered abandoned runner mutex; checking persisted job state"
+}
+if (-not $MutexAcquired) {
+    $Mutex.Dispose()
+    exit 0
+}
 
 $ActiveWorker = Get-ExistingDispatchedWorker
 $ActiveLongJobId = if ($ActiveWorker) { [string]$ActiveWorker.job_id } else { "" }
