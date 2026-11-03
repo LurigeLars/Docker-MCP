@@ -570,6 +570,9 @@ def mcp_deployment_audit():
     stopped_or_unhealthy: list[dict[str, Any]] = []
     image_drift: list[dict[str, Any]] = []
     compose_config_drift: list[dict[str, Any]] = []
+    # Suppress mtime-only warnings solely when this exact container's rendered
+    # Compose hash and configured image match the desired state.
+    verified_desired_containers: set[str] = set()
 
     for row in rows:
         labels = row.get("Labels") or {}
@@ -609,6 +612,9 @@ def mcp_deployment_audit():
                 and running_config_hash
                 and desired_config_hash != running_config_hash
             )
+            if (desired_config_hash and running_config_hash
+                    and desired_config_hash == running_config_hash and not image_mismatch):
+                verified_desired_containers.add(name)
             if image_mismatch or hash_mismatch:
                 compose_config_drift.append(
                     {
@@ -683,11 +689,11 @@ def mcp_deployment_audit():
     expected = set(EXPECTED_MCP_PROJECTS)
     missing_expected = sorted(expected - seen_projects)
 
-    exact_desired_projects = set((desired_state.get("projects") or {}).keys())
     compose_file_drift = [
         item
         for item in (compose_file_state.get("drift") or [])
-        if str(item.get("project") or "") not in exact_desired_projects
+        if (str(item.get("status") or "") != "newer_than_container"
+            or str(item.get("container") or "") not in verified_desired_containers)
     ]
 
     payload = {

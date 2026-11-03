@@ -71,3 +71,14 @@ def test_non_project_docker_scout_scan_worker_dispatch_has_safe_alias():
     assert '"image-scan"' in RUNNER
     assert 'Start-DispatchedWorker -JobId $JobId -Project $DispatchProject' in RUNNER
     assert 'Start-DispatchedWorker -JobId $JobId -Project ([string]$Job.project)' not in RUNNER
+
+def test_non_compose_script_inputs_are_not_passed_to_docker_compose():
+    assert 'Script-backed Python projects use pyproject.toml/uv.lock' in RUNNER
+    assert 'if ([string]$Cfg.Mode -eq "script" -and' in RUNNER
+    assert '[IO.Path]::GetExtension([string]$_).ToLowerInvariant() -notin @(".yaml", ".yml")' in RUNNER
+
+
+def test_unverifiable_hash_fallback_has_reason_without_suppressing_drift():
+    assert '$Entry.hash_fallback_reason = [string]$HashFallbackReason' in RUNNER
+    assert '"allowlist_compose_file_set_mismatch"' in RUNNER
+    assert '"allowlist_desired_hash_unavailable"' in RUNNER
