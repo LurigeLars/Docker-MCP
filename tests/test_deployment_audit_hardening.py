@@ -263,7 +263,7 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertNotIn("NEVER_EXPOSE_ME", json.dumps(payload))
 
         def missing_metadata(method, path, **kwargs):
-            if path.startswith("/images/") and path.endswith("/json"):
+            if path != "/images/json" and path.startswith("/images/") and path.endswith("/json"):
                 return {"Config": {"Labels": {}}}
             return docker_api(method, path, **kwargs)
         with unittest.mock.patch.object(server, "_json", side_effect=missing_metadata):
