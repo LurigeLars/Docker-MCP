@@ -167,6 +167,35 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertEqual(payload["compose_file_drift"], [])
         self.assertEqual(payload["summary"]["compose_file_drift"], 0)
 
+    def test_unverified_compose_project_cannot_hide_file_warnings(self):
+        for desired_hash in ("", "different-hash"):
+            desired = {
+                "status": "succeeded",
+                "projects": {
+                    "avanza-mcp-public": {
+                        "services": {
+                            "gateway": {"image": "node:26.9.0-alpine", "config_hash": desired_hash}
+                        }
+                    }
+                },
+                "errors": [],
+            }
+            file_state = {
+                "status": "succeeded",
+                "drift": [{
+                    "project": "avanza-mcp-public",
+                    "service": "gateway",
+                    "container": "avanza-mcp-gateway",
+                    "status": "newer_than_container",
+                }],
+                "errors": [],
+            }
+            with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
+                with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
+                    payload = json.loads(server.mcp_deployment_audit())
+            self.assertEqual(payload["summary"]["compose_file_drift"], 1)
+            self.assertEqual(payload["compose_file_drift"][0]["status"], "newer_than_container")
+
     def test_reports_compose_file_drift_from_any_project(self):
         desired = {"status": "succeeded", "projects": {}, "errors": []}
         file_state = {
