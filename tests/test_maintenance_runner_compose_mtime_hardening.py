@@ -99,3 +99,16 @@ def test_trusted_workdir_retry_uses_exact_label_files_and_requires_hash_match():
     assert '$Entry.status = "mtime_only"' in RUNNER
     # A different alternate-context hash cannot silently mark drift or match.
     assert 'if ($HashRetryUsed)' in RUNNER
+
+
+def test_compose_hash_failure_exposes_categories_not_raw_stderr():
+    assert 'function Get-SafeComposeHashFailureClass {' in RUNNER
+    for code in ('"service_missing"', '"env_file_missing"',
+                 '"required_env_missing"', '"compose_cli_incompatible"',
+                 '"compose_config_invalid"', '"other"'):
+        assert code in RUNNER
+    assert '$Entry.hash_failure_category = [string]$HashFailureClass' in RUNNER
+    assert '$Entry.hash_retry_attempted = $true' in RUNNER
+    assert '$Entry.hash_retry_failure_category = [string]$HashRetryFailureClass' in RUNNER
+    assert '$Entry.hash_command_output' not in RUNNER
+    assert '$Entry.compose_env' not in RUNNER
