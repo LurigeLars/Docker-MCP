@@ -81,7 +81,6 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
                 "_runner_request",
                 side_effect=[
                     desired,
-                    {"status": "succeeded", "drift": [], "errors": []},
                 ],
             ):
                 payload = json.loads(server.mcp_deployment_audit())
@@ -117,7 +116,6 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
                 "_runner_request",
                 side_effect=[
                     desired,
-                    {"status": "succeeded", "drift": [], "errors": []},
                 ],
             ):
                 payload = json.loads(server.mcp_deployment_audit())
@@ -125,121 +123,6 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertEqual(payload["compose_config_drift"], [])
         self.assertEqual(payload["summary"]["compose_config_drift"], 0)
 
-
-    def test_suppresses_file_age_drift_when_exact_desired_state_exists(self):
-        desired = {
-            "status": "succeeded",
-            "projects": {
-                "avanza-mcp-public": {
-                    "services": {
-                        "gateway": {
-                            "image": "node:26.9.0-alpine",
-                            "config_hash": "oldhash",
-                        }
-                    }
-                }
-            },
-            "errors": [],
-        }
-        file_state = {
-            "status": "succeeded",
-            "drift": [
-                {
-                    "project": "avanza-mcp-public",
-                    "service": "gateway",
-                    "container": "avanza-mcp-gateway",
-                    "compose_file": r"C:\\ClaudeCode\\avanza-mcp\\compose.public.yaml",
-                    "status": "newer_than_container",
-                }
-            ],
-            "errors": [],
-        }
-
-        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with unittest.mock.patch.object(
-                server,
-                "_runner_request",
-                side_effect=[desired, file_state],
-            ):
-                payload = json.loads(server.mcp_deployment_audit())
-
-        self.assertEqual(payload["compose_config_drift"], [])
-        self.assertEqual(payload["compose_file_drift"], [])
-        self.assertEqual(payload["summary"]["compose_file_drift"], 0)
-        self.assertEqual(payload["summary"]["compose_file_unverified"], 0)
-
-    def test_unverified_compose_project_cannot_hide_file_warnings(self):
-        for desired_hash in ("", "different-hash"):
-            desired = {
-                "status": "succeeded",
-                "projects": {
-                    "avanza-mcp-public": {
-                        "services": {
-                            "gateway": {"image": "node:26.9.0-alpine", "config_hash": desired_hash}
-                        }
-                    }
-                },
-                "errors": [],
-            }
-            file_state = {
-                "status": "succeeded",
-                "drift": [{
-                    "project": "avanza-mcp-public",
-                    "service": "gateway",
-                    "container": "avanza-mcp-gateway",
-                    "status": "newer_than_container",
-                }],
-                "errors": [],
-            }
-            with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-                with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
-                    payload = json.loads(server.mcp_deployment_audit())
-            # An age-only change is an unresolved diagnostic, not proven drift.
-            self.assertEqual(payload["summary"]["compose_file_drift"], 0)
-            self.assertEqual(payload["summary"]["compose_file_unverified"], 1)
-            self.assertEqual(payload["compose_file_unverified"][0]["status"], "newer_than_container")
-
-    def test_confirmed_compose_mismatch_is_never_suppressed(self):
-        desired = {
-            "status": "succeeded",
-            "projects": {"avanza-mcp-public": {
-                "services": {"gateway": {
-                    "image": "node:26.9.0-alpine", "config_hash": "oldhash"
-                }}
-            }},
-            "errors": [],
-        }
-        file_state = {
-            "status": "succeeded",
-            "drift": [{
-                "project": "avanza-mcp-public",
-                "service": "gateway",
-                "container": "avanza-mcp-gateway",
-                "status": "config_hash_mismatch",
-            }],
-            "errors": [],
-        }
-        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
-                payload = json.loads(server.mcp_deployment_audit())
-        self.assertEqual(payload["summary"]["compose_file_drift"], 1)
-        self.assertEqual(payload["compose_file_drift"][0]["status"], "config_hash_mismatch")
-
-    def test_missing_compose_file_is_confirmed_drift(self):
-        desired = {"status": "succeeded", "projects": {}, "errors": []}
-        file_state = {"status": "succeeded", "drift": [{
-            "project": "firecrawl",
-            "service": "api",
-            "container": "firecrawl-api-1",
-            "compose_file": "missing-compose.yaml",
-            "status": "missing",
-        }], "errors": []}
-        with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
-                payload = json.loads(server.mcp_deployment_audit())
-        self.assertEqual(payload["summary"]["compose_file_drift"], 1)
-        self.assertEqual(payload["summary"]["compose_file_unverified"], 0)
-        self.assertEqual(payload["compose_file_drift"][0]["status"], "missing")
 
     def test_local_image_revision_is_recorded_but_never_inferred(self):
         image_sha = "sha256:" + ("2" * 64)
@@ -274,7 +157,7 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         desired = {"status": "succeeded", "projects": {}, "errors": []}
         file_state = {"status": "succeeded", "drift": [], "errors": []}
         with unittest.mock.patch.object(server, "_json", side_effect=docker_api):
-            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
+            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired]):
                 payload = json.loads(server.mcp_deployment_audit())
         self.assertEqual(payload["image_provenance"][0]["revision"], revision)
         self.assertEqual(payload["image_provenance"][0]["status"], "recorded")
@@ -286,7 +169,7 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
                 return {"Config": {"Labels": {}}}
             return docker_api(method, path, **kwargs)
         with unittest.mock.patch.object(server, "_json", side_effect=missing_metadata):
-            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired, file_state]):
+            with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired]):
                 payload = json.loads(server.mcp_deployment_audit())
         self.assertEqual(payload["image_provenance"][0]["status"], "unknown")
         self.assertIsNone(payload["image_provenance"][0]["revision"])
@@ -302,34 +185,30 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
         self.assertIn('docker.exe build --build-arg "SOURCE_REVISION=$Head"', refresh)
         self.assertIn("source checkout has uncommitted changes", refresh.lower())
 
-    def test_reports_compose_file_drift_from_any_project(self):
-        desired = {"status": "succeeded", "projects": {}, "errors": []}
-        file_state = {
+    def test_missing_compose_file_remains_visible_without_mtime_audit(self):
+        desired = {
             "status": "succeeded",
-            "drift": [
-                {
-                    "project": "firecrawl",
-                    "service": "gateway",
-                    "container": "firecrawl-gateway-1",
-                    "compose_file": r"C:\\ClaudeCode\\firecrawl-local\\compose.public.yaml",
-                    "status": "newer_than_container",
-                }
-            ],
-            "errors": [],
+            "projects": {},
+            "errors": [{"project": "firecrawl", "file": "compose.local.yaml",
+                        "error": "compose_file_missing"}],
         }
-
         with unittest.mock.patch.object(server, "_json", side_effect=self._json_side_effect):
-            with unittest.mock.patch.object(
-                server,
-                "_runner_request",
-                side_effect=[desired, file_state],
-            ):
+            with unittest.mock.patch.object(server, "_runner_request", return_value=desired) as request:
                 payload = json.loads(server.mcp_deployment_audit())
+        request.assert_called_once_with({"action": "compose_desired_state"})
+        self.assertEqual(payload["compose_desired_state"]["errors"], desired["errors"])
+        self.assertNotIn("compose_file_unverified", payload)
+        self.assertNotIn("compose_file_drift", payload)
+        self.assertEqual(payload["summary"]["compose_config_drift"], 0)
 
-        self.assertEqual(payload["summary"]["compose_file_drift"], 0)
-        self.assertEqual(payload["summary"]["compose_file_unverified"], 1)
-        self.assertEqual(payload["compose_file_unverified"][0]["project"], "firecrawl")
-        self.assertEqual(payload["compose_file_state"]["status"], "succeeded")
+    def test_runner_keeps_desired_state_checks_without_timestamp_logic(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] / "maintenance-runner.ps1").read_text()
+        self.assertIn('function Get-ComposeDesiredState {', source)
+        self.assertIn('"compose_file_missing"', source)
+        self.assertIn('[IO.Path]::GetExtension([string]$_).ToLowerInvariant() -notin @(".yaml", ".yml")', source)
+        self.assertNotIn("function Get-ComposeFileState {", source)
+        self.assertNotIn('"compose_file_state"', source)
 
 if __name__ == "__main__":
     unittest.main()
