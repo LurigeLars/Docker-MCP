@@ -82,3 +82,20 @@ def test_unverifiable_hash_fallback_has_reason_without_suppressing_drift():
     assert '$Entry.hash_fallback_reason = [string]$HashFallbackReason' in RUNNER
     assert '"allowlist_compose_file_set_mismatch"' in RUNNER
     assert '"allowlist_desired_hash_unavailable"' in RUNNER
+
+
+def test_trusted_workdir_retry_uses_exact_label_files_and_requires_hash_match():
+    # A failed label-context hash may be recomputed in a reviewed project
+    # directory, but must never execute files outside its allowlisted root.
+    assert '$Projects.ContainsKey($Project)' in RUNNER
+    assert 'foreach ($ResolvedFile in $ResolvedFiles)' in RUNNER
+    assert '$FullLabelPath.StartsWith(' in RUNNER
+    assert '[StringComparison]::OrdinalIgnoreCase' in RUNNER
+    assert '$SafeLabelFiles -and $ApprovedDir -ine $WorkingDir' in RUNNER
+    assert '$HashArgs + @("config", "--hash", $Service)' in RUNNER
+    assert '$HashFallbackReason = "label_hash_via_allowlisted_workdir"' in RUNNER
+    assert '$HashVerificationReason = "service_hash_retry_mismatch_unverified"' in RUNNER
+    assert '$HashVerificationReason = "service_hash_verified_match"' in RUNNER
+    assert '$Entry.status = "mtime_only"' in RUNNER
+    # A different alternate-context hash cannot silently mark drift or match.
+    assert 'if ($HashRetryUsed)' in RUNNER
