@@ -1389,6 +1389,46 @@ function Get-ComposeFileState {
             catch {
                 $HashVerificationReason = "compose_hash_invocation_failed"
             }
+            # Some reviewed deployments (notably Firecrawl) start Compose from
+            # a subdirectory. The container label's working_dir then differs
+            # from the host allowlist's project root, which contains .env.
+            # Retry ONLY the exact file set from the container labels and ONLY
+            # when every file is inside the allowlisted project directory.
+            # A matching rendered service hash is proof of equivalence; a
+            # mismatch from this alternate context remains UNVERIFIED.
+            $HashRetryUsed = $false
+            if ($null -ne $HashRun -and [int]$HashRun.exit_code -ne 0 -and
+                $Projects.ContainsKey($Project)) {
+                $ApprovedDir = [IO.Path]::GetFullPath(
+                    [string]$Projects[$Project].WorkingDir
+                ).TrimEnd('\')
+                $SafeLabelFiles = $ResolvedFiles.Count -gt 0
+                foreach ($ResolvedFile in $ResolvedFiles) {
+                    $FullLabelPath = [IO.Path]::GetFullPath([string]$ResolvedFile)
+                    if (-not $FullLabelPath.StartsWith(
+                        $ApprovedDir + '\', [StringComparison]::OrdinalIgnoreCase
+                    )) {
+                        $SafeLabelFiles = $false
+                        break
+                    }
+                }
+                if ($SafeLabelFiles -and $ApprovedDir -ine $WorkingDir) {
+                    try {
+                        $TrustedRun = Invoke-DockerText -Arguments (
+                            $HashArgs + @("config", "--hash", $Service)
+                        ) -WorkingDirectory $ApprovedDir
+                        if ($null -ne $TrustedRun -and [int]$TrustedRun.exit_code -eq 0) {
+                            $HashRun = $TrustedRun
+                            $HashRetryUsed = $true
+                            $HashFallbackReason = "label_hash_via_allowlisted_workdir"
+                        }
+                    }
+                    catch {
+                        # Preserve the original failed verification; do not
+                        # infer a matching config from the fallback failure.
+                    }
+                }
+            }
             if ($null -ne $HashRun -and [int]$HashRun.exit_code -eq 0) {
                 $Tokens = @(([string]$HashRun.output).Trim() -split '\s+' | Where-Object { $_ })
                 $DesiredConfigHash = if ($Tokens.Count -gt 0) { [string]$Tokens[-1] } else { "" }
@@ -1406,6 +1446,13 @@ function Get-ComposeFileState {
                     }
                 }
                 elseif (-not [string]::IsNullOrWhiteSpace($DesiredConfigHash)) {
+                    if ($HashRetryUsed) {
+                        # The trusted directory may load a different .env
+                        # than the original deployment. Only a MATCH is
+                        # conclusive when using this secondary context.
+                        $HashVerificationReason = "service_hash_retry_mismatch_unverified"
+                    }
+                    else {
                     $HashVerificationReason = "service_hash_verified_mismatch"
                     foreach ($Entry in $ContainerFiles) {
                         if ([string]$Entry.status -eq "newer_than_container") {
@@ -1413,6 +1460,7 @@ function Get-ComposeFileState {
                             $Entry.running_config_hash = $RunningConfigHash
                             $Entry.desired_config_hash = $DesiredConfigHash
                         }
+                    }
                     }
                 }
                 else {
