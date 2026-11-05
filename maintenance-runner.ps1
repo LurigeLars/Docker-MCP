@@ -1030,7 +1030,7 @@ function Get-AllowlistedRepository {
         throw "Invalid repository alias."
     }
     if (-not $HostRepositories.ContainsKey($Alias)) {
-        throw "Repository alias is not allowlisted."
+        throw "Repository alias is not allowlisted: $Alias. Allowed: $(($HostRepositories.Keys | Sort-Object) -join ', ')"
     }
     return $HostRepositories[$Alias]
 }
@@ -1131,7 +1131,7 @@ function Get-AllowlistedScheduledTask {
         throw "Invalid Scheduled Task alias."
     }
     if (-not $HostScheduledTasks.ContainsKey($Alias)) {
-        throw "Scheduled Task alias is not allowlisted."
+        throw "Scheduled Task alias is not allowlisted: $Alias. Allowed: $(($HostScheduledTasks.Keys | Sort-Object) -join ', ')"
     }
 
     $Cfg = $HostScheduledTasks[$Alias]
@@ -1319,7 +1319,7 @@ function Run-ProjectRedeploy {
     param($Job)
 
     $Project = [string]$Job.project
-    if (-not $Projects.ContainsKey($Project)) { throw "Project is not allowlisted: $Project" }
+    if (-not $Projects.ContainsKey($Project)) { throw "Project is not allowlisted: $Project. Allowed: $(($Projects.Keys | Sort-Object) -join ', ')" }
 
     $Cfg = $Projects[$Project]
     $WorkingDir = [string]$Cfg.WorkingDir
