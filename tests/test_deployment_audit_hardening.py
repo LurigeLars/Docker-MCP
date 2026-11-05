@@ -155,7 +155,6 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             raise AssertionError(path)
 
         desired = {"status": "succeeded", "projects": {}, "errors": []}
-        file_state = {"status": "succeeded", "drift": [], "errors": []}
         with unittest.mock.patch.object(server, "_json", side_effect=docker_api):
             with unittest.mock.patch.object(server, "_runner_request", side_effect=[desired]):
                 payload = json.loads(server.mcp_deployment_audit())
