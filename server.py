@@ -522,24 +522,6 @@ def mcp_deployment_audit():
         }
 
     try:
-        compose_file_state = _runner_request({"action": "compose_file_state"})
-        if compose_file_state.get("status") != "succeeded":
-            compose_file_state = {
-                "status": compose_file_state.get("status", "unavailable"),
-                "drift": [],
-                "errors": [{"error": "maintenance_runner_unavailable"}],
-            }
-        else:
-            compose_file_state.setdefault("drift", [])
-            compose_file_state.setdefault("errors", [])
-    except Exception as exc:
-        compose_file_state = {
-            "status": "unavailable",
-            "drift": [],
-            "errors": [{"error": type(exc).__name__}],
-        }
-
-    try:
         source_audit = _json("GET", "/dockerlocal/runtime-source-drift") or {}
         if not isinstance(source_audit, dict):
             source_audit = {}
@@ -571,10 +553,6 @@ def mcp_deployment_audit():
     image_drift: list[dict[str, Any]] = []
     compose_config_drift: list[dict[str, Any]] = []
     custom_running_images: dict[str, dict[str, str]] = {}
-    # Suppress mtime-only warnings solely when this exact container's rendered
-    # Compose hash and configured image match the desired state.
-    verified_desired_containers: set[str] = set()
-
     for row in rows:
         labels = row.get("Labels") or {}
         name = ((row.get("Names") or [""])[0] or "").lstrip("/")
@@ -620,9 +598,6 @@ def mcp_deployment_audit():
                 and running_config_hash
                 and desired_config_hash != running_config_hash
             )
-            if (desired_config_hash and running_config_hash
-                    and desired_config_hash == running_config_hash and not image_mismatch):
-                verified_desired_containers.add(name)
             if image_mismatch or hash_mismatch:
                 compose_config_drift.append(
                     {
@@ -724,19 +699,6 @@ def mcp_deployment_audit():
     expected = set(EXPECTED_MCP_PROJECTS)
     missing_expected = sorted(expected - seen_projects)
 
-    # mtime alone cannot establish that a running service differs from its
-    # reviewed Compose configuration. Keep age-only changes visible as
-    # unverifiable, but reserve 'drift' for missing inputs and proven mismatch.
-    # This does not mark any unverified service as current.
-    compose_file_drift: list[dict[str, Any]] = []
-    compose_file_unverified: list[dict[str, Any]] = []
-    for item in (compose_file_state.get("drift") or []):
-        if str(item.get("status") or "") == "newer_than_container":
-            if str(item.get("container") or "") not in verified_desired_containers:
-                compose_file_unverified.append(item)
-        else:
-            compose_file_drift.append(item)
-
     payload = {
         "timestamp_unix": int(time.time()),
         "expected_projects": list(EXPECTED_MCP_PROJECTS),
@@ -751,12 +713,6 @@ def mcp_deployment_audit():
             "errors": desired_state.get("errors") or [],
         },
         "compose_config_drift": compose_config_drift,
-        "compose_file_state": {
-            "status": compose_file_state.get("status"),
-            "errors": compose_file_state.get("errors") or [],
-        },
-        "compose_file_drift": compose_file_drift,
-        "compose_file_unverified": compose_file_unverified,
         "runtime_source_audit": {
             "status": source_audit.get("status"),
             "checked_files": int(source_audit.get("checked_files") or 0),
@@ -772,8 +728,6 @@ def mcp_deployment_audit():
                 item["status"] != "recorded" for item in image_provenance
             ),
             "compose_config_drift": len(compose_config_drift),
-            "compose_file_drift": len(compose_file_drift),
-            "compose_file_unverified": len(compose_file_unverified),
             "runtime_source_drift": len(source_audit.get("drift") or []),
             "missing_expected_projects": len(missing_expected),
         },
