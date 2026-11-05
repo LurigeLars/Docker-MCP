@@ -1224,6 +1224,20 @@ function Invoke-AllowlistedScheduledTaskControl {
     }
 }
 
+# Classify Compose CLI failures without ever returning stderr, interpolated
+# environment data or file contents to the MCP client.
+function Get-SafeComposeHashFailureClass {
+    param([AllowEmptyString()][string]$Output)
+
+    $Value = [string]$Output
+    if ($Value -match '(?i)no such service|service\s+.+\s+not found') { return "service_missing" }
+    if ($Value -match '(?i)(?:\.env|env(?:ironment)?[ -]?file).*(?:no such file|not found|does not exist|cannot be found)') { return "env_file_missing" }
+    if ($Value -match '(?i)(?:required variable|variable\s+.+(?:not set|required|missing))') { return "required_env_missing" }
+    if ($Value -match '(?i)unknown (?:flag|command|shorthand)') { return "compose_cli_incompatible" }
+    if ($Value -match '(?i)(?:yaml:|invalid compose|invalid project|failed to parse|failed to load)') { return "compose_config_invalid" }
+    return "other"
+}
+
 function Get-ComposeFileState {
     $Containers = @()
     $Drift = @()
@@ -1349,6 +1363,9 @@ function Get-ComposeFileState {
         $HashVerificationReason = $null
         $HashCommandExitCode = $null
         $HashFallbackReason = $null
+        $HashFailureClass = $null
+        $HashRetryFailureClass = $null
+        $HashRetryAttempted = $false
         if ($HasNewer) {
             if ($HasMissing) {
                 $HashVerificationReason = "compose_file_missing"
@@ -1389,6 +1406,9 @@ function Get-ComposeFileState {
             catch {
                 $HashVerificationReason = "compose_hash_invocation_failed"
             }
+            if ($null -ne $HashRun -and [int]$HashRun.exit_code -ne 0) {
+                $HashFailureClass = Get-SafeComposeHashFailureClass -Output ([string]$HashRun.output)
+            }
             # Some reviewed deployments (notably Firecrawl) start Compose from
             # a subdirectory. The container label's working_dir then differs
             # from the host allowlist's project root, which contains .env.
@@ -1413,10 +1433,14 @@ function Get-ComposeFileState {
                     }
                 }
                 if ($SafeLabelFiles -and $ApprovedDir -ine $WorkingDir) {
+                    $HashRetryAttempted = $true
                     try {
                         $TrustedRun = Invoke-DockerText -Arguments (
                             $HashArgs + @("config", "--hash", $Service)
                         ) -WorkingDirectory $ApprovedDir
+                        if ($null -ne $TrustedRun -and [int]$TrustedRun.exit_code -ne 0) {
+                            $HashRetryFailureClass = Get-SafeComposeHashFailureClass -Output ([string]$TrustedRun.output)
+                        }
                         if ($null -ne $TrustedRun -and [int]$TrustedRun.exit_code -eq 0) {
                             $HashRun = $TrustedRun
                             $HashRetryUsed = $true
@@ -1534,6 +1558,15 @@ function Get-ComposeFileState {
                     }
                     if (-not [string]::IsNullOrWhiteSpace([string]$HashFallbackReason)) {
                         $Entry.hash_fallback_reason = [string]$HashFallbackReason
+                    }
+                    if ($null -ne $HashFailureClass) {
+                        $Entry.hash_failure_category = [string]$HashFailureClass
+                    }
+                    if ($HashRetryAttempted) {
+                        $Entry.hash_retry_attempted = $true
+                        if ($null -ne $HashRetryFailureClass) {
+                            $Entry.hash_retry_failure_category = [string]$HashRetryFailureClass
+                        }
                     }
                 }
             }
