@@ -351,7 +351,9 @@ The default Docker MCP profile is `dockerlocal`. To use another profile:
 
 The installer:
 
-1. builds the restricted Docker API proxy;
+1. builds the restricted Docker API proxy and publishes it on `127.0.0.1:23750`
+   (`compose.proxy.toolkit.yaml`), because Toolkit-started servers cannot join the
+   proxy's Docker network;
 2. verifies the proxy on loopback;
 3. builds the Docker MCP server image;
 4. installs the local Docker MCP catalog entry, adding the Maintenance Runner control
@@ -384,6 +386,12 @@ Because of the control-directory mount, every process that runs the gateway for 
 profile must set `MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS` to that directory;
 otherwise Docker MCP Gateway refuses to start the server. See
 [docs/CONNECTING.md](docs/CONNECTING.md#maintenance-runner-control-directory).
+
+**Host port trade-off.** The proxy publishes no host port by default: a published port is
+reachable from every container through `host.docker.internal`, including containers that
+fetch untrusted web content. The stdio launcher and the public compose reach the proxy on
+the `dockerlocal_default` network instead. Only the Toolkit route above opts in to the port;
+prefer the stdio launcher when you do not need Docker MCP Toolkit.
 
 Gateway-started containers get random Docker names. For stdio clients that should show up
 under an identifying name (`dockerlocal-stdio-<client>-<pid>`), use

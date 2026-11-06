@@ -88,8 +88,10 @@ that runs the same image directly over stdio under a name that identifies it:
 dockerlocal-stdio-<client>-<launcher pid>
 ```
 
-It needs Node.js, the `dockerlocal-mcp:local` image and the socket proxy from `install.ps1`,
-and nothing from Docker MCP Toolkit. The container gets the same hardening as the `mcp`
+It needs Node.js, the `dockerlocal-mcp:local` image and the socket proxy
+(`docker compose -f compose.proxy.yaml up -d --build`, which publishes no host port), and
+nothing from Docker MCP Toolkit. Only the Toolkit route publishes the proxy on
+`127.0.0.1:23750` (`compose.proxy.toolkit.yaml`), which every container can reach. The container gets the same hardening as the `mcp`
 service in `compose.public.yaml` (read-only root, no capabilities, no published port), binds
 only the Maintenance Runner control directory and reaches Docker only through the restricted
 socket proxy. It is removed when the client closes the connection.

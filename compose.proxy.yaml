@@ -7,8 +7,9 @@ services:
       dockerfile: Dockerfile.proxy
     image: dockerlocal-socket-proxy:local
     container_name: dockerlocal-socket-proxy
-    ports:
-      - "127.0.0.1:23750:2375"
+    # No host port: a published port is reachable from every container through
+    # host.docker.internal. Clients join dockerlocal_default instead; the Docker MCP
+    # Toolkit route opts in to the port with compose.proxy.toolkit.yaml.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     read_only: true
