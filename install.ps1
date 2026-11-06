@@ -17,13 +17,14 @@ if ($LASTEXITCODE -ne 0) { throw "Docker MCP Toolkit CLI is not available." }
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 New-Item -ItemType Directory -Force $CatalogDir | Out-Null
 
-foreach ($file in @("server.py","proxy.py","Dockerfile","Dockerfile.proxy","compose.proxy.yaml","dockerlocal.yaml")) {
+foreach ($file in @("server.py","proxy.py","Dockerfile","Dockerfile.proxy","compose.proxy.yaml","compose.proxy.toolkit.yaml","dockerlocal.yaml")) {
     Copy-Item (Join-Path $Source $file) (Join-Path $InstallDir $file) -Force
 }
 
 Push-Location $InstallDir
 try {
-    docker compose -f compose.proxy.yaml up -d --build
+    # Toolkit-started servers cannot join dockerlocal_default, so this route needs the host port.
+    docker compose -f compose.proxy.yaml -f compose.proxy.toolkit.yaml up -d --build
     if ($LASTEXITCODE -ne 0) { throw "Socket proxy build/start failed." }
 
     $deadline = (Get-Date).AddSeconds(30)

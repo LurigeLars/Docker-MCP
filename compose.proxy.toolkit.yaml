@@ -1,0 +1,8 @@
+# Opt-in for the Docker MCP Toolkit route only (install.ps1). Toolkit-started servers
+# cannot join dockerlocal_default, so they reach the proxy through this host port.
+# Trade-off: every container can then reach the proxy via host.docker.internal:23750.
+# The stdio launcher and the public compose do not need it.
+services:
+  socket-proxy:
+    ports:
+      - "127.0.0.1:23750:2375"
