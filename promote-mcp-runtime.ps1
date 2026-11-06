@@ -56,7 +56,7 @@ function New-Backup([string]$Name) {
 function Refresh-InstalledMaintenanceRunner {
     # Only the already-allowlisted DockerLocal promotion may perform this
     # host-only refresh. An existing dispatcher worker survives runner restart.
-    $Names = @('maintenance-runner.ps1','port-registry.ps1','airsea-coverage-report.py')
+    $Names = @('maintenance-runner.ps1','port-registry.ps1')
     $NeedsUpdate = $false
     foreach ($Name in $Names) {
         $Source = Join-Path $SourceRoot $Name

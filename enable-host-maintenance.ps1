@@ -141,7 +141,6 @@ foreach ($File in @(
     "compose.public.yaml",
     "maintenance-runner.ps1",
     "port-registry.ps1",
-    "airsea-coverage-report.py",
     "install-maintenance-runner.ps1"
 )) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $File) -Destination (Join-Path $InstallRoot $File) -Force
