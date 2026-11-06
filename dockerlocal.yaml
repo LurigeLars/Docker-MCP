@@ -48,7 +48,6 @@ tools:
   - name: repo_status
   - name: repo_pull_ff
   - name: scheduled_task_status
-  - name: airsea_coverage_report
   - name: scheduled_task_control
   - name: images_list
   - name: image_inspect
