@@ -1,7 +1,10 @@
 param(
-    [ValidateSet("Install", "Up", "Status")]
+    [ValidateSet("Install", "Up", "Status", "Hydrate")]
     [string]$Action = "Status",
-    [string]$Revision = ""
+    [string]$Revision = "",
+    # Hydrate targets one DockerLocal container: the HTTP service or a named local stdio session.
+    [ValidatePattern('^dockerlocal-(mcp-http|stdio-[a-z0-9-]+-[0-9]+)$')]
+    [string]$Container = "dockerlocal-mcp-http"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +30,6 @@ $StableScript = Join-Path $Root "dockerlocal-scout-runtime.ps1"
 $SupervisorConfig = Join-Path $Root "runtime-supervisor.local.json"
 $ComposePath = Join-Path $ContainerizedRoot "compose.public.yaml"
 $ProxyComposePath = Join-Path $ContainerizedRoot "compose.proxy.yaml"
-$Container = "dockerlocal-mcp-http"
 $UserSecretPath = "/run/dockerlocal-secrets/scout_hub_user"
 $PasswordSecretPath = "/run/dockerlocal-secrets/scout_hub_password"
 
@@ -216,6 +218,10 @@ function Invoke-RuntimeHydration {
         Pop-Location
     }
 
+    Invoke-SecretHydration
+}
+
+function Invoke-SecretHydration {
     $user = $null
     $password = $null
 
@@ -446,5 +452,10 @@ switch ($Action) {
 
     "Status" {
         Show-Status
+    }
+
+    "Hydrate" {
+        # Used by local-mcp/stdio-launcher.mjs for its per-session container; no compose, no output.
+        Invoke-SecretHydration
     }
 }

@@ -31,6 +31,19 @@ class LocalStdioLauncherTests(unittest.TestCase):
         self.assertIn(tmpfs, LAUNCHER)
         self.assertIn(tmpfs, PUBLIC_COMPOSE)
 
+    def test_scout_credentials_use_the_same_tmpfs_and_host_hydration(self):
+        secrets = "/run/dockerlocal-secrets:rw,nosuid,nodev,noexec,size=64k,uid=65532,gid=65532,mode=0700"
+        self.assertIn(secrets, LAUNCHER)
+        self.assertIn("/run/dockerlocal-secrets:rw,nosuid,nodev,noexec", PUBLIC_COMPOSE)
+        # Credentials come from the DPAPI-backed runtime script, never from launcher env or argv.
+        self.assertIn("'-Action', 'Hydrate', '-Container', name", LAUNCHER)
+        self.assertIn("run('pwsh'", LAUNCHER)
+        for forbidden in ("DOCKER_SCOUT_HUB_USER", "DOCKER_SCOUT_HUB_PASSWORD", "console.log"):
+            self.assertNotIn(forbidden, LAUNCHER)
+        runtime = (ROOT / "dockerlocal-scout-runtime.ps1").read_text(encoding="utf-8")
+        self.assertIn('"Hydrate"', runtime)
+        self.assertIn("^dockerlocal-(mcp-http|stdio-[a-z0-9-]+-[0-9]+)$", runtime)
+
     def test_reaches_docker_only_through_the_socket_proxy(self):
         self.assertIn("'--network', 'dockerlocal_default'", LAUNCHER)
         self.assertIn("DOCKER_API_URL=http://dockerlocal-socket-proxy:2375", LAUNCHER)
