@@ -10,8 +10,10 @@
 // port and still reaches Docker only through the restricted socket proxy.
 //
 // Usage: node stdio-launcher.mjs   (set DOCKERLOCAL_CLIENT to label the owning client)
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const fail = message => {
   console.error(`dockerlocal stdio launcher: ${message}`);
@@ -36,6 +38,7 @@ const child = spawn('docker', [
   '--mount', `type=bind,source=${control},target=/control`,
   '--read-only',
   '--tmpfs', '/tmp:rw,nosuid,nodev,size=3g,uid=65532,gid=65532,mode=1777',
+  '--tmpfs', '/run/dockerlocal-secrets:rw,nosuid,nodev,noexec,size=64k,uid=65532,gid=65532,mode=0700',
   '--cap-drop', 'ALL',
   '--security-opt', 'no-new-privileges',
   '--pids-limit', '128',
@@ -47,3 +50,21 @@ const child = spawn('docker', [
 child.on('error', err => fail(err.message));
 child.on('exit', code => process.exit(code ?? 1));
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
+
+// Docker Scout needs the Hub credentials that live DPAPI-encrypted on the host. Write them
+// into this container's tmpfs exactly as the HTTP service gets them. Output never touches
+// stdout (the MCP channel); a failure only disables the Scout tools.
+const run = promisify(execFile);
+const name = `dockerlocal-stdio-${client}-${process.pid}`;
+const script = fileURLToPath(new URL('../dockerlocal-scout-runtime.ps1', import.meta.url));
+(async () => {
+  for (let i = 0; i < 40; i++) {
+    const state = await run('docker', ['inspect', '-f', '{{.State.Running}}', name], { windowsHide: true })
+      .then(r => r.stdout.trim(), () => '');
+    if (state === 'true') break;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  // pwsh (PowerShell 7), as the runtime supervisor uses: the script needs .NET StandardInputEncoding.
+  await run('pwsh', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', script, '-Action', 'Hydrate', '-Container', name], { windowsHide: true });
+})().catch(err => console.error(`dockerlocal stdio launcher: Scout credentials not loaded: ${err.message}`));
