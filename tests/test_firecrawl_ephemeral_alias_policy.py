@@ -16,7 +16,7 @@ class FirecrawlEphemeralRefreshRegistrationTests(unittest.TestCase):
 
     def test_searxng_refresh_exact_alias_and_scan_gate(self):
         self.assertIn("'firecrawl-searxng-refresh' = @('refresh-searxng','searxng')", PROMOTE)
-        self.assertIn("'security\\\\refresh-searxng.ps1'", PROMOTE)
+        self.assertIn("'security\\refresh-searxng.ps1'", PROMOTE)
         self.assertIn("Reviewed Firecrawl SearXNG refresh implementation not present.", PROMOTE)
 
     def test_search_proxy_refresh_has_exact_host_alias(self):
