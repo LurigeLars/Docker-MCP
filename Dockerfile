@@ -10,6 +10,7 @@ LABEL org.opencontainers.image.source="https://github.com/LurigeLars/Docker-MCP"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends --only-upgrade apt zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
