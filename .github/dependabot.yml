@@ -5,7 +5,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
     open-pull-requests-limit: 5
     groups:
       security-minor-patch:
@@ -31,7 +31,7 @@ updates:
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
     open-pull-requests-limit: 5
     groups:
       security-minor-patch:
@@ -70,7 +70,7 @@ updates:
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "09:25"
       timezone: "Europe/Stockholm"
     open-pull-requests-limit: 2
@@ -90,7 +90,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
     open-pull-requests-limit: 5
     groups:
       security-minor-patch:
@@ -111,7 +111,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
     open-pull-requests-limit: 5
     groups:
       security-minor-patch:
