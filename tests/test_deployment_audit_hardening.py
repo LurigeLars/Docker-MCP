@@ -59,6 +59,61 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             return {"status": "ok", "checked_files": 0, "drift": [], "errors": []}
         raise AssertionError(f"unexpected Docker API request: {method} {path}")
 
+    def test_two_audit_phases_each_share_one_fresh_inventory(self):
+        image_id = "sha256:" + ("1" * 64)
+        digest = "node@" + image_id
+        between_audits = False
+
+        def docker_api(method, path, **kwargs):
+            self.assertEqual(method, "GET")
+            if path == "/images/json":
+                return [{"Id": image_id, "RepoTags": ["node:26.9.0-alpine"], "RepoDigests": [digest]}]
+            if between_audits and path == "/containers/json":
+                rows = self._json_side_effect(method, path, **kwargs)
+                rows[0].update(State="exited", Status="Exited")
+                return rows
+            return self._json_side_effect(method, path, **kwargs)
+
+        desired = {"status": "succeeded", "projects": {}, "errors": []}
+        with unittest.mock.patch.object(server, "_json", side_effect=docker_api) as requests:
+            with unittest.mock.patch.object(server, "_runner_request", return_value=desired) as runner:
+                before = json.loads(server.mcp_deployment_audit(include_image_usage=True))
+                between_audits = True
+                after = json.loads(server.mcp_deployment_audit(include_image_usage=True))
+
+        phase = ["/containers/json", "/images/json", f"/containers/{'a' * 64}/json", "/dockerlocal/runtime-source-drift"]
+        self.assertEqual([call.args[1] for call in requests.call_args_list], phase * 2)
+        self.assertEqual(runner.call_args_list, [unittest.mock.call({"action": "compose_desired_state"})] * 2)
+        self.assertEqual(before["stopped_or_unhealthy"], [])
+        self.assertEqual(len(after["stopped_or_unhealthy"]), 1)
+        for audit in (before, after):
+            self.assertEqual(audit["container_inspect_failures"], [])
+            self.assertEqual(audit["image_usage"]["images"][0]["repo_digests"], [digest])
+            self.assertEqual(audit["image_usage"]["images"][0]["in_use_by"], ["avanza-mcp-gateway"])
+            self.assertEqual(audit["image_usage"]["safe_superseded_candidates"], [])
+
+    def test_batch_marks_failed_inspection_and_keeps_list_fallback(self):
+        image_id = "sha256:" + ("1" * 64)
+
+        def docker_api(method, path, **kwargs):
+            if path == "/images/json":
+                return [{"Id": image_id}]
+            if path == "/dockerlocal/runtime-source-drift":
+                return {}
+            if path.startswith("/containers/") and path != "/containers/json":
+                raise RuntimeError("internal detail must stay private")
+            return self._json_side_effect(method, path, **kwargs)
+
+        with unittest.mock.patch.object(server, "_json", side_effect=docker_api):
+            with unittest.mock.patch.object(server, "_runner_request", return_value={"status": "timeout"}):
+                audit = json.loads(server.mcp_deployment_audit(include_image_usage=True))
+
+        self.assertEqual(audit["container_inspect_failures"], ["a" * 64])
+        self.assertEqual(audit["image_usage"]["images"][0]["in_use_by"], ["avanza-mcp-gateway"])
+        self.assertEqual(audit["compose_desired_state"]["status"], "timeout")
+        self.assertEqual(audit["runtime_source_audit"]["status"], "unavailable")
+        self.assertNotIn("internal detail", json.dumps(audit))
+
     def test_reports_desired_compose_hash_and_image_drift(self):
         desired = {
             "status": "succeeded",

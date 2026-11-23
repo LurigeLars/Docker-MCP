@@ -43,6 +43,23 @@ class HostDiskTelemetryTests(unittest.TestCase):
             timeout_seconds=12.0,
         )
 
+    def test_runner_batch_preserves_disk_on_port_failure_without_error_details(self):
+        with patch.object(server, "_runner_heartbeat", return_value={"status": "running"}):
+            with patch.object(server, "_runner_request", side_effect=[
+                {"status": "succeeded", "drives": [{"volume": "C:"}], "internal": "private"},
+                {"status": "failed", "error": "private"},
+            ]) as send:
+                result = server.json.loads(server.maintenance_runner_status(include_host_checks=True))
+
+        self.assertEqual(result, {
+            "status": "running",
+            "disk": {"status": "succeeded", "drives": [{"volume": "C:"}]},
+            "ports": {"status": "failed"},
+        })
+        self.assertEqual([call.args[0] for call in send.call_args_list], [
+            {"action": "host_disk_usage"}, {"action": "port_registry_status"},
+        ])
+
     def test_host_runner_accepts_no_client_path_and_uses_fixed_ready_drives(self):
         helper = RUNNER[
             RUNNER.index("function Get-HostDiskUsage {"):

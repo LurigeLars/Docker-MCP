@@ -215,11 +215,11 @@ Read-only inspection:
 - `compose_status`
 - `images_list`
 - `image_inspect`
-- `mcp_deployment_audit` — checks every running Compose project for Compose files newer than its containers, and additionally compares `docker compose config --hash` plus desired image for allowlisted projects. This catches both broad file-level drift and exact desired-config drift without a background watcher.
+- `mcp_deployment_audit` — checks deployment health, local image drift, runtime source drift and desired Compose hashes/images for allowlisted projects. Pass `include_image_usage=true` to also get image use and repository digests from the same inventory, plus any incomplete container inspections. For a pre/post maintenance sequence, call it once before and once after the cleanup steps. Each call takes a fresh inventory.
 - `image_usage_audit` — reports container usage plus repository-level superseded hints; hints are not deletion-safe because unused images can still be Dockerfile build-stage inputs
 - `maintenance_job_status`
 - `maintenance_runner_status`
-- `port_registry_status` — persistent host MCP port reservations plus listeners in the managed range that are not registered
+- `port_registry_status` — persistent host MCP port reservations plus listeners in the managed range that are not registered. `maintenance_runner_status(include_host_checks=true)` combines this with runner health and fixed-drive capacity, with separate results for disk and ports.
 
 Narrow maintenance:
 
@@ -487,7 +487,7 @@ Additional host projects can be configured locally in:
 
 Start from `maintenance-projects.example.json`. The local file is ignored by Git and should not contain secrets. The example includes an `avanza-mcp-public` entry; replace its placeholder with the local Avanza checkout path to allow safe gateway-only redeploys.
 
-The allowlist is the source of truth for exact desired-Compose hash checks and write maintenance. Separately, the audit performs a read-only file-age check for every running Compose project using Docker's existing Compose labels and the host filesystem. This broad check does not grant redeploy rights. `mcp_deployment_audit` only performs these checks when called; there is no background reconciliation loop.
+The allowlist is the source of truth for exact desired Compose hash checks and write maintenance. `mcp_deployment_audit` reads inventory and checks drift on demand.
 
 Two execution modes are supported:
 

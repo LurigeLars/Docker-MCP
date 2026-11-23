@@ -73,10 +73,14 @@ function Write-McpPortRegistry {
 function Get-McpPortListener {
     param([Parameter(Mandatory)][int]$Port)
 
-    $Listeners = @(
-        Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-            Sort-Object OwningProcess -Unique
-    )
+    $Listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    return (Format-McpPortListeners -Connections $Listeners)
+}
+
+function Format-McpPortListeners {
+    param([object[]]$Connections)
+
+    $Listeners = @($Connections | Where-Object { $null -ne $_ } | Sort-Object OwningProcess -Unique)
     if ($Listeners.Count -eq 0) {
         return [ordered]@{ listening = $false; processes = @() }
     }
@@ -271,6 +275,9 @@ function Reserve-McpPort {
 
 function Get-McpPortRegistryStatus {
     $Registry = Read-McpPortRegistry
+    $ListenersByPort = @{}
+    $Listeners = Get-NetTCPConnection -State Listen -ErrorAction Stop | Group-Object -Property LocalPort
+    foreach ($Group in $Listeners) { $ListenersByPort[$Group.Name] = $Group.Group }
     $Rows = @()
     foreach ($Entry in $Registry.services.GetEnumerator()) {
         $Port = [int]$Entry.Value.port
@@ -279,7 +286,7 @@ function Get-McpPortRegistryStatus {
             port = $Port
             reserved_at = [string]$Entry.Value.reserved_at
             preferred_port = $Entry.Value.preferred_port
-            listener = Get-McpPortListener -Port $Port
+            listener = Format-McpPortListeners -Connections $ListenersByPort[[string]$Port]
         }
     }
 
@@ -300,7 +307,7 @@ function Get-McpPortRegistryStatus {
     foreach ($Port in ([int]$Registry.range_start)..([int]$Registry.range_end)) {
         if ($ReservedPorts.ContainsKey([int]$Port)) { continue }
         if ($DockerReservedLookup.ContainsKey([int]$Port)) { continue }
-        $Listener = Get-McpPortListener -Port $Port
+        $Listener = Format-McpPortListeners -Connections $ListenersByPort[[string]$Port]
         if ([bool]$Listener.listening) {
             $UnregisteredListeners += [ordered]@{
                 port = [int]$Port
