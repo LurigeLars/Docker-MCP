@@ -495,12 +495,42 @@ def compose_status(project: str | None = None) -> list[dict[str, Any]]:
     return list(grouped.values())
 
 
-@mcp.tool(annotations=READ_ONLY)
-def mcp_deployment_audit():
-    """Audit MCP deployment health, desired Compose config, image drift and runtime source."""
-    rows = _json("GET", "/containers/json", query={"all": "1"}) or []
-    images = _json("GET", "/images/json", query={"all": "0"}) or []
+def _audit_inventory():
+    rows = _json("GET", "/containers/json", query={"all": "1"})
+    images = _json("GET", "/images/json", query={"all": "0"})
+    if not isinstance(rows, list) or not isinstance(images, list):
+        raise RuntimeError("Docker inventory response is unavailable")
+    inspections = {}
+    failed = []
+    for row in rows:
+        container_id = str(row.get("Id") or "")
+        try:
+            if container_id and container_id not in inspections:
+                inspect = _json("GET", f"/containers/{_quote(container_id)}/json") or {}
+                if not isinstance(inspect, dict) or not inspect.get("Image"):
+                    failed.append(container_id)
+                if isinstance(inspect, dict):
+                    inspections[container_id] = inspect
+            elif not container_id:
+                failed.append(None)
+        except Exception:
+            # The inventory still supports list-based fallback for this container.
+            failed.append(container_id)
+    return rows, images, inspections, failed
 
+
+@mcp.tool(annotations=READ_ONLY)
+def mcp_deployment_audit(include_image_usage: bool = False):
+    """Audit health, desired Compose config, image drift and runtime source. Optionally include image usage and digests from the same inventory."""
+    rows, images, inspections, failed = _audit_inventory()
+    payload = _deployment_audit(rows, images, inspections)
+    if include_image_usage:
+        payload["image_usage"] = _image_usage_audit(rows, images, inspections)
+        payload["container_inspect_failures"] = failed
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _deployment_audit(rows, images, inspections):
     try:
         desired_state = _runner_request({"action": "compose_desired_state"})
         if desired_state.get("status") != "succeeded":
@@ -520,10 +550,9 @@ def mcp_deployment_audit():
         }
 
     try:
-        source_audit = _json("GET", "/dockerlocal/runtime-source-drift") or {}
-        if not isinstance(source_audit, dict):
-            source_audit = {}
-        source_audit.setdefault("status", "ok")
+        source_audit = _json("GET", "/dockerlocal/runtime-source-drift")
+        if not isinstance(source_audit, dict) or not source_audit.get("status"):
+            raise ValueError("Runtime source audit response is unavailable")
         source_audit.setdefault("checked_files", 0)
         source_audit.setdefault("drift", [])
         source_audit.setdefault("errors", [])
@@ -560,12 +589,7 @@ def mcp_deployment_audit():
         status = row.get("Status")
         container_id = str(row.get("Id") or "")
 
-        inspect = {}
-        if container_id:
-            try:
-                inspect = _json("GET", f"/containers/{_quote(container_id)}/json") or {}
-            except Exception:
-                inspect = {}
+        inspect = inspections.get(container_id, {})
 
         config = inspect.get("Config") or {}
         inspect_labels = config.get("Labels") or labels
@@ -730,7 +754,7 @@ def mcp_deployment_audit():
             "missing_expected_projects": len(missing_expected),
         },
     }
-    return json.dumps(payload, separators=(",", ":"))
+    return payload
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -740,21 +764,17 @@ def image_usage_audit():
     Hints are never declared safe for deletion because an unused local image may still
     be an active Dockerfile build-stage/base dependency.
     """
-    rows = _json("GET", "/containers/json", query={"all": "1"}) or []
-    images = _json("GET", "/images/json", query={"all": "0"}) or []
+    rows, images, inspections, _ = _audit_inventory()
+    payload = _image_usage_audit(rows, images, inspections)
+    return json.dumps(payload, separators=(",", ":"))
 
+
+def _image_usage_audit(rows, images, inspections):
     in_use_by: dict[str, list[str]] = {}
     for row in rows:
         container_id = str(row.get("Id") or "")
         name = ((row.get("Names") or [""])[0] or "").lstrip("/")
-        running_id = str(row.get("ImageID") or "")
-        if container_id:
-            try:
-                inspect = _json("GET", f"/containers/{_quote(container_id)}/json") or {}
-                running_id = str(inspect.get("Image") or running_id)
-            except Exception:
-                # Best-effort inspect: fall back to ImageID from the container list.
-                pass
+        running_id = str(inspections.get(container_id, {}).get("Image") or row.get("ImageID") or "")
         if running_id:
             in_use_by.setdefault(running_id, []).append(name)
 
@@ -780,6 +800,7 @@ def image_usage_audit():
         item = {
             "id": image_id,
             "tags": tags,
+            "repo_digests": image.get("RepoDigests") or [],
             "created": image.get("Created"),
             "size": _bytes_human(float(image.get("Size") or 0)),
             "in_use_by": used_by,
@@ -806,7 +827,7 @@ def image_usage_audit():
             "repository_superseded_hints": len(candidates),
         },
     }
-    return json.dumps(payload, separators=(",", ":"))
+    return payload
 
 
 @mcp.tool(annotations=DESTRUCTIVE)
@@ -898,6 +919,10 @@ def repo_pull_ff(repo: str):
 @mcp.tool(annotations=READ_ONLY)
 def port_registry_status():
     """Read the persistent host MCP port registry and current listener ownership."""
+    return _port_registry_status()
+
+
+def _port_registry_status():
     return _compact_runner_request(
         {"action": "port_registry_status"},
         ("version", "range_start", "range_end", "services", "docker_reserved_ports", "unregistered_listeners"),
@@ -978,6 +1003,10 @@ def runtime_supervisor_status(log_tail: int = 40):
 @mcp.tool(annotations=READ_ONLY)
 def host_disk_usage():
     """Read fixed-drive capacity and free space from Windows, without shell access or cleanup."""
+    return _host_disk_usage()
+
+
+def _host_disk_usage():
     return _compact_runner_request(
         {"action": "host_disk_usage"},
         ("measurement_status", "measured_unix", "drives"),
@@ -986,16 +1015,29 @@ def host_disk_usage():
 
 
 @mcp.tool(annotations=READ_ONLY)
-def maintenance_runner_status():
-    """Report whether the host-side allowlisted Docker maintenance runner is alive."""
+def maintenance_runner_status(include_host_checks: bool = False):
+    """Read runner health and optionally disk capacity and MCP port registry, each with its own status."""
+    payload = _runner_heartbeat()
+    if include_host_checks:
+        for name, read in (("disk", _host_disk_usage), ("ports", _port_registry_status)):
+            try:
+                result = json.loads(read())
+                result.pop("error", None)
+                payload[name] = result
+            except Exception:
+                payload[name] = {"status": "unavailable"}
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _runner_heartbeat():
     heartbeat = CONTROL_DIR / "runner-heartbeat.json"
     if not heartbeat.exists():
-        return json.dumps({"status": "missing"}, separators=(",", ":"))
+        return {"status": "missing"}
     try:
         data = json.loads(heartbeat.read_text(encoding="utf-8"))
+        updated = int(data.get("updated_unix") or 0)
     except Exception:
-        return json.dumps({"status": "invalid"}, separators=(",", ":"))
-    updated = int(data.get("updated_unix") or 0)
+        return {"status": "invalid"}
     age = max(0, int(time.time()) - updated) if updated else None
     raw_status = str(data.get("status") or "")
     job_id = str(data.get("job_id") or "")
@@ -1021,7 +1063,7 @@ def maintenance_runner_status():
         payload["job_id"] = job_id
         payload["project"] = data.get("project")
 
-    return json.dumps(payload, separators=(",", ":"))
+    return payload
 
 
 @mcp.tool(annotations=DESTRUCTIVE)

@@ -1461,6 +1461,33 @@ function Get-HostDiskUsage {
 }
 
 function Invoke-RunnerSelfTest {
+    & {
+        $ListenerReads = [System.Collections.Generic.List[string]]::new()
+        function Read-McpPortRegistry {
+            return @{
+                range_start = 8760; range_end = 8763
+                services = @{ sample = @{ port = 8760 } }
+            }
+        }
+        function Get-DockerConfiguredHostPorts { return @{ port = 8761; container = "sample" } }
+        function Get-NetTCPConnection {
+            param([string]$State, [string]$ErrorAction)
+            $ListenerReads.Add($State)
+            foreach ($Port in @(8760, 8760, 8761, 8762, 9000)) {
+                [pscustomobject]@{ LocalPort = $Port; OwningProcess = 42 }
+            }
+        }
+        function Get-CimInstance { return @{ Name = "sample" } }
+
+        $Ports = Get-McpPortRegistryStatus
+        if ($ListenerReads.Count -ne 1 -or $ListenerReads[0] -ne "Listen" -or
+            $Ports.services.Count -ne 1 -or $Ports.services[0].listener.processes.Count -ne 1 -or
+            $Ports.docker_reserved_ports.Count -ne 1 -or $Ports.unregistered_listeners.Count -ne 1 -or
+            $Ports.unregistered_listeners[0].port -ne 8762) {
+            throw "Batched MCP port status lost coverage or repeated its listener query."
+        }
+    }
+
     $ExpectedCreatedUtc = [DateTime]::SpecifyKind(
         [DateTime]::new(2026, 10, 1, 2, 39, 48),
         [DateTimeKind]::Utc
