@@ -5,7 +5,7 @@ param()
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 if ($IsWindows) { throw "This acceptance script is for ephemeral Linux CI only." }
-$Docker = (Get-Command docker -CommandType Application -ErrorAction Stop).Source
+$Docker = (Get-Command docker -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $Source = Join-Path $PSScriptRoot "../maintenance-runner.ps1"
 $Tokens = $null
 $Errors = $null
