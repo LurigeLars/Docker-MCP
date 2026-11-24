@@ -1461,6 +1461,40 @@ function Get-HostDiskUsage {
 }
 
 function Invoke-RunnerSelfTest {
+    # Pure registry/request validation: never launch a test container in CI.
+    & {
+        $TestCfgDir = Join-Path ([IO.Path]::GetTempPath()) ("project-test-config-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $TestCfgDir | Out-Null
+        $TestCfg = Join-Path $TestCfgDir "profiles.json"
+        $TestId = "a" * 32
+        $TestImage = "sha256:" + ("b" * 64)
+        $Request = [pscustomobject]@{action="run_project_test";job_id=$TestId;created_unix=1;profile="sample"}
+        try {
+            Write-JsonAtomic -Path $TestCfg -Value @{enabled=$true;profiles=@{sample=@{image_id=$TestImage}}}
+            if ((Resolve-ProjectTestImage -Job $Request -JobId $TestId -ConfigPath $TestCfg) -cne $TestImage) {
+                throw "Project test registry resolution failed."
+            }
+            $BadRequests = @(
+                [pscustomobject]@{action="run_project_test";job_id=$TestId;created_unix=1;profile="../sample"},
+                [pscustomobject]@{action="run_project_test";job_id=$TestId;created_unix=1;profile="other"},
+                [pscustomobject]@{action="run_project_test";job_id=$TestId;created_unix=1;profile="sample";command="anything"}
+            )
+            foreach ($Bad in $BadRequests) {
+                $Rejected = $false
+                try { [void](Resolve-ProjectTestImage -Job $Bad -JobId $TestId -ConfigPath $TestCfg) } catch { $Rejected = $true }
+                if (-not $Rejected) { throw "Project test rejected-request regression." }
+            }
+            Write-JsonAtomic -Path $TestCfg -Value @{enabled=$false;profiles=@{sample=@{image_id=$TestImage}}}
+            $Rejected = $false
+            try { [void](Resolve-ProjectTestImage -Job $Request -JobId $TestId -ConfigPath $TestCfg) } catch { $Rejected = $true }
+            if (-not $Rejected) { throw "Disabled project test accepted." }
+            Write-JsonAtomic -Path $TestCfg -Value @{enabled=$true;profiles=@{sample=@{image_id="mutable:latest"}}}
+            $Rejected = $false
+            try { [void](Resolve-ProjectTestImage -Job $Request -JobId $TestId -ConfigPath $TestCfg) } catch { $Rejected = $true }
+            if (-not $Rejected) { throw "Mutable project test image accepted." }
+        }
+        finally { Remove-Item -LiteralPath $TestCfgDir -Recurse -Force }
+    }
     & {
         $ListenerReads = [System.Collections.Generic.List[string]]::new()
         function Read-McpPortRegistry {
