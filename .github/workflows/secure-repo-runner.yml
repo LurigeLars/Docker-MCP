@@ -78,14 +78,6 @@ jobs:
             -c "import sys; sys.path.insert(0, '/review'); import local_mcp; assert local_mcp.mcp is not None"
       - name: Verify offline sandbox from a synthetic Git commit
         run: python3 tests/smoke_secure_repo_runner.py
-      - name: Build synthetic project test images
-        run: |
-          for profile in pass fail volume; do
-            docker build --target "$profile" -t "dockerlocal-project-test-ci:$profile" -f tests/Dockerfile.project-test-fixture tests
-          done
-      - name: Verify actual project test broker on disposable Docker
-        shell: pwsh
-        run: ./tests/project-test-actual-docker.ps1
       - name: Generate complete image SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -115,3 +107,20 @@ jobs:
           path: image-sbom.cdx.json
           if-no-files-found: error
           retention-days: 14
+
+  project-test-sandbox:
+    name: Immutable project test broker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build synthetic project test images
+        run: |
+          for profile in pass fail volume; do
+            docker build --target "$profile" -t "dockerlocal-project-test-ci:$profile" -f tests/Dockerfile.project-test-fixture tests
+          done
+      - name: Verify actual project test broker on disposable Docker
+        shell: pwsh
+        run: ./tests/project-test-actual-docker.ps1
