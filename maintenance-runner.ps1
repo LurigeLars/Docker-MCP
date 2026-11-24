@@ -1917,12 +1917,12 @@ function Run-ProjectTest {
             $HostCfg.Privileged -ne $false -or $Info.Config.User -cne "65532:65532" -or
             $HostCfg.PidsLimit -ne 64 -or $HostCfg.Memory -ne 1GB -or
             $HostCfg.MemorySwap -ne 1GB -or $HostCfg.NanoCpus -ne 1000000000 -or
-            "ALL" -cnotin @($HostCfg.CapDrop) -or @($HostCfg.CapAdd | Where-Object {$_}).Count -ne 0 -or
+            "ALL" -cnotin @($HostCfg.CapDrop) -or @($HostCfg["CapAdd"] | Where-Object {$_}).Count -ne 0 -or
             @($HostCfg.SecurityOpt | Where-Object {$_ -in @("no-new-privileges","no-new-privileges:true")}).Count -ne 1 -or
-            $HostCfg.PidMode -eq "host" -or $HostCfg.IpcMode -ne "private" -or
-            $HostCfg.Binds -or $HostCfg.Mounts -or $HostCfg.Devices -or $HostCfg.DeviceRequests -or
-            $HostCfg.PortBindings -or $HostCfg.PublishAllPorts -or $Info.Config.Volumes -or
-            @($Info.Mounts | Where-Object {$_.Type -ne "tmpfs" -or $_.Destination -ne "/tmp"}).Count -ne 0 -or
+            $HostCfg["PidMode"] -eq "host" -or $HostCfg.IpcMode -ne "private" -or
+            $HostCfg["Binds"] -or $HostCfg["Mounts"] -or $HostCfg["Devices"] -or $HostCfg["DeviceRequests"] -or
+            $HostCfg["PortBindings"] -or $HostCfg["PublishAllPorts"] -or $Info.Config["Volumes"] -or
+            @($Info["Mounts"] | Where-Object {$_.Type -ne "tmpfs" -or $_.Destination -ne "/tmp"}).Count -ne 0 -or
             $HostCfg.RestartPolicy.Name -cne "no" -or $HostCfg.Init -ne $false -or
             $HostCfg.LogConfig.Type -cne "none" -or
             @($HostCfg.Tmpfs.Keys).Count -ne 1 -or
