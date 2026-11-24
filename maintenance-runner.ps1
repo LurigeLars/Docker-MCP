@@ -1883,9 +1883,9 @@ function Run-ProjectTest {
     if ($ImageInfo -isnot [System.Collections.IDictionary] -or
         $ImageInfo.Id -cne $Image -or
         $ImageInfo.Config -isnot [System.Collections.IDictionary] -or
-        ($null -ne $ImageInfo.Config.Volumes -and
-         ($ImageInfo.Config.Volumes -isnot [System.Collections.IDictionary] -or
-          $ImageInfo.Config.Volumes.Count -ne 0))) {
+        ($null -ne $ImageInfo.Config["Volumes"] -and
+         ($ImageInfo.Config["Volumes"] -isnot [System.Collections.IDictionary] -or
+          $ImageInfo.Config["Volumes"].Count -ne 0))) {
         throw "Approved image absent or declares volumes."
     }
     $Name = "dl-project-test-$JobId"
