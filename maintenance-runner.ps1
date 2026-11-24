@@ -1461,6 +1461,40 @@ function Get-HostDiskUsage {
 }
 
 function Invoke-RunnerSelfTest {
+    # Simulate a daemon create timeout followed by an absent inspect. The
+    # daemon could still finish the operation: retain the private sentinel.
+    & {
+        $Root = Join-Path ([IO.Path]::GetTempPath()) ("project-test-timeout-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $Root | Out-Null
+        $TestId = "a" * 32
+        $TestImage = "sha256:" + ("b" * 64)
+        $Request = [pscustomobject]@{action="run_project_test";job_id=$TestId;created_unix=1;profile="sample"}
+        $Calls = [System.Collections.Generic.List[string]]::new()
+        function Invoke-ProjectTestDocker {
+            param([string[]]$Arguments,[int]$TimeoutSeconds=30)
+            $Calls.Add($Arguments[0])
+            switch ($Arguments[0]) {
+                "info" { return @{code=0;stdout='linux|["name=seccomp,profile=builtin"]';stderr=""} }
+                "image" { return @{code=0;stdout="$TestImage|null";stderr=""} }
+                "create" { return @{code=124;stdout="";stderr=""} }
+                "container" { return @{code=1;stdout="";stderr="No such container"} }
+                default { throw "Unexpected Docker operation in create timeout self-test." }
+            }
+        }
+        try {
+            Write-JsonAtomic -Path (Join-Path $Root "project-test-profiles.local.json") -Value @{enabled=$true;profiles=@{sample=@{image_id=$TestImage}}}
+            $Rejected = $false
+            try { [void](Run-ProjectTest -JobId $TestId -Job $Request) } catch { $Rejected = $true }
+            if (-not $Rejected -or -not (Test-Path -LiteralPath (Join-Path $Root "project-test-active.json")) -or
+                ($Calls -join ",") -cne "info,image,create,container") {
+                throw "Ambiguous test create did not retain fail-closed sentinel."
+            }
+            $Rejected = $false
+            try { [void](Run-ProjectTest -JobId $TestId -Job $Request) } catch { $Rejected = $true }
+            if (-not $Rejected -or $Calls.Count -ne 4) { throw "Unverified cleanup did not block retry." }
+        }
+        finally { Remove-Item -LiteralPath $Root -Recurse -Force }
+    }
     # Pure registry/request validation: never launch a test container in CI.
     & {
         $TestCfgDir = Join-Path ([IO.Path]::GetTempPath()) ("project-test-config-" + [guid]::NewGuid().ToString("N"))
@@ -1848,6 +1882,7 @@ function Run-ProjectTest {
     Write-JsonAtomic -Path $Ledger -Value @{day=$Day;count=($Count+1);last=$Now}
     Write-JsonAtomic -Path $Sentinel -Value @{job_id=$JobId;profile=$Job.profile;image_id=$Image}
     $CreatedId = $null
+    $CreateConfirmed = $false
     $Clock = [Diagnostics.Stopwatch]::StartNew()
     $Receipt = @{profile=$Job.profile;test_status="FAILED";exit_code=$null;oom_killed=$false;memory_limit_mib=1024;cleanup_verified=$false}
     try {
@@ -1855,13 +1890,14 @@ function Run-ProjectTest {
             "--label","dockerlocal.project-test-job=$JobId","--network","none","--read-only",
             "--user","65532:65532","--cap-drop","ALL","--security-opt","no-new-privileges",
             "--pids-limit","64","--memory","1g","--memory-swap","1g","--cpus","1",
-            "--ipc","private","--restart","no","--no-healthcheck","--log-driver","none",
+            "--ipc","private","--restart","no","--init=false","--no-healthcheck","--log-driver","none",
             "--tmpfs","/tmp:rw,nosuid,nodev,noexec,size=128m,uid=65532,gid=65532,mode=0700",
             "--env","HOME=/tmp",$Image)
         if ($Create.code -ne 0 -or $Create.stdout.Trim() -cnotmatch '^[a-f0-9]{64}$') {
             throw "Project test create failed."
         }
         $CreatedId = $Create.stdout.Trim()
+        $CreateConfirmed = $true
         $Info = Get-ProjectTestContainer -Name $Name -JobId $JobId
         if (-not $Info -or $Info.Id -cne $CreatedId -or $Info.Image -cne $Image) {
             throw "Project test image identity mismatch."
@@ -1877,7 +1913,10 @@ function Run-ProjectTest {
             $HostCfg.Binds -or $HostCfg.Mounts -or $HostCfg.Devices -or $HostCfg.DeviceRequests -or
             $HostCfg.PortBindings -or $HostCfg.PublishAllPorts -or $Info.Config.Volumes -or
             @($Info.Mounts | Where-Object {$_.Type -ne "tmpfs" -or $_.Destination -ne "/tmp"}).Count -ne 0 -or
-            @($HostCfg.Tmpfs.Keys).Count -ne 1 -or -not $HostCfg.Tmpfs["/tmp"]) {
+            $HostCfg.RestartPolicy.Name -cne "no" -or $HostCfg.Init -ne $false -or
+            $HostCfg.LogConfig.Type -cne "none" -or
+            @($HostCfg.Tmpfs.Keys).Count -ne 1 -or
+            $HostCfg.Tmpfs["/tmp"] -cne "rw,nosuid,nodev,noexec,size=128m,uid=65532,gid=65532,mode=0700") {
             throw "Project test sandbox verification failed."
         }
         $Start = Invoke-ProjectTestDocker @("start",$CreatedId)
@@ -1909,6 +1948,9 @@ function Run-ProjectTest {
             }
         }
         elseif ($CreatedId) { throw "Test container vanished before verified cleanup." }
+        # A failed/timed-out create may finish on the daemon after an absent
+        # inspect. Retain the sentinel even if no object was visible yet.
+        if (-not $CreateConfirmed) { throw "Test create outcome unknown; local cleanup review required." }
         $Receipt.cleanup_verified = $true
         Remove-Item -LiteralPath $Sentinel -Force
     }
