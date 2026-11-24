@@ -1714,6 +1714,174 @@ $null = $DefinitelyUnsetVariable
 # Long-running Scout/Compose jobs use one bounded child process. The dispatcher
 # stays responsive for read-only host status requests while the child runs.
 # All requests still originate in the existing fixed-schema /control queue.
+# Immutable image-only test profiles. No repository or caller-supplied code runs
+# on Windows. This lane is separate from the local-only repository-code runner.
+function Invoke-ProjectTestDocker {
+    param([string[]]$Arguments, [int]$TimeoutSeconds = 30)
+    $Start = [Diagnostics.ProcessStartInfo]::new()
+    $Start.FileName = $Docker
+    $Start.UseShellExecute = $false
+    $Start.CreateNoWindow = $true
+    $Start.RedirectStandardOutput = $true
+    $Start.RedirectStandardError = $true
+    foreach ($Argument in $Arguments) { [void]$Start.ArgumentList.Add($Argument) }
+    $Proc = [Diagnostics.Process]::new()
+    $Proc.StartInfo = $Start
+    try {
+        [void]$Proc.Start()
+        $Out = $Proc.StandardOutput.ReadToEndAsync()
+        $Err = $Proc.StandardError.ReadToEndAsync()
+        if (-not $Proc.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $Proc.Kill($true) } catch {}
+            [void]$Proc.WaitForExit(5000)
+            return @{ code=124; stdout=""; stderr="" }
+        }
+        return @{ code=$Proc.ExitCode; stdout=$Out.GetAwaiter().GetResult(); stderr=$Err.GetAwaiter().GetResult() }
+    }
+    finally { $Proc.Dispose() }
+}
+
+function Resolve-ProjectTestImage {
+    param($Job, [string]$JobId, [string]$ConfigPath)
+    $Expected = @("action","created_unix","job_id","profile")
+    if (@(Compare-Object $Expected @($Job.PSObject.Properties.Name) -CaseSensitive).Count -ne 0 -or
+        $Job.action -cne "run_project_test" -or $Job.job_id -cne $JobId -or
+        $JobId -cnotmatch '^[a-f0-9]{32}$' -or $Job.profile -isnot [string] -or
+        $Job.profile -cnotmatch '^[a-z][a-z0-9-]{0,63}$') {
+        throw "Invalid project test request."
+    }
+    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw "Project tests disabled." }
+    $Cfg = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json -AsHashtable
+    if ($Cfg.enabled -isnot [bool] -or -not $Cfg.enabled -or
+        @(Compare-Object @("enabled","profiles") @($Cfg.Keys) -CaseSensitive).Count -ne 0 -or
+        $Cfg.profiles -isnot [System.Collections.IDictionary] -or
+        $Job.profile -cnotin @($Cfg.profiles.Keys)) { throw "Project test profile not enabled." }
+    $Entry = $Cfg.profiles[$Job.profile]
+    if ($Entry -isnot [System.Collections.IDictionary] -or
+        @($Entry.Keys).Count -ne 1 -or $Entry.image_id -isnot [string] -or
+        $Entry.image_id -cnotmatch '^sha256:[a-f0-9]{64}$') {
+        throw "Project test profile requires one exact local image ID."
+    }
+    return $Entry.image_id
+}
+
+function Get-ProjectTestContainer {
+    param([string]$Name,[string]$JobId)
+    $Check = Invoke-ProjectTestDocker @("container","inspect","--format","{{json .}}",$Name)
+    if ($Check.code -ne 0) {
+        if ($Check.stderr -match '(?i)no such (object|container)') { return $null }
+        throw "Cannot verify test container identity."
+    }
+    $Info = $Check.stdout | ConvertFrom-Json -AsHashtable
+    if ($Info.Id -cnotmatch '^[a-f0-9]{64}$' -or $Info.Name -cne "/$Name" -or
+        $Info.Config.Labels["dockerlocal.project-test-job"] -cne $JobId) {
+        throw "Test container ownership mismatch."
+    }
+    return $Info
+}
+
+function Run-ProjectTest {
+    param([string]$JobId,$Job)
+    $Image = Resolve-ProjectTestImage -Job $Job -JobId $JobId -ConfigPath (Join-Path $Root "project-test-profiles.local.json")
+    # A single maintenance worker serializes jobs; persistent sentinel blocks
+    # further tests after an interrupted or unverified cleanup.
+    $Sentinel = Join-Path $Root "project-test-active.json"
+    $Ledger = Join-Path $Root "project-test-rate.json"
+    if (Test-Path -LiteralPath $Sentinel) { throw "Previous test cleanup requires local review." }
+    $Now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $Day = [DateTime]::UtcNow.ToString("yyyy-MM-dd")
+    $Count = 0
+    if (Test-Path -LiteralPath $Ledger) {
+        $Old = Get-Content -LiteralPath $Ledger -Raw | ConvertFrom-Json -AsHashtable
+        if ($Old.day -notmatch '^\d{4}-\d{2}-\d{2}$' -or $Old.count -isnot [ValueType] -or
+            $Old.last -isnot [ValueType] -or $Old.count -lt 0 -or $Old.last -gt $Now) {
+            throw "Invalid project test rate ledger."
+        }
+        if ($Now - [long]$Old.last -lt 60) { throw "Project test cooldown." }
+        if ($Old.day -ceq $Day) { $Count = [int]$Old.count }
+    }
+    if ($Count -ge 4) { throw "Daily project test limit reached." }
+    $Daemon = Invoke-ProjectTestDocker @("info","--format","{{.OSType}}|{{json .SecurityOptions}}")
+    if ($Daemon.code -ne 0 -or $Daemon.stdout.Trim() -notmatch '^linux\|' -or
+        $Daemon.stdout -notmatch 'name=seccomp,' -or $Daemon.stdout -match 'unconfined') {
+        throw "Linux Docker with active seccomp required."
+    }
+    $ImageCheck = Invoke-ProjectTestDocker @("image","inspect","--format","{{.Id}}|{{json .Config.Volumes}}",$Image)
+    if ($ImageCheck.code -ne 0 -or $ImageCheck.stdout.Trim() -cnotin @("$Image|null","$Image|{}")) {
+        throw "Approved image absent or declares volumes."
+    }
+    $Name = "dl-project-test-$JobId"
+    Write-JsonAtomic -Path $Ledger -Value @{day=$Day;count=($Count+1);last=$Now}
+    Write-JsonAtomic -Path $Sentinel -Value @{job_id=$JobId;profile=$Job.profile;image_id=$Image}
+    $CreatedId = $null
+    $Clock = [Diagnostics.Stopwatch]::StartNew()
+    $Receipt = @{profile=$Job.profile;test_status="FAILED";exit_code=$null;oom_killed=$false;memory_limit_mib=1024;cleanup_verified=$false}
+    try {
+        $Create = Invoke-ProjectTestDocker @("create","--pull=never","--name",$Name,
+            "--label","dockerlocal.project-test-job=$JobId","--network","none","--read-only",
+            "--user","65532:65532","--cap-drop","ALL","--security-opt","no-new-privileges",
+            "--pids-limit","64","--memory","1g","--memory-swap","1g","--cpus","1",
+            "--ipc","private","--restart","no","--no-healthcheck","--log-driver","none",
+            "--tmpfs","/tmp:rw,nosuid,nodev,noexec,size=128m,uid=65532,gid=65532,mode=0700",
+            "--env","HOME=/tmp",$Image)
+        if ($Create.code -ne 0 -or $Create.stdout.Trim() -cnotmatch '^[a-f0-9]{64}$') {
+            throw "Project test create failed."
+        }
+        $CreatedId = $Create.stdout.Trim()
+        $Info = Get-ProjectTestContainer -Name $Name -JobId $JobId
+        if (-not $Info -or $Info.Id -cne $CreatedId -or $Info.Image -cne $Image) {
+            throw "Project test image identity mismatch."
+        }
+        $HostCfg = $Info.HostConfig
+        if ($HostCfg.NetworkMode -cne "none" -or $HostCfg.ReadonlyRootfs -ne $true -or
+            $HostCfg.Privileged -ne $false -or $Info.Config.User -cne "65532:65532" -or
+            $HostCfg.PidsLimit -ne 64 -or $HostCfg.Memory -ne 1GB -or
+            $HostCfg.MemorySwap -ne 1GB -or $HostCfg.NanoCpus -ne 1000000000 -or
+            "ALL" -cnotin @($HostCfg.CapDrop) -or @($HostCfg.CapAdd | Where-Object {$_}).Count -ne 0 -or
+            @($HostCfg.SecurityOpt | Where-Object {$_ -in @("no-new-privileges","no-new-privileges:true")}).Count -ne 1 -or
+            $HostCfg.PidMode -eq "host" -or $HostCfg.IpcMode -ne "private" -or
+            $HostCfg.Binds -or $HostCfg.Mounts -or $HostCfg.Devices -or $HostCfg.DeviceRequests -or
+            $HostCfg.PortBindings -or $HostCfg.PublishAllPorts -or $Info.Config.Volumes -or
+            @($Info.Mounts | Where-Object {$_.Type -ne "tmpfs" -or $_.Destination -ne "/tmp"}).Count -ne 0 -or
+            @($HostCfg.Tmpfs.Keys).Count -ne 1 -or -not $HostCfg.Tmpfs["/tmp"]) {
+            throw "Project test sandbox verification failed."
+        }
+        $Start = Invoke-ProjectTestDocker @("start",$CreatedId)
+        if ($Start.code -ne 0) { throw "Project test start failed." }
+        $Wait = Invoke-ProjectTestDocker @("wait",$CreatedId) 600
+        if ($Wait.code -eq 124) {
+            $Receipt.test_status = "TIMED_OUT"
+        }
+        elseif ($Wait.code -eq 0 -and $Wait.stdout.Trim() -match '^\d{1,3}$') {
+            $Receipt.exit_code = [int]$Wait.stdout.Trim()
+            $Final = Get-ProjectTestContainer -Name $Name -JobId $JobId
+            if (-not $Final -or $Final.Id -cne $CreatedId -or $Final.State.Running -or
+                $Final.State.ExitCode -ne $Receipt.exit_code) { throw "Test exit state not verified." }
+            $Receipt.oom_killed = [bool]$Final.State.OOMKilled
+            if ($Receipt.exit_code -eq 0 -and -not $Receipt.oom_killed) { $Receipt.test_status = "PASSED" }
+        }
+        else { throw "Project test wait failed." }
+    }
+    finally {
+        # A timeout during create may have left an object. Verify label and ID
+        # before removal; if anything is unknown, retain the sentinel.
+        $Owned = Get-ProjectTestContainer -Name $Name -JobId $JobId
+        if ($Owned) {
+            if ($CreatedId -and $Owned.Id -cne $CreatedId) { throw "Test cleanup identity mismatch." }
+            if ($Owned.Image -cne $Image) { throw "Test cleanup image mismatch." }
+            $Removed = Invoke-ProjectTestDocker @("rm","--force",$Owned.Id)
+            if ($Removed.code -ne 0 -or (Get-ProjectTestContainer -Name $Name -JobId $JobId)) {
+                throw "Test cleanup not verified."
+            }
+        }
+        elseif ($CreatedId) { throw "Test container vanished before verified cleanup." }
+        $Receipt.cleanup_verified = $true
+        Remove-Item -LiteralPath $Sentinel -Force
+    }
+    $Receipt.elapsed_ms = $Clock.ElapsedMilliseconds
+    return $Receipt
+}
+
 function Invoke-DispatchedWorker {
     param([Parameter(Mandatory)][string]$JobId)
 
@@ -1728,7 +1896,7 @@ function Invoke-DispatchedWorker {
         $Job = Get-Content -LiteralPath $ProcessingPath -Raw | ConvertFrom-Json
         if ([string]$Job.job_id -cne $JobId) { throw "Worker job ID mismatch." }
         $Action = [string]$Job.action
-        if ($Action -notin @("scout_full_scan", "compose_redeploy")) {
+        if ($Action -notin @("scout_full_scan", "compose_redeploy", "run_project_test")) {
             throw "Dispatched worker action is not allowlisted."
         }
 
@@ -1738,6 +1906,14 @@ function Invoke-DispatchedWorker {
             $Result.started_unix = $Started
             $Result.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             Write-JsonAtomic -Path $ResultPath -Value $Result
+        }
+        elseif ($Action -eq "run_project_test") {
+            $Run = Run-ProjectTest -JobId $JobId -Job $Job
+            $Run.job_id = $JobId
+            $Run.status = if ($Run.test_status -eq "PASSED") { "succeeded" } else { "failed" }
+            $Run.started_unix = $Started
+            $Run.finished_unix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            Write-JsonAtomic -Path $ResultPath -Value $Run
         }
         else {
             $Run = Run-ProjectRedeploy -Job $Job
@@ -1944,7 +2120,7 @@ try {
                 # bounded status/control request behind them run without delay.
                 if ($null -ne $ActiveLongProcess) {
                     $WaitingJob = Get-Content -LiteralPath $RequestFile.FullName -Raw | ConvertFrom-Json
-                    if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy")) {
+                    if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy", "run_project_test")) {
                         continue
                     }
                 }
@@ -1961,16 +2137,19 @@ try {
                     "scheduled_task_status",
                     "scheduled_task_control",
                     "host_disk_usage",
-                    "scout_full_scan"
+                    "scout_full_scan",
+                    "run_project_test"
                 )) { throw "Action is not allowlisted." }
 
                 Write-RunnerLog "job $JobId action=$Action project=$([string]$Job.project)"
-                if ($Action -in @("scout_full_scan", "compose_redeploy")) {
+                if ($Action -in @("scout_full_scan", "compose_redeploy", "run_project_test")) {
                     # Image scans are not associated with any Compose project.
                     # PowerShell Mandatory string parameters reject an empty
                     # value, so use a fixed telemetry-only name for scan jobs.
                     $DispatchProject = if ($Action -eq "scout_full_scan") {
                         "image-scan"
+                    } elseif ($Action -eq "run_project_test") {
+                        "project-test"
                     } else { [string]$Job.project }
                     $ActiveLongProcess = Start-DispatchedWorker -JobId $JobId -Project $DispatchProject
                     $ActiveLongJobId = $JobId
