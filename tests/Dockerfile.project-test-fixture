@@ -1,0 +1,9 @@
+# Synthetic image-only runner acceptance. No live services or credentials.
+FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89 AS pass
+COPY project-test-fixture.py /fixture.py
+USER 65532:65532
+ENTRYPOINT ["python","-I","-B","/fixture.py"]
+FROM pass AS fail
+CMD ["fail"]
+FROM pass AS volume
+VOLUME ["/unexpected"]
