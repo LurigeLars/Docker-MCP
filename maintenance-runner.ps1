@@ -1913,21 +1913,48 @@ function Run-ProjectTest {
             throw "Project test image identity mismatch."
         }
         $HostCfg = $Info.HostConfig
-        if ($HostCfg.NetworkMode -cne "none" -or $HostCfg.ReadonlyRootfs -ne $true -or
-            $HostCfg.Privileged -ne $false -or $Info.Config.User -cne "65532:65532" -or
-            $HostCfg.PidsLimit -ne 64 -or $HostCfg.Memory -ne 1GB -or
-            $HostCfg.MemorySwap -ne 1GB -or $HostCfg.NanoCpus -ne 1000000000 -or
-            "ALL" -cnotin @($HostCfg.CapDrop) -or @($HostCfg["CapAdd"] | Where-Object {$_}).Count -ne 0 -or
-            @($HostCfg.SecurityOpt | Where-Object {$_ -in @("no-new-privileges","no-new-privileges:true")}).Count -ne 1 -or
-            $HostCfg["PidMode"] -eq "host" -or $HostCfg.IpcMode -ne "private" -or
-            $HostCfg["Binds"] -or $HostCfg["Mounts"] -or $HostCfg["Devices"] -or $HostCfg["DeviceRequests"] -or
-            $HostCfg["PortBindings"] -or $HostCfg["PublishAllPorts"] -or $Info.Config["Volumes"] -or
-            @($Info["Mounts"] | Where-Object {$_.Type -ne "tmpfs" -or $_.Destination -ne "/tmp"}).Count -ne 0 -or
-            $HostCfg.RestartPolicy.Name -cne "no" -or $HostCfg.Init -ne $false -or
-            $HostCfg.LogConfig.Type -cne "none" -or
-            @($HostCfg.Tmpfs.Keys).Count -ne 1 -or
-            $HostCfg.Tmpfs["/tmp"] -cne "rw,nosuid,nodev,noexec,size=128m,uid=65532,gid=65532,mode=0700") {
-            throw "Project test sandbox verification failed."
+        # Docker may return an empty object or list instead of null. Empty
+        # hashtables can be truthy in PowerShell; check collection cardinality.
+        $AbsentOrEmpty = {
+            param($Value)
+            ($null -eq $Value) -or
+            (($Value -is [System.Collections.IDictionary] -or $Value -is [array]) -and $Value.Count -eq 0)
+        }
+        $Checks = [ordered]@{
+            network = ($HostCfg.NetworkMode -ceq "none")
+            readonly = ($HostCfg.ReadonlyRootfs -eq $true)
+            privileged = ($HostCfg.Privileged -eq $false)
+            user = ($Info.Config.User -ceq "65532:65532")
+            pids = ($HostCfg.PidsLimit -eq 64)
+            memory = ($HostCfg.Memory -eq 1GB)
+            swap = ($HostCfg.MemorySwap -eq 1GB)
+            cpu = ($HostCfg.NanoCpus -eq 1000000000)
+            cap_drop = ("ALL" -cin @($HostCfg.CapDrop))
+            cap_add = (& $AbsentOrEmpty $HostCfg["CapAdd"])
+            security = (@($HostCfg.SecurityOpt).Count -eq 1 -and
+                $HostCfg.SecurityOpt[0] -cin @("no-new-privileges","no-new-privileges:true"))
+            pid_namespace = ($HostCfg["PidMode"] -in @($null,"","private"))
+            ipc = ($HostCfg.IpcMode -ceq "private")
+            binds = (& $AbsentOrEmpty $HostCfg["Binds"])
+            host_mounts = (& $AbsentOrEmpty $HostCfg["Mounts"])
+            devices = (& $AbsentOrEmpty $HostCfg["Devices"])
+            device_requests = (& $AbsentOrEmpty $HostCfg["DeviceRequests"])
+            ports = (& $AbsentOrEmpty $HostCfg["PortBindings"])
+            publish = (-not $HostCfg["PublishAllPorts"])
+            volumes = (& $AbsentOrEmpty $Info.Config["Volumes"])
+            mounts = (@($Info["Mounts"] | Where-Object {
+                $null -ne $_ -and ($_.Type -ne "tmpfs" -or $_.Destination -ne "/tmp")
+            }).Count -eq 0)
+            restart = ($HostCfg.RestartPolicy.Name -ceq "no")
+            init = ($HostCfg.Init -eq $false)
+            logs = ($HostCfg.LogConfig.Type -ceq "none")
+            tmpfs = ($HostCfg.Tmpfs -is [System.Collections.IDictionary] -and
+                $HostCfg.Tmpfs.Count -eq 1 -and
+                $HostCfg.Tmpfs["/tmp"] -ceq "rw,nosuid,nodev,noexec,size=128m,uid=65532,gid=65532,mode=0700")
+        }
+        $Failed = @($Checks.Keys | Where-Object { $Checks[$_] -ne $true })
+        if ($Failed.Count -gt 0) {
+            throw ("Project test sandbox verification failed: " + ($Failed -join ","))
         }
         $Start = Invoke-ProjectTestDocker @("start",$CreatedId)
         if ($Start.code -ne 0) { throw "Project test start failed." }
