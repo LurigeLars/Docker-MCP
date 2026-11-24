@@ -1475,7 +1475,7 @@ function Invoke-RunnerSelfTest {
             $Calls.Add($Arguments[0])
             switch ($Arguments[0]) {
                 "info" { return @{code=0;stdout='linux|["name=seccomp,profile=builtin"]';stderr=""} }
-                "image" { return @{code=0;stdout="$TestImage|null";stderr=""} }
+                "image" { return @{code=0;stdout=(@{Id=$TestImage;Config=@{Volumes=$null}} | ConvertTo-Json -Compress);stderr=""} }
                 "create" { return @{code=124;stdout="";stderr=""} }
                 "container" { return @{code=1;stdout="";stderr="No such container"} }
                 default { throw "Unexpected Docker operation in create timeout self-test." }
@@ -1874,8 +1874,18 @@ function Run-ProjectTest {
         $Daemon.stdout -notmatch 'name=seccomp,' -or $Daemon.stdout -match 'unconfined') {
         throw "Linux Docker with active seccomp required."
     }
-    $ImageCheck = Invoke-ProjectTestDocker @("image","inspect","--format","{{.Id}}|{{json .Config.Volumes}}",$Image)
-    if ($ImageCheck.code -ne 0 -or $ImageCheck.stdout.Trim() -cnotin @("$Image|null","$Image|{}")) {
+    $ImageCheck = Invoke-ProjectTestDocker @("image","inspect","--format","{{json .}}",$Image)
+    if ($ImageCheck.code -ne 0) { throw "Approved image inspection failed." }
+    $ImageInfo = $ImageCheck.stdout | ConvertFrom-Json -AsHashtable
+    # Docker releases may serialize an empty Volumes map as null, {}, or
+    # omit it entirely. Validate the structured response, not a Go template's
+    # string formatting. Never accept a different image ID or nonempty map.
+    if ($ImageInfo -isnot [System.Collections.IDictionary] -or
+        $ImageInfo.Id -cne $Image -or
+        $ImageInfo.Config -isnot [System.Collections.IDictionary] -or
+        ($null -ne $ImageInfo.Config.Volumes -and
+         ($ImageInfo.Config.Volumes -isnot [System.Collections.IDictionary] -or
+          $ImageInfo.Config.Volumes.Count -ne 0))) {
         throw "Approved image absent or declares volumes."
     }
     $Name = "dl-project-test-$JobId"
