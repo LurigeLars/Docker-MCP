@@ -1326,6 +1326,13 @@ function Get-ComposeDesiredState {
         foreach ($ServiceProperty in $ServiceProperties) {
             $Service = [string]$ServiceProperty.Name
             $ServiceConfig = $ServiceProperty.Value
+            # Some Compose versions include inactive-profile services in
+            # rendered config. They are explicitly not desired in Rust mode.
+            if ($EngineMode -ceq "rust" -and $Service -cin @("redis","rabbitmq","nuq-postgres")) {
+                if (@($ServiceConfig.profiles) -ccontains "legacy-rollback") { continue }
+                $Errors += @{project=$Project;service=$Service;error="firecrawl_legacy_profile_unverified"}
+                $EngineMode="unverified"
+            }
             $Image = [string]$ServiceConfig.image
 
             $HashRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
@@ -1346,6 +1353,15 @@ function Get-ComposeDesiredState {
             }
         }
 
+        if ($EngineMode -ceq "rust") {
+            if (-not $Services.ContainsKey("api") -or $Services.api.image -cne "firecrawl-rust-api:local" -or
+                -not $Services.ContainsKey("pdf-ocr") -or $Services["pdf-ocr"].image -cne "firecrawl-rust-document:local" -or
+                -not $Services.ContainsKey("rust-init") -or -not $Services.ContainsKey("mcp")) {
+                $Errors += @{project=$Project;error="firecrawl_rust_config_unverified"}
+                continue
+            }
+        }
+        if ($EngineMode -ceq "unverified") { continue }
         $Desired[$Project] = @{ services = $Services; engine_mode = $EngineMode }
     }
 

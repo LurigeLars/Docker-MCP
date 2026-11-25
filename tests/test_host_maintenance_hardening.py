@@ -337,4 +337,6 @@ class FirecrawlAuditModeTests(unittest.TestCase):
         self.assertIn('firecrawl_transition_mode_unverified', source)
         self.assertIn('research\\compose.rust-production-plan.yaml', source)
         self.assertIn('engine_mode = $EngineMode', source)
+        self.assertIn('legacy-rollback', source)
+        self.assertIn('firecrawl_rust_config_unverified', source)
         self.assertNotIn('detail = ([string]$ConfigRun.output).Trim()', source)
