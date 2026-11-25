@@ -1,5 +1,8 @@
 # DockerLocal Rust prototype (research, not deployed)
 
+> The prototype code moved to `rust/`, where the port continues batch by batch; see
+> `rust/README.md`. This page keeps the original measurements and decision.
+
 An isolated prototype of five representative read-only DockerLocal tools in Rust
 (`rmcp` 3.11.0, stdio), built to decide whether a Rust migration of the production
 server is worth it. Nothing here is wired into compose, the installers or the gateway.
@@ -12,8 +15,8 @@ Docker API paths and output shapes as `server.py`, including FastMCP's list cont
 ## Reproduce
 
 ```powershell
-docker build -t dockerlocal-rs:proto research/rust-prototype
-python research/rust-prototype/compare.py 10
+docker build -t dockerlocal-rs:batch1 rust
+python rust/compare.py 10
 ```
 
 `compare.py` starts both servers with the production stdio hardening
