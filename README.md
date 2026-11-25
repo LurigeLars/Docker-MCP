@@ -496,6 +496,12 @@ Two execution modes are supported:
 
 Script-backed projects are whole-project operations: callers must omit the `services` argument. The local config contains the script path and fixed arguments only; credentials and secret values must remain in the project-specific secret store and must not be copied into the maintenance config. An operation may use an empty argument array when the allowlisted wrapper itself requires no parameters.
 
+### Standard deployment and recovery policy
+
+For custom MCP stateless services, prefer a clean reviewed source revision, a scoped build, the existing required security gates, service-specific recreation and a bounded live smoke test. Preserve the previous image under a rollback tag before rebuilding when available. A confirmed missing old image alone need not prevent a stateless deployment; explicitly report the lack of fast rollback and use the reviewed previous source/configuration to recover if needed. Never reconstruct an image automatically or copy a running container to capture credentials. Docker inventory failures and unexpected identity changes are not proof of absence.
+
+This policy is not a generic override: preserve project-specific authentication, allowlists, secret restoration, active-job checks, persistent volumes and configuration backups. Database, queue and state-bearing migration/backup checks remain mandatory. A rollback tag is not a backup of a bind mount or a data volume. Do not rewrite unrelated working deployment wrappers just to make implementations identical; apply the policy during their next reviewed maintenance change.
+
 ## Reviewed source-to-runtime promotions (GitHub MCP, Cloudflared, DockerLocal)
 
 The original Compose maintenance tool recreates containers from the **installed**
