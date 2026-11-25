@@ -52,7 +52,9 @@ async function startUpstream() {
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({
         jsonrpc: '2.0', id: body.id,
-        result: { tools: [{ name: 'repo_run_tests' }, { name: 'repo_test_status' },
+        result: body.method === 'server/discover'
+          ? { supportedVersions: ['2026-07-28'], instructions: 'upstream instructions' }
+          : { tools: [{ name: 'repo_run_tests' }, { name: 'repo_test_status' },
                           { name: 'containers_list' }] },
       }));
     });
@@ -135,6 +137,10 @@ try {
   const discovery = await rpc('tools/list', 3, {});
   assert.deepEqual(discovery.result?.tools.map(t => t.name), ['containers_list']);
   assert.equal(upstream.calls(), 1);
+  const modern = await rpc('server/discover', 4, {});
+  assert.deepEqual(modern.result?.supportedVersions, ['2026-07-28']);
+  assert.match(modern.result?.instructions, /DockerLocal exposes only the tools returned by tools\/list/);
+  assert.equal(upstream.calls(), 2);
   console.log('GATEWAY AUTHENTICATED NEGATIVE-CALL PASSED (offline, synthetic JWT)');
 } finally {
   if (child) {

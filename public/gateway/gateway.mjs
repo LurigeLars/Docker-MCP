@@ -170,7 +170,7 @@ function rewriteResponseMessage(message) {
       ALLOWED_TOOLS.has(String(tool?.name ?? '')),
     );
   }
-  if (message.result?.serverInfo) {
+  if (message.result?.serverInfo || Array.isArray(message.result?.supportedVersions)) {
     message.result.instructions =
       'DockerLocal exposes only the tools returned by tools/list. Calls outside that allowlist are rejected by the gateway.';
   }
@@ -200,7 +200,7 @@ function needsResponseRewrite(body) {
   try {
     const parsed = JSON.parse(body.toString('utf8'));
     return (Array.isArray(parsed) ? parsed : [parsed]).some(message =>
-      message?.method === 'tools/list' || message?.method === 'initialize'
+      message?.method === 'tools/list' || message?.method === 'initialize' || message?.method === 'server/discover'
     );
   } catch {
     return false;
