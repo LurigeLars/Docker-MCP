@@ -1246,8 +1246,21 @@ function Get-ComposeDesiredState {
 
     foreach ($Project in @($Projects.Keys | Sort-Object)) {
         $Cfg = $Projects[$Project]
+        $EngineMode = "default"
+        if ($Project -ceq "firecrawl") {
+            try { $EngineMode = Get-FirecrawlAuditMode $Cfg } catch { $EngineMode = "unverified" }
+            if ($EngineMode -ceq "unverified") {
+                $Errors += @{project=$Project;error="firecrawl_transition_mode_unverified"}
+                continue
+            }
+        }
         $ConfiguredFiles = @($Cfg.Files)
         if ($ConfiguredFiles.Count -eq 0) {
+            # The script registration can omit Compose files. The marker,
+            # running API and SQLite mount still verify the engine mode.
+            if ($EngineMode -ceq "rust") {
+                $Desired[$Project] = @{ services = @{}; engine_mode = $EngineMode }
+            }
             continue
         }
         # Script-backed Python projects use pyproject.toml/uv.lock as dependency
@@ -1267,14 +1280,6 @@ function Get-ComposeDesiredState {
             continue
         }
 
-        $EngineMode = "default"
-        if ($Project -ceq "firecrawl") {
-            try { $EngineMode = Get-FirecrawlAuditMode $Cfg } catch { $EngineMode = "unverified" }
-            if ($EngineMode -ceq "unverified") {
-                $Errors += @{project=$Project;error="firecrawl_transition_mode_unverified"}
-                continue
-            }
-        }
         $BaseArgs = @("compose")
         $MissingFile = $false
         foreach ($File in @($Cfg.Files)) {
@@ -1514,6 +1519,32 @@ function Get-HostDiskUsage {
 }
 
 function Invoke-RunnerSelfTest {
+    & {
+        $Projects = @{ firecrawl = @{ Mode = "script"; Files = @() } }
+        function Get-FirecrawlAuditMode { return $Mode }
+        function Invoke-DockerText { throw "A script registration without Compose files must skip Compose config." }
+
+        $Mode = "rust"
+        $Report = Get-ComposeDesiredState
+        if ($Report.projects.firecrawl.engine_mode -cne "rust" -or
+            $Report.projects.firecrawl.services.Count -ne 0 -or $Report.errors.Count -ne 0) {
+            throw "Verified Rust mode is missing from a script-only desired-state receipt."
+        }
+
+        $Mode = "legacy"
+        $Report = Get-ComposeDesiredState
+        if ($Report.projects.ContainsKey("firecrawl") -or $Report.errors.Count -ne 0) {
+            throw "Legacy script-only registration unexpectedly advertises desired state."
+        }
+
+        $Mode = "unverified"
+        $Report = Get-ComposeDesiredState
+        if ($Report.projects.ContainsKey("firecrawl") -or
+            $Report.errors.Count -ne 1 -or $Report.errors[0].error -cne "firecrawl_transition_mode_unverified") {
+            throw "Unverified Firecrawl mode must be reported without classifying retained services."
+        }
+    }
+
     & {
         $ListenerReads = [System.Collections.Generic.List[string]]::new()
         function Read-McpPortRegistry {
