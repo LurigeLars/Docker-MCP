@@ -16,7 +16,8 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY --from=scout /docker-scout /usr/local/bin/docker-scout
+# Set modes at copy time: a later chmod would duplicate the ~200 MB binary in a new layer.
+COPY --from=scout --chmod=0555 /docker-scout /usr/local/bin/docker-scout
 COPY server.py tool_usage.py /app/
 
 RUN useradd --system --uid 65532 --home-dir /nonexistent --shell /usr/sbin/nologin dockerlocal \
@@ -24,7 +25,6 @@ RUN useradd --system --uid 65532 --home-dir /nonexistent --shell /usr/sbin/nolog
     && chown 65532:65532 /var/lib/dockerlocal-tool-usage \
     && chmod 0700 /var/lib/dockerlocal-tool-usage \
     && chown -R 65532:65532 /tmp/dockerlocal-home /tmp/docker-scout \
-    && chmod 0555 /usr/local/bin/docker-scout \
     && chmod 0444 /app/server.py /app/tool_usage.py
 
 USER 65532:65532
