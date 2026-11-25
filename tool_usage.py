@@ -17,10 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from time import monotonic, perf_counter
-from typing import Annotated
 
-from fastmcp.server.middleware import Middleware
-from pydantic import Field
 
 BUCKETS = (10, 25, 50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000,
            5000, 10000, 20000, 30000, 60000, 120000, 300000, 600000, 86400000)
@@ -243,29 +240,39 @@ SERVICE = 'DockerLocalMCP'
 ENV_PREFIX = 'DOCKERLOCAL'
 KNOWN_TOOLS = frozenset(["cleanup_stale_mcp_containers","cleanup_superseded_images","compose_redeploy","compose_status","container_inspect","container_logs","container_restart","container_stats","containers_list","host_disk_usage","image_inspect","image_prune_dangling","image_pull","image_usage_audit","images_list","maintenance_job_status","maintenance_runner_status","mcp_deployment_audit","port_registry_status","repo_pull_ff","repo_status","runtime_supervisor_status","scheduled_task_control","scheduled_task_status","scout_compare","scout_cves","scout_full_scan","scout_quickview","scout_recommendations","scout_sbom"])
 
-class ToolUsageMiddleware(Middleware):
-    def __init__(self, store: UsageStore):
-        self.store = store
-
-    async def on_call_tool(self, context, call_next):
-        return await observe_call(self.store, context.message.name, context, call_next)
-
-
 def install_tool_usage(server, path: Path):
+    # Keep dependency-free hardening tests able to import the pure metrics store.
+    # Runtime imports use the pinned FastMCP SDK, never a fallback in production.
+    from fastmcp.server.middleware import Middleware
+    from pydantic import Field
+    from typing import Annotated
+
+    class ToolUsageMiddleware(Middleware):
+        def __init__(self, store: UsageStore):
+            self.store = store
+
+        async def on_call_tool(self, context, call_next):
+            return await observe_call(self.store, context.message.name, context, call_next)
+
     store = UsageStore(path, KNOWN_TOOLS,
                        enabled=os.getenv('DOCKERLOCAL_MCP_TOOL_USAGE') != 'off')
     atexit.register(store.flush)
     server.add_middleware(ToolUsageMiddleware(store))
 
-    @server.tool(annotations={"readOnlyHint": True, "destructiveHint": False,
-                              "idempotentHint": True, "openWorldHint": False})
-    def tool_usage(days: Annotated[int, Field(ge=1, le=30)] = 7,
-                   limit: Annotated[int, Field(ge=1, le=100)] = 50,
-                   tool: Annotated[str | None, Field(max_length=64)] = None) -> dict:
-        """Report local tool calls, errors, latency and registered tools not observed."""
+    def tool_usage(days: int = 7, limit: int = 50, tool: str | None = None) -> dict:
+        """Local per-tool counts, latency, errors and unobserved tools (1-30 UTC days)."""
         try:
             return store.report(days, limit, tool)
         except (OSError, sqlite3.Error, ValueError):
             return {"success": False, "error": "Tool usage report unavailable"}
 
+    # Concrete annotations avoid unresolved function-local names under postponed annotations.
+    tool_usage.__annotations__ = {
+        "days": Annotated[int, Field(ge=1, le=30)],
+        "limit": Annotated[int, Field(ge=1, le=100)],
+        "tool": Annotated[str | None, Field(max_length=64)],
+        "return": dict,
+    }
+    server.tool(annotations={"readOnlyHint": True, "destructiveHint": False,
+                             "idempotentHint": True, "openWorldHint": False})(tool_usage)
     return store

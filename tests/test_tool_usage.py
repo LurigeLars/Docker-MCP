@@ -47,14 +47,21 @@ class UsageTest(TestCase):
         self.assertNotIn("tool_usage", KNOWN_TOOLS)
 
     def test_actual_mcp_middleware_counts_success_and_failure(self):
-        from fastmcp import Client, FastMCP
-        from fastmcp.exceptions import ToolError
-
-        from tool_usage import ToolUsageMiddleware
+        try:
+            from fastmcp import Client, FastMCP
+            from fastmcp.exceptions import ToolError
+            from fastmcp.server.middleware import Middleware
+        except ImportError:
+            self.skipTest("SDK not installed in dependency-free hardening suite")
+            return
 
         async def run(store):
             server = FastMCP("metrics-test")
-            server.add_middleware(ToolUsageMiddleware(store))
+            class TestObserver(Middleware):
+                async def on_call_tool(self, context, call_next):
+                    return await observe_call(store, context.message.name, context, call_next)
+
+            server.add_middleware(TestObserver())
 
             @server.tool
             def quote() -> dict:

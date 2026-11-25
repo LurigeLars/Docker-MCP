@@ -1255,11 +1255,9 @@ def scout_compare(image: str, baseline: str, only_fixed: bool = False) -> str:
     return _scout(args)
 
 
-# Separate state path; never use the maintenance request/control directory for metrics.
-install_tool_usage(mcp, Path(os.environ.get("DOCKERLOCAL_TOOL_USAGE_DIR", "/var/lib/dockerlocal-tool-usage")) / "usage.sqlite3")
-
-
 if __name__ == "__main__":
+    # Install only in runtime entry point; hardening tests import stub SDK modules.
+    install_tool_usage(mcp, Path(os.environ.get("DOCKERLOCAL_TOOL_USAGE_DIR", "/var/lib/dockerlocal-tool-usage")) / "usage.sqlite3")
     transport = os.environ.get("DOCKERLOCAL_MCP_TRANSPORT", "stdio").strip().lower()
     if transport == "stdio":
         mcp.run(transport="stdio")
