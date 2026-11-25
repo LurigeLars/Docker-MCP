@@ -1,5 +1,5 @@
 # Refresh DockerLocal's tagged MCP image from a clean reviewed main checkout.
-# Preserves installed Compose, allowlists, and Cloudflare Access credentials.
+# Preserves existing authorization, adding only the metrics mount and report tool.
 # Never prunes containers/images or deletes Community data.
 [CmdletBinding()]
 param([Parameter(Mandatory)][switch]$Apply)
@@ -36,7 +36,7 @@ if ($ComposeText -notmatch '(?m)^name:\s*dockerlocal-public\s*$' -or
     $ComposeText -notmatch '(?m)^\s+image:\s*dockerlocal-mcp:local\s*$') {
     throw 'Refusing: installed Compose file is not the reviewed DockerLocal public stack.'
 }
-$CopyPaths = @('server.py','requirements.txt','Dockerfile',
+$CopyPaths = @('server.py','tool_usage.py','requirements.txt','Dockerfile',
                'public\gateway\gateway.mjs','maintenance-runner.ps1')
 foreach ($Relative in $CopyPaths) {
     $Full = Join-Path $Source $Relative
@@ -51,10 +51,39 @@ if ($ServerText -match 'def\s+community_probe\b' -or
     throw 'Refusing: source still exposes Community probe.'
 }
 
-# Preserve the installed Compose and gateway.env EXACTLY. Tool authorization
-# formats may vary across deployments (YAML mapping/list, env_file, overrides);
-# retired server tools disappear from MCP tools/list once the backend image
-# is rebuilt. It is unsafe and unnecessary to rewrite an installed allowlist.
+# Add only the fixed metrics mount and read-only report to the existing config.
+function Add-UsageState([string]$Text) {
+    $Mount = '      - dockerlocal-tool-usage:/var/lib/dockerlocal-tool-usage'
+    $Anchor = '(?m)^        target: /control\r?$'
+    $Allow = '(?m)^      ALLOWED_TOOLS: ([a-z0-9_,]+)\r?$'
+    $Lines = [regex]::Matches($Text,$Allow)
+    if ($Lines.Count -ne 1) { throw 'Unrecognized installed tool allowlist; no migration.' }
+    $Names = $Lines[0].Groups[1].Value.Split(',')
+    if ('tool_usage' -notin $Names) {
+        $Text = [regex]::Replace($Text,$Allow,('      ALLOWED_TOOLS: tool_usage,' + ($Names -join ',')))
+    }
+    $MountCount = [regex]::Matches($Text,'(?m)^' + [regex]::Escape($Mount) + '\r?$').Count
+    $VolumeCount = [regex]::Matches($Text,'(?m)^  dockerlocal-tool-usage:[ \t]*\r?$').Count
+    if ($MountCount -eq 1 -and $VolumeCount -eq 1) { return $Text }
+    if ($MountCount -ne 0 -or $VolumeCount -ne 0 -or
+        $Text -match 'dockerlocal-tool-usage|/var/lib/dockerlocal-tool-usage') {
+        throw 'Conflicting existing metrics mount; no migration.'
+    }
+    if ([regex]::Matches($Text,$Anchor).Count -ne 1) {
+        throw 'Unrecognized control mount; no migration.'
+    }
+    $Text = [regex]::Replace($Text,$Anchor,("        target: /control"+[Environment]::NewLine+$Mount))
+    $Headers = [regex]::Matches($Text,'(?m)^volumes:[ \t]*\r?$')
+    if ($Headers.Count -gt 1) { throw 'Ambiguous top-level volumes.' }
+    if ($Headers.Count -eq 1) {
+        $Text = [regex]::Replace($Text,'(?m)^volumes:[ \t]*\r?$',("volumes:"+[Environment]::NewLine+"  dockerlocal-tool-usage:"))
+    } else {
+        $Text = $Text.TrimEnd()+[Environment]::NewLine+[Environment]::NewLine+"volumes:"+[Environment]::NewLine+"  dockerlocal-tool-usage:"+[Environment]::NewLine
+    }
+    return $Text
+}
+$MigratedCompose = Add-UsageState $ComposeText
+
 # Validate the existing Compose before copying/building anything.
 Push-Location $Target
 try {
@@ -94,16 +123,56 @@ if ((Get-FileHash -LiteralPath $ComposePath -Algorithm SHA256).Hash -ne $Compose
     throw 'Refusing: local Compose or gateway.env changed unexpectedly.'
 }
 
-# Compose declares image: dockerlocal-mcp:local but no build:, so the
-# Docker-MCP compose_redeploy tool cannot rebuild the Python MCP image.
+# Build before changing the live configuration. Preserve the prior image for rollback.
+$OldImage = (& docker.exe image inspect dockerlocal-mcp:local --format '{{.Id}}').Trim()
+if ($LASTEXITCODE -ne 0 -or $OldImage -notmatch '^sha256:[a-f0-9]{64}$') {
+    throw 'Refusing: prior MCP image cannot be identified.'
+}
+$ChangedCompose = $false
+$RestartAttempted = $false
 Push-Location $Target
 try {
     & docker.exe build --build-arg "SOURCE_REVISION=$Head" -t dockerlocal-mcp:local .
     if ($LASTEXITCODE -ne 0) { throw 'Docker image build failed; no stack restart attempted.' }
+    if ((Get-FileHash -LiteralPath $ComposePath -Algorithm SHA256).Hash -ne $ComposeHashBefore -or
+        (Get-FileHash -LiteralPath $EnvPath -Algorithm SHA256).Hash -ne $GatewayEnvHashBefore) {
+        throw 'Installed config changed during build; aborting.'
+    }
+    if ($MigratedCompose -cne $ComposeText) {
+        $ChangedCompose = $true
+        [IO.File]::WriteAllText($ComposePath,$MigratedCompose,[Text.UTF8Encoding]::new($false))
+    }
     & docker.exe compose -f compose.public.yaml config --quiet
     if ($LASTEXITCODE -ne 0) { throw 'Compose config invalid; no stack restart attempted.' }
+    $RestartAttempted = $true
     & docker.exe compose -f compose.public.yaml up -d --force-recreate mcp gateway
     if ($LASTEXITCODE -ne 0) { throw 'Compose redeploy failed.' }
+    $Healthy = $false
+    for ($Attempt=0; $Attempt -lt 30; $Attempt++) {
+        & docker.exe exec dockerlocal-gateway node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        if ($LASTEXITCODE -eq 0) {
+            $Running = @(& docker.exe inspect --format '{{.State.Running}}' dockerlocal-mcp-http dockerlocal-gateway)
+            if ($LASTEXITCODE -eq 0 -and $Running.Count -eq 2 -and 'false' -notin $Running) {
+                $Healthy = $true
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $Healthy) { throw 'DockerLocal runtime not ready.' }
+    if ((Get-FileHash -LiteralPath $EnvPath -Algorithm SHA256).Hash -ne $GatewayEnvHashBefore) {
+        throw 'Gateway credentials/config changed unexpectedly.'
+    }
+} catch {
+    if ($ChangedCompose) {
+        Copy-Item -LiteralPath (Join-Path $Backup 'compose.public.yaml') -Destination $ComposePath -Force
+    }
+    & docker.exe tag $OldImage dockerlocal-mcp:local
+    if ($RestartAttempted) {
+        & docker.exe compose -f compose.public.yaml up -d --force-recreate mcp gateway
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'Runtime rollback needs local verification.' }
+    }
+    throw
 }
 finally { Pop-Location }
 Write-Host "DockerLocal MCP rebuilt from $($Head.Substring(0,8)); existing gateway.env preserved."
