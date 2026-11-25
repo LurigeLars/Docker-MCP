@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from tool_usage import install_tool_usage
 
 mcp = FastMCP("DockerLocal")
 
@@ -1252,6 +1253,10 @@ def scout_compare(image: str, baseline: str, only_fixed: bool = False) -> str:
         args.append("--only-fixed")
     args += [f"local://{image}", "--to", f"local://{baseline}"]
     return _scout(args)
+
+
+# Separate state path; never use the maintenance request/control directory for metrics.
+install_tool_usage(mcp, Path(os.environ.get("DOCKERLOCAL_TOOL_USAGE_DIR", "/var/lib/dockerlocal-tool-usage")) / "usage.sqlite3")
 
 
 if __name__ == "__main__":
