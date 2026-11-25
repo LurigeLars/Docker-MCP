@@ -17,13 +17,15 @@ COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY --from=scout /docker-scout /usr/local/bin/docker-scout
-COPY server.py /app/server.py
+COPY server.py tool_usage.py /app/
 
 RUN useradd --system --uid 65532 --home-dir /nonexistent --shell /usr/sbin/nologin dockerlocal \
-    && mkdir -p /tmp/dockerlocal-home/.cache /tmp/docker-scout \
+    && mkdir -p /var/lib/dockerlocal-tool-usage /tmp/dockerlocal-home/.cache /tmp/docker-scout \
+    && chown 65532:65532 /var/lib/dockerlocal-tool-usage \
+    && chmod 0700 /var/lib/dockerlocal-tool-usage \
     && chown -R 65532:65532 /tmp/dockerlocal-home /tmp/docker-scout \
     && chmod 0555 /usr/local/bin/docker-scout \
-    && chmod 0444 /app/server.py
+    && chmod 0444 /app/server.py /app/tool_usage.py
 
 USER 65532:65532
 WORKDIR /app

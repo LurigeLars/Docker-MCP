@@ -726,3 +726,7 @@ This repository includes:
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Local MCP tool usage
+
+`tool_usage(days=7, limit=50, tool=None)` reports per-tool counts, fixed error categories, approximate latency median/p95 and unobserved registered tools. Local SQLite aggregates retain 30 UTC days in a dedicated metrics volume (not the maintenance control directory); other deployments can mount a separate directory with `DOCKERLOCAL_TOOL_USAGE_DIR`. No arguments, container identifiers, paths, logs, credentials, response bodies or exception text are stored. Disable with `DOCKERLOCAL_MCP_TOOL_USAGE=off`. Reports cover MCP calls, not background maintenance job durations. Existing security controls and audit mechanisms remain unchanged. Pending calls may be lost on abrupt termination.

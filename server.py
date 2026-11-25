@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from tool_usage import install_tool_usage
 
 mcp = FastMCP("DockerLocal")
 
@@ -1255,6 +1256,8 @@ def scout_compare(image: str, baseline: str, only_fixed: bool = False) -> str:
 
 
 if __name__ == "__main__":
+    # Install only in runtime entry point; hardening tests import stub SDK modules.
+    install_tool_usage(mcp, Path(os.environ.get("DOCKERLOCAL_TOOL_USAGE_DIR", "/var/lib/dockerlocal-tool-usage")) / "usage.sqlite3")
     transport = os.environ.get("DOCKERLOCAL_MCP_TRANSPORT", "stdio").strip().lower()
     if transport == "stdio":
         mcp.run(transport="stdio")
