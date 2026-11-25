@@ -50,8 +50,11 @@ class LocalStdioLauncherTests(unittest.TestCase):
         for forbidden in ("docker.sock", "--privileged", "--publish", "'-p'", "--network', 'host"):
             self.assertNotIn(forbidden, LAUNCHER)
 
-    def test_binds_only_the_control_directory_and_carries_no_machine_path(self):
-        self.assertEqual(LAUNCHER.count("'--mount'"), 1)
+    def test_binds_only_control_and_fixed_metrics_volume_without_machine_path(self):
+        self.assertEqual(LAUNCHER.count("'--mount'"), 2)
+        self.assertEqual(LAUNCHER.count("type=bind,"), 1)
+        self.assertEqual(LAUNCHER.count("type=volume,"), 1)
+        self.assertIn("'--mount', 'type=volume,source=dockerlocal-stdio-tool-usage,target=/var/lib/dockerlocal-tool-usage'", LAUNCHER)
         self.assertIn("join(process.env.LOCALAPPDATA, 'DockerLocalMCP', 'control')", LAUNCHER)
         self.assertIn("type=bind,source=${control},target=/control", LAUNCHER)
         self.assertNotIn("C:\\", LAUNCHER)
