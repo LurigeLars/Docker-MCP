@@ -36,6 +36,7 @@ const child = spawn('docker', [
   '--env', 'DOCKER_HOST=tcp://dockerlocal-socket-proxy:2375',
   '--env', 'DOCKERLOCAL_CONTROL_DIR=/control',
   '--mount', `type=bind,source=${control},target=/control`,
+  '--mount', 'type=volume,source=dockerlocal-stdio-tool-usage,target=/var/lib/dockerlocal-tool-usage',
   '--read-only',
   '--tmpfs', '/tmp:rw,nosuid,nodev,size=3g,uid=65532,gid=65532,mode=1777',
   '--tmpfs', '/run/dockerlocal-secrets:rw,nosuid,nodev,noexec,size=64k,uid=65532,gid=65532,mode=0700',
