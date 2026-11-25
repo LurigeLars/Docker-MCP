@@ -1,4 +1,4 @@
-"""Compare the Python DockerLocal server with the Rust prototype over stdio.
+"""Compare the Python DockerLocal server with the Rust port over stdio.
 
 Both run as `docker run -i` with the production stdio hardening flags on the
 dockerlocal_default network, talking to the existing read-only socket proxy.
@@ -17,7 +17,7 @@ NETWORK = "dockerlocal_default"
 API = "http://dockerlocal-socket-proxy:2375"
 SERVERS = {
     "python": "dockerlocal-mcp:local",
-    "rust": "dockerlocal-rs:proto",
+    "rust": "dockerlocal-rs:batch1",
 }
 CALLS = [
     ("containers_list", {"include_stopped": True}),
@@ -26,6 +26,12 @@ CALLS = [
     ("images_list", {}),
     ("image_inspect", {"image": "dockerlocal-socket-proxy:local"}),
     ("container_inspect", {"container": "../not-allowed"}),
+    # An exited container: its log tail cannot change between the paired calls.
+    ("container_logs", {"container": "firecrawl-rust-init-1", "tail": 50}),
+    ("container_logs", {"container": "firecrawl-rust-init-1", "tail": 5000}),
+    ("compose_status", {}),
+    ("compose_status", {"project": "dockerlocal"}),
+    ("compose_status", {"project": "bad name"}),
 ]
 # Fields that legitimately change between two reads of the same object.
 VOLATILE = {"status", "cpu_percent", "memory", "memory_percent", "network_rx", "network_tx", "pids"}
@@ -141,7 +147,7 @@ def main() -> None:
                 got = {}
                 for kind, server in servers.items():
                     ms, msg = server.call(name, args)
-                    lat[kind].setdefault(f"{name}{'(invalid)' if '..' in str(args) else ''}", []).append(ms)
+                    lat[kind].setdefault(f"{name}:{json.dumps(args, sort_keys=True)}", []).append(ms)
                     got[kind] = (strip(payload(msg)), text_shape(msg))
                 compared += 1
                 if got["python"] != got["rust"]:

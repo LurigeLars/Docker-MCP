@@ -1,12 +1,12 @@
-# Research build only. Static musl binary on an empty base: HTTP to the socket proxy
-# needs no TLS roots, shell or libc.
+# Static musl binary on an empty base: HTTP to the socket proxy needs no TLS roots, shell or libc.
 FROM rust:1-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo test --release --locked 2>/dev/null || cargo test --release \
-    && cargo build --release \
+ARG CARGO_LOCKED=--locked
+RUN cargo test --release $CARGO_LOCKED \
+    && cargo build --release $CARGO_LOCKED \
     && cp target/release/dockerlocal-rs /dockerlocal-rs
 
 FROM scratch

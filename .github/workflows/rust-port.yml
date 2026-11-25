@@ -1,0 +1,32 @@
+name: Rust port
+
+on:
+  push:
+    branches: [main]
+    paths: ["rust/**", ".github/workflows/rust-port.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["rust/**", ".github/workflows/rust-port.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Rust port / locked build and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The image build runs `cargo test --locked` and `cargo build --locked`.
+      - name: Build image
+        run: docker build -t dockerlocal-rs:ci rust
+
+      - name: Report image size
+        run: docker image inspect dockerlocal-rs:ci --format '{{.Size}}'
