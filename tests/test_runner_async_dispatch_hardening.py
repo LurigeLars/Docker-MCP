@@ -11,10 +11,10 @@ MAIN = SOURCE[SOURCE.index("while ($true) {", SOURCE.index('Write-RunnerLog "run
 
 class NonblockingMaintenanceRunnerTests(unittest.TestCase):
     def test_long_jobs_go_to_one_subprocess_and_do_not_block_status_lane(self):
-        self.assertIn('if ($Action -in @("scout_full_scan", "compose_redeploy"))', MAIN)
+        self.assertIn('if ($Action -in @("scout_full_scan", "compose_redeploy", "run_project_test"))', MAIN)
         self.assertIn('Start-DispatchedWorker -JobId $JobId', MAIN)
         self.assertIn('if ($null -ne $ActiveLongProcess)', MAIN)
-        self.assertIn('if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy"))', MAIN)
+        self.assertIn('if ([string]$WaitingJob.action -in @("scout_full_scan", "compose_redeploy", "run_project_test"))', MAIN)
         self.assertIn('continue', MAIN)
         self.assertIn('if (-not $WorkerDispatched)', MAIN)
         self.assertIn('$ActiveLongProcess.Refresh()', MAIN)
@@ -22,7 +22,7 @@ class NonblockingMaintenanceRunnerTests(unittest.TestCase):
     def test_worker_has_fixed_action_and_identifier_not_a_shell(self):
         self.assertIn('[ValidatePattern("^[a-f0-9]{32}$")][string]$WorkerJobId', SOURCE)
         self.assertIn('function Invoke-DispatchedWorker {', SOURCE)
-        self.assertIn('if ($Action -notin @("scout_full_scan", "compose_redeploy"))', SOURCE)
+        self.assertIn('if ($Action -notin @("scout_full_scan", "compose_redeploy", "run_project_test"))', SOURCE)
         self.assertIn('if ([string]$Job.job_id -cne $JobId)', SOURCE)
         self.assertIn('$StartInfo.UseShellExecute = $false', SOURCE)
         self.assertIn('$StartInfo.ArgumentList.Add([string]$Argument)', SOURCE)

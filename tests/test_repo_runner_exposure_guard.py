@@ -21,7 +21,7 @@ class PublicRegressionRunnerBoundaryTests(unittest.TestCase):
         self.assertNotIn("$", allowed, "Public tool allowlist must not be environment-expanded")
         names = [name.strip() for name in allowed.split(",")]
         self.assertEqual(len(names), len(set(names)), "Duplicate public tool entries")
-        for name in ("repo_run_tests", "repo_test_status", "docker_exec", "docker_run"):
+        for name in ("repo_run_tests", "repo_test_status", "run_project_test", "docker_exec", "docker_run"):
             self.assertNotIn(name, names)
 
     def test_public_gateway_enforces_call_and_discovery_allowlist(self):

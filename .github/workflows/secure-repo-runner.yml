@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths:
       - "local-test-runner/**"
+      - "maintenance-runner.ps1"
+      - "tests/project-test-*"
+      - "tests/Dockerfile.project-test-fixture"
+      - "tests/test_project_test_hardening.py"
       - "tests/test_secure_repo_runner.py"
       - "tests/test_repo_runner_exposure_guard.py"
       - "tests/test_offline_stage_installer.py"
@@ -103,3 +107,20 @@ jobs:
           path: image-sbom.cdx.json
           if-no-files-found: error
           retention-days: 14
+
+  project-test-sandbox:
+    name: Immutable project test broker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build synthetic project test images
+        run: |
+          for profile in pass fail volume; do
+            docker build --target "$profile" -t "dockerlocal-project-test-ci:$profile" -f tests/Dockerfile.project-test-fixture tests
+          done
+      - name: Verify actual project test broker on disposable Docker
+        shell: pwsh
+        run: ./tests/project-test-actual-docker.ps1

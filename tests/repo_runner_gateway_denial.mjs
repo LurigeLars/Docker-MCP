@@ -52,7 +52,7 @@ async function startUpstream() {
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({
         jsonrpc: '2.0', id: body.id,
-        result: { tools: [{ name: 'repo_run_tests' }, { name: 'repo_test_status' },
+        result: { tools: [{ name: 'repo_run_tests' }, { name: 'repo_test_status' }, { name: 'run_project_test' },
                           { name: 'containers_list' }] },
       }));
     });
@@ -132,6 +132,10 @@ try {
   assert.equal(deniedStatus.error?.code, -32601);
   assert.equal(upstream.calls(), 0);
 
+  const deniedProject = await rpc('tools/call', 4, { name: 'run_project_test',
+    arguments: { profile: 'firecrawl' } });
+  assert.equal(deniedProject.error?.code, -32601);
+  assert.equal(upstream.calls(), 0);
   const discovery = await rpc('tools/list', 3, {});
   assert.deepEqual(discovery.result?.tools.map(t => t.name), ['containers_list']);
   assert.equal(upstream.calls(), 1);

@@ -923,6 +923,35 @@ def compose_redeploy(
     )
 
 
+# This experimental test lane is independent of the local-only repository-code
+# runner. The public gateway does not allow this tool. The host also requires
+# explicit opt-in and resolves the immutable image from its private registry.
+_PROJECT_TEST_LOCK = threading.Lock()
+
+def _submit_project_test(profile: str):
+    if os.environ.get("DOCKERLOCAL_PROJECT_TESTS_ENABLED") != "1":
+        raise ValueError("Project test runner is disabled")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", profile):
+        raise ValueError("Invalid test profile")
+    with _PROJECT_TEST_LOCK:
+        # Reject new requests while a test is queued or running. The host
+        # independently serializes and rate-limits execution.
+        for folder in ("requests", "processing"):
+            for index, path in enumerate((CONTROL_DIR / folder).glob("*.json")):
+                if index >= 128 or path.stat().st_size > 64_000:
+                    raise ValueError("Maintenance queue cannot be safely inspected")
+                if json.loads(path.read_text(encoding="utf-8")).get("action") == "run_project_test":
+                    raise ValueError("A project test is already outstanding")
+        job_id = _write_job({"action": "run_project_test", "profile": profile})
+    return json.dumps({"job_id": job_id, "status": "queued", "profile": profile}, separators=(",", ":"))
+
+if os.environ.get("DOCKERLOCAL_PROJECT_TESTS_ENABLED") == "1":
+    @mcp.tool(annotations=WRITE_SAFE)
+    def run_project_test(profile: str):
+        """Queue a locally approved immutable offline test image. No commands, paths, mounts, images or network options accepted."""
+        return _submit_project_test(profile)
+
+
 @mcp.tool(annotations=READ_ONLY)
 def repo_status(repo: str):
     """Read HEAD and pull eligibility for one allowlisted local repository alias."""
