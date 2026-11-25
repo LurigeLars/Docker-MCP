@@ -1,0 +1,56 @@
+{
+  "python": {
+    "image_mb": 879.6,
+    "startup_to_initialize_ms": 1296,
+    "tools_listed": 31,
+    "idle": {
+      "mem": "68.73MiB",
+      "cpu": "0.00%",
+      "anon_mib": 69.29296875,
+      "id": "a6c80982fe14"
+    },
+    "after_calls": {
+      "mem": "80.55MiB",
+      "cpu": "0.00%",
+      "anon_mib": 79.74609375,
+      "id": "a6c80982fe14"
+    },
+    "median_ms": {
+      "containers_list": 97.6,
+      "container_inspect": 9.1,
+      "container_stats": 1011.7,
+      "images_list": 424.3,
+      "image_inspect": 25.4,
+      "container_inspect(invalid)": 28.9
+    }
+  },
+  "rust": {
+    "image_mb": 2.9,
+    "startup_to_initialize_ms": 297,
+    "tools_listed": 5,
+    "idle": {
+      "mem": "1.203MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "fa0fd9f9a315"
+    },
+    "after_calls": {
+      "mem": "1.387MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "fa0fd9f9a315"
+    },
+    "median_ms": {
+      "containers_list": 93.2,
+      "container_inspect": 6.7,
+      "container_stats": 2002.9,
+      "images_list": 413.3,
+      "image_inspect": 25.1,
+      "container_inspect(invalid)": 1.4
+    }
+  },
+  "parity": {
+    "paired_calls": 60,
+    "tools_with_any_mismatch": []
+  }
+}
