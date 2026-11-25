@@ -13,6 +13,7 @@ class DockerLocalGatewayHardeningTests(unittest.TestCase):
         self.assertIn("ALLOWED_TOOLS.has", GATEWAY)
         self.assertIn("message?.method === 'tools/list'", GATEWAY)
         self.assertIn("message?.method === 'initialize'", GATEWAY)
+        self.assertIn("message?.method === 'server/discover'", GATEWAY)
 
     def test_initialize_instructions_do_not_echo_hidden_tool_catalog(self) -> None:
         self.assertIn("DockerLocal exposes only the tools returned by tools/list", GATEWAY)
