@@ -578,6 +578,7 @@ def _deployment_audit(rows, images, inspections):
     projects: dict[str, dict[str, Any]] = {}
     unmanaged: list[dict[str, Any]] = []
     stopped_or_unhealthy: list[dict[str, Any]] = []
+    retained_legacy: list[dict[str, Any]] = []
     image_drift: list[dict[str, Any]] = []
     compose_config_drift: list[dict[str, Any]] = []
     custom_running_images: dict[str, dict[str, str]] = {}
@@ -665,7 +666,31 @@ def _deployment_audit(rows, images, inspections):
                 }
             )
 
-        if state != "running" or "unhealthy" in str(status or "").lower():
+        # Suppress only reviewed, intentionally stopped services after an
+        # independently verified active Rust desired-state receipt. A running
+        # legacy service is unexpected and still needs attention.
+        retained = (
+            project == "firecrawl"
+            and desired_project.get("engine_mode") == "rust"
+            and service in {"redis", "rabbitmq", "nuq-postgres"}
+            and service not in (desired_project.get("services") or {})
+            and state == "exited"
+        )
+        completed_init = (
+            project == "firecrawl" and desired_project.get("engine_mode") == "rust"
+            and service == "rust-init" and state == "exited"
+            and (inspect.get("State") or {}).get("ExitCode") == 0
+        )
+        unexpected_legacy = (
+            project == "firecrawl" and desired_project.get("engine_mode") == "rust"
+            and service in {"redis", "rabbitmq", "nuq-postgres"}
+            and state == "running"
+        )
+        if retained:
+            retained_legacy.append({"name": name, "project": project, "service": service, "state": state})
+        if not retained and not completed_init and (
+            state != "running" or "unhealthy" in str(status or "").lower() or unexpected_legacy
+        ):
             stopped_or_unhealthy.append(
                 {
                     "name": name,
@@ -729,6 +754,7 @@ def _deployment_audit(rows, images, inspections):
         "projects": sorted(projects.values(), key=lambda x: x["project"]),
         "unmanaged_containers": unmanaged,
         "stopped_or_unhealthy": stopped_or_unhealthy,
+        "retained_legacy": retained_legacy,
         "local_image_drift": image_drift,
         "image_provenance": image_provenance,
         "compose_desired_state": {
@@ -746,6 +772,7 @@ def _deployment_audit(rows, images, inspections):
             "compose_projects": len(projects),
             "unmanaged_containers": len(unmanaged),
             "stopped_or_unhealthy": len(stopped_or_unhealthy),
+            "retained_legacy": len(retained_legacy),
             "local_image_drift": len(image_drift),
             "local_images_without_recorded_revision": sum(
                 item["status"] != "recorded" for item in image_provenance

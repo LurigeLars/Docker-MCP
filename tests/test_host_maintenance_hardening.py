@@ -327,3 +327,16 @@ class HostMaintenanceBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class FirecrawlAuditModeTests(unittest.TestCase):
+    def test_audit_overlay_requires_reviewed_marker_and_running_identity(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] / "maintenance-runner.ps1").read_text(encoding="utf-8")
+        self.assertIn('rust-active-v1', source)
+        self.assertIn('firecrawl-rust-api:local|firecrawl|api|true|firecrawl_rust-jobs:true', source)
+        self.assertIn('firecrawl_transition_mode_unverified', source)
+        self.assertIn('research\\compose.rust-production-plan.yaml', source)
+        self.assertIn('engine_mode = $EngineMode', source)
+        self.assertIn('legacy-rollback', source)
+        self.assertIn('firecrawl_rust_config_unverified', source)
+        self.assertNotIn('detail = ([string]$ConfigRun.output).Trim()', source)

@@ -266,3 +266,30 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class RustTransitionAuditTests(unittest.TestCase):
+    def test_only_verified_rust_mode_suppresses_expected_stopped_services(self):
+        rows = []
+        inspections = {}
+        for i, (service, state, exit_code) in enumerate([
+            ("redis", "exited", 0), ("rabbitmq", "running", 0),
+            ("nuq-postgres", "exited", 143), ("rust-init", "exited", 0),
+            ("pdf-ocr", "exited", 1), ("mcp", "running", 0),
+        ]):
+            cid = str(i + 1) * 64
+            labels = {"com.docker.compose.project": "firecrawl", "com.docker.compose.service": service}
+            rows.append({"Id":cid, "Names":["/firecrawl-"+service+"-1"], "Labels":labels,
+                         "State":state, "Status":state, "Image":"synthetic:local"})
+            inspections[cid] = {"Config":{"Image":"synthetic:local","Labels":labels}, "State":{"ExitCode":exit_code}}
+        for mode in ("rust", "legacy", "unverified"):
+            desired = {"status":"succeeded","projects":{"firecrawl":{"engine_mode":mode,"services":{"mcp":{},"pdf-ocr":{},"rust-init":{}}}},"errors":[]}
+            with unittest.mock.patch.object(server,"_runner_request",return_value=desired), unittest.mock.patch.object(server,"_json",return_value={"status":"ok","checked_files":0,"drift":[],"errors":[]}):
+                result = server._deployment_audit(rows, [], inspections)
+            stopped = {item["service"] for item in result["stopped_or_unhealthy"]}
+            retained = {item["service"] for item in result["retained_legacy"]}
+            if mode == "rust":
+                self.assertEqual(retained, {"redis","nuq-postgres"})
+                self.assertEqual(stopped, {"rabbitmq","pdf-ocr"})
+            else:
+                self.assertEqual(retained, set())
+                self.assertEqual(stopped, {"redis","nuq-postgres","rust-init","pdf-ocr"})

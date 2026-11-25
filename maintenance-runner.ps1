@@ -1226,6 +1226,20 @@ function Invoke-AllowlistedScheduledTaskControl {
 
 # Classify Compose CLI failures without ever returning stderr, interpolated
 # environment data or file contents to the MCP client.
+# Fixed Firecrawl mode boundary, not a caller-supplied Compose path or mode.
+function Get-FirecrawlAuditMode {
+    param($Cfg)
+    $Marker = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\rust-transition.lock"
+    if (-not (Test-Path -LiteralPath $Marker -ErrorAction Stop)) { return "legacy" }
+    if (-not (Test-Path -LiteralPath $Marker -PathType Leaf) -or
+        (Get-Content -LiteralPath $Marker -Raw -ErrorAction Stop).Trim() -cne "rust-active-v1") { return "unverified" }
+    if ([string]$Cfg.Mode -cne "script" -or [IO.Path]::GetFileName([string]$Cfg.Script) -cne "fc.ps1") { return "unverified" }
+    $Format = '{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{range .Mounts}}{{if eq .Destination "/var/lib/research"}}{{.Name}}:{{.RW}}{{end}}{{end}}'
+    $Run = Invoke-DockerText -Arguments @("inspect","--format",$Format,"firecrawl-api-1") -WorkingDirectory ([string]$Cfg.WorkingDir)
+    if ([int]$Run.exit_code -ne 0 -or ([string]$Run.output).Trim() -cne "firecrawl-rust-api:local|firecrawl|api|true|firecrawl_rust-jobs:true") { return "unverified" }
+    return "rust"
+}
+
 function Get-ComposeDesiredState {
     $Desired = @{}
     $Errors = @()
@@ -1253,6 +1267,14 @@ function Get-ComposeDesiredState {
             continue
         }
 
+        $EngineMode = "default"
+        if ($Project -ceq "firecrawl") {
+            try { $EngineMode = Get-FirecrawlAuditMode $Cfg } catch { $EngineMode = "unverified" }
+            if ($EngineMode -ceq "unverified") {
+                $Errors += @{project=$Project;error="firecrawl_transition_mode_unverified"}
+                continue
+            }
+        }
         $BaseArgs = @("compose")
         $MissingFile = $false
         foreach ($File in @($Cfg.Files)) {
@@ -1265,10 +1287,25 @@ function Get-ComposeDesiredState {
             $BaseArgs += @("-f", $FullPath)
         }
         if ($MissingFile) { continue }
+        if ($EngineMode -ceq "rust") {
+            $Root = Split-Path -Parent ([string]$Cfg.Script)
+            $Overlay = Join-Path $Root "research\compose.rust-production-plan.yaml"
+            $Defaults = Join-Path $Root "compose.defaults.env"
+            $EnvFile = Join-Path $Root ".env"
+            $Upstream = Join-Path $Root "firecrawl"
+            if (-not (Test-Path -LiteralPath $Overlay -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $Defaults -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $EnvFile -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $Upstream -PathType Container)) {
+                $Errors += @{project=$Project;error="firecrawl_rust_config_missing"}
+                continue
+            }
+            $BaseArgs += @("--project-directory",$Upstream,"--profile","public-proxy","--env-file",$Defaults,"--env-file",$EnvFile,"-f",$Overlay)
+        }
 
         $ConfigRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--format", "json")) -WorkingDirectory $WorkingDir
         if ([int]$ConfigRun.exit_code -ne 0) {
-            $Errors += @{ project = $Project; error = "compose_config_failed"; detail = ([string]$ConfigRun.output).Trim() }
+            $Errors += @{ project = $Project; error = "compose_config_failed" }
             continue
         }
 
@@ -1289,6 +1326,13 @@ function Get-ComposeDesiredState {
         foreach ($ServiceProperty in $ServiceProperties) {
             $Service = [string]$ServiceProperty.Name
             $ServiceConfig = $ServiceProperty.Value
+            # Some Compose versions include inactive-profile services in
+            # rendered config. They are explicitly not desired in Rust mode.
+            if ($EngineMode -ceq "rust" -and $Service -cin @("redis","rabbitmq","nuq-postgres")) {
+                if (@($ServiceConfig.profiles) -ccontains "legacy-rollback") { continue }
+                $Errors += @{project=$Project;service=$Service;error="firecrawl_legacy_profile_unverified"}
+                $EngineMode="unverified"
+            }
             $Image = [string]$ServiceConfig.image
 
             $HashRun = Invoke-DockerText -Arguments ($BaseArgs + @("config", "--hash", $Service)) -WorkingDirectory $WorkingDir
@@ -1300,7 +1344,7 @@ function Get-ComposeDesiredState {
                 }
             }
             else {
-                $Errors += @{ project = $Project; service = $Service; error = "compose_hash_failed"; detail = ([string]$HashRun.output).Trim() }
+                $Errors += @{ project = $Project; service = $Service; error = "compose_hash_failed" }
             }
 
             $Services[$Service] = @{
@@ -1309,7 +1353,16 @@ function Get-ComposeDesiredState {
             }
         }
 
-        $Desired[$Project] = @{ services = $Services }
+        if ($EngineMode -ceq "rust") {
+            if (-not $Services.ContainsKey("api") -or $Services.api.image -cne "firecrawl-rust-api:local" -or
+                -not $Services.ContainsKey("pdf-ocr") -or $Services["pdf-ocr"].image -cne "firecrawl-rust-document:local" -or
+                -not $Services.ContainsKey("rust-init") -or -not $Services.ContainsKey("mcp")) {
+                $Errors += @{project=$Project;error="firecrawl_rust_config_unverified"}
+                continue
+            }
+        }
+        if ($EngineMode -ceq "unverified") { continue }
+        $Desired[$Project] = @{ services = $Services; engine_mode = $EngineMode }
     }
 
     return @{ projects = $Desired; errors = $Errors }
