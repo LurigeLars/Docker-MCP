@@ -43,7 +43,7 @@ def test_github_mcp_uses_existing_secret_aware_deploy():
 
 def test_dockerlocal_gateway_only_and_rollback():
     assert "DOCKERLOCAL_GATEWAY_PROMOTED" in PROMOTE
-    assert "'--no-deps','--force-recreate','gateway'" in PROMOTE
+    assert "'--no-deps','--no-build','--pull','never','--force-recreate','gateway'" in PROMOTE
     assert "gateway.env" in PROMOTE
     assert "SavedGateway" in PROMOTE
 
@@ -86,7 +86,7 @@ def test_runner_only_refresh_is_idempotent_and_gateway_only():
     assert "DOCKERLOCAL_GATEWAY_ALREADY_CURRENT" in PROMOTE
     assert "$NeedsGatewayUpdate" in PROMOTE
     assert "Get-FileHash -LiteralPath $SrcGateway" in PROMOTE
-    assert "Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')" in PROMOTE
+    assert "Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--no-build','--pull','never','--force-recreate','gateway')" in PROMOTE
 
 
 def test_self_refresh_has_preflight_backup_and_bounded_rollback():
