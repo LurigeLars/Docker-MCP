@@ -319,6 +319,45 @@ function Enable-ReviewedFirecrawlPlaywrightActions {
         })
         $Changed = $true
     }
+    # Reuse the existing host-only policy handoff for these fixed image targets.
+    $ImageHandler = Join-Path $SourceRoot 'maintain-reviewed-runtime.ps1'
+    Require-File $ImageHandler
+    Require-File (Join-Path $FirecrawlRoot 'security\refresh-camofox-research.ps1')
+    $DtvRoot = Join-Path $env:LOCALAPPDATA 'Desktop-tradingview'
+    Assert-CleanSource -Path $DtvRoot -Repository 'Desktop-tradingview-mcp'
+    $DtvHandler = Join-Path $DtvRoot 'scripts\windows\refresh-cdp-guard.ps1'
+    Require-File $DtvHandler
+    $RuntimeActions = [ordered]@{
+        'dtv-cdp-guard-refresh' = @{root=$DtvRoot; script=$DtvHandler; services=@('cdp-guard'); args=@('-Apply')}
+        'firecrawl-camofox-refresh' = @{root=$FirecrawlRoot; script=$ImageHandler; services=@('camofox-research','camofox-research-proxy'); args=@('-Target','Camofox')}
+        'dockerlocal-backend-refresh' = @{root=$SourceRoot; script=$ImageHandler; services=@('mcp'); args=@('-Target','Backend')}
+        'dockerlocal-proxy-refresh' = @{root=$SourceRoot; script=$ImageHandler; services=@('socket-proxy'); args=@('-Target','Proxy')}
+    }
+    foreach ($Alias in $RuntimeActions.Keys) {
+        $Definition = $RuntimeActions[$Alias]
+        $Known = $Cfg.PSObject.Properties[$Alias]
+        if ($null -ne $Known) {
+            $Entry = $Known.Value
+            if ([string]$Entry.working_dir -ine $Definition.root -or
+                [string]$Entry.handler.script -ine $Definition.script -or
+                ($Entry.services -join '|') -cne ($Definition.services -join '|') -or
+                @($Entry.handler.operations.PSObject.Properties.Name).Count -ne 1 -or
+                ($Entry.handler.operations.redeploy_current -join '|') -cne ($Definition.args -join '|')) {
+                throw "Existing fixed runtime policy differs from reviewed definition: $Alias"
+            }
+            continue
+        }
+        $Cfg | Add-Member -NotePropertyName $Alias -NotePropertyValue ([pscustomobject]@{
+            working_dir=$Definition.root
+            files=@()
+            services=$Definition.services
+            handler=[pscustomobject]@{
+                script=$Definition.script
+                operations=[pscustomobject]@{redeploy_current=$Definition.args}
+            }
+        })
+        $Changed = $true
+    }
     if (-not $Changed) {
         Write-Output 'FIRECRAWL_PLAYWRIGHT_ACTIONS_ALREADY_ENABLED'
         return
