@@ -338,7 +338,7 @@ def cleanup_superseded_images(refs: list[str]) -> dict:
         for digest in image.get("RepoDigests") or []:
             by_ref.setdefault(str(digest), []).append(image)
 
-    protected_words = re.compile(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep|rollback)(?:$|[-_.])")
+    protected_words = re.compile(r"(?i)(?:^|[:/._-])(backup|snapshot|archive|keep|rollback)(?:$|[:/._-])")
     candidates = []
     skipped = []
     removed = []
