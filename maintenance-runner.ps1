@@ -1441,8 +1441,11 @@ function Invoke-ReviewedRuntimeRefresh {
         $Review = "Critical=0 High=$($Candidate.vulnerability_counts.high) remaining=$(@($Candidate.cve_ids.high) -join ',')"
     }
     $Apply = Invoke-ScriptHandler -JobId $JobId -Project $Project -Script $Script -WorkingDirectory $WorkingDirectory -Arguments @('-Target',$Target,'-Mode','Apply','-ReviewedDigest',$New,'-BaselineDigest',$Old,'-Revision',$Revision)
-    if ($Apply.exit_code -ne 0 -or [string]$Apply.output -notmatch '(?m)^REVIEWED_RUNTIME_APPLY_OK\r?$') {
-        return @{exit_code=1;output="$Review; scoped apply failed; inspect runtime before retry."}
+    if ($Apply.exit_code -ne 0) {
+        return @{exit_code=$Apply.exit_code;output="$Review; scoped apply failed; inspect runtime before retry."}
+    }
+    if ([string]$Apply.output -notmatch '(?m)^REVIEWED_RUNTIME_APPLY_OK\r?$') {
+        return @{exit_code=124;output="$Review; scoped apply completion unverified; inspect runtime before retry."}
     }
     return @{exit_code=0;output="REVIEWED_RUNTIME_APPLY_OK image=$New $Review"}
 }
