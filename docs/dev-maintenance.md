@@ -19,7 +19,9 @@ shares only the Maintenance Runner, which reads its report for the `dev_maintena
   overlapping PATH copies. The profile path, user name and host name are replaced by placeholders.
 - `dev_maintenance_status` returns a validated summary of the newest report. It reports `missing`,
   `invalid` (unreadable, too large or unknown schema) and `stale` (older than 8 days), and never
-  returns notes, mechanisms or paths.
+  returns notes, mechanisms, paths or diagnostic prose. Errors and deferral reasons are fixed
+  codes. Known tool identifiers and versions remain visible; other local package identities
+  and versions stay in the local report, while the MCP summary retains their category and status.
 
 ## One install mechanism per tool
 
