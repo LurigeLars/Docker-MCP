@@ -1,1 +1,218 @@
-{"deploy": {"compose_config_drift": [{"config_hash_mismatch": true, "desired_config_hash": "h-desired", "desired_image": "dockerlocal-mcp:local", "image_mismatch": false, "name": "dockerlocal-mcp-http", "project": "dockerlocal-public", "running_config_hash": "h-running", "running_configured_image": "dockerlocal-mcp:local", "service": "mcp"}], "compose_desired_state": {"errors": [], "status": "succeeded"}, "expected_projects": ["dockerlocal-public", "dockerlocal"], "image_provenance": [{"image": "firecrawl-rust:1", "image_id": "sha256:i", "revision": null, "source": null, "status": "unknown"}, {"image": "dockerlocal-mcp:local", "image_id": "sha256:old", "revision": null, "source": null, "status": "unknown"}], "local_image_drift": [{"configured_image": "dockerlocal-mcp:local", "current_local_image_id": "sha256:new", "name": "dockerlocal-mcp-http", "project": "dockerlocal-public", "running_image_id": "sha256:old", "service": "mcp"}], "missing_expected_projects": ["dockerlocal"], "projects": [{"containers": [{"image": "dockerlocal-mcp:local", "name": "dockerlocal-mcp-http", "service": "mcp", "state": "running", "status": "Up 1 hour (unhealthy)"}], "non_running": 0, "project": "dockerlocal-public", "running": 1}, {"containers": [{"image": "redis:8", "name": "firecrawl-redis-1", "service": "redis", "state": "exited", "status": "Exited (0)"}, {"image": "firecrawl-rust:1", "name": "firecrawl-rust-init-1", "service": "rust-init", "state": "exited", "status": "Exited (0)"}], "non_running": 2, "project": "firecrawl", "running": 0}], "retained_legacy": [{"name": "firecrawl-redis-1", "project": "firecrawl", "service": "redis", "state": "exited"}], "runtime_source_audit": {"checked_files": 3, "errors": [], "status": "ok"}, "runtime_source_drift": [{"file": "x"}], "stopped_or_unhealthy": [{"name": "dockerlocal-mcp-http", "project": "dockerlocal-public", "service": "mcp", "state": "running", "status": "Up 1 hour (unhealthy)"}, {"name": "", "project": null, "service": null, "state": "exited", "status": "Exited (1)"}], "summary": {"compose_config_drift": 1, "compose_projects": 2, "local_image_drift": 1, "local_images_without_recorded_revision": 2, "missing_expected_projects": 1, "retained_legacy": 1, "runtime_source_drift": 1, "stopped_or_unhealthy": 2, "unmanaged_containers": 1}, "timestamp_unix": 7, "unmanaged_containers": [{"created": 5, "image": "alpine", "name": "", "state": "exited", "status": "Exited (1)"}]}, "usage": {"cleanup_requires_explicit_ref": true, "images": [{"created": 1, "id": "sha256:new", "in_use_by": [], "protected_name": false, "repo_digests": [], "size": "2.0 KiB", "superseded_repository_hint": true, "tags": ["dockerlocal-mcp:local"]}, {"created": 0, "id": "sha256:old", "in_use_by": ["dockerlocal-mcp-http"], "protected_name": false, "repo_digests": [], "size": "1.0 KiB", "superseded_repository_hint": false, "tags": ["dockerlocal-mcp:rollback-1"]}, {"created": null, "id": "sha256:bk", "in_use_by": [], "protected_name": true, "repo_digests": [], "size": "0.0 B", "superseded_repository_hint": true, "tags": ["dockerlocal-mcp:pre-backup"]}], "repository_superseded_hints": [{"created": 1, "id": "sha256:new", "in_use_by": [], "protected_name": false, "repo_digests": [], "size": "2.0 KiB", "superseded_repository_hint": true, "tags": ["dockerlocal-mcp:local"]}], "safe_superseded_candidates": [], "summary": {"images": 3, "in_use": 1, "repository_superseded_hints": 1, "safe_superseded_candidates": 0, "unused": 2}}}
+{
+  "deploy": {
+    "compose_config_drift": [
+      {
+        "config_hash_mismatch": true,
+        "desired_config_hash": "h-desired",
+        "desired_image": "dockerlocal-mcp:local",
+        "image_mismatch": false,
+        "name": "dockerlocal-mcp-http",
+        "project": "dockerlocal-public",
+        "running_config_hash": "h-running",
+        "running_configured_image": "dockerlocal-mcp:local",
+        "service": "mcp"
+      }
+    ],
+    "compose_desired_state": {
+      "errors": [],
+      "status": "succeeded"
+    },
+    "expected_projects": [
+      "dockerlocal-public",
+      "dockerlocal"
+    ],
+    "image_provenance": [
+      {
+        "image": "firecrawl-rust:1",
+        "image_id": "sha256:i",
+        "revision": null,
+        "source": null,
+        "status": "unknown"
+      },
+      {
+        "image": "dockerlocal-mcp:local",
+        "image_id": "sha256:old",
+        "revision": null,
+        "source": null,
+        "status": "unknown"
+      }
+    ],
+    "local_image_drift": [
+      {
+        "configured_image": "dockerlocal-mcp:local",
+        "current_local_image_id": "sha256:new",
+        "name": "dockerlocal-mcp-http",
+        "project": "dockerlocal-public",
+        "running_image_id": "sha256:old",
+        "service": "mcp"
+      }
+    ],
+    "missing_expected_projects": [
+      "dockerlocal"
+    ],
+    "projects": [
+      {
+        "containers": [
+          {
+            "image": "dockerlocal-mcp:local",
+            "name": "dockerlocal-mcp-http",
+            "service": "mcp",
+            "state": "running",
+            "status": "Up 1 hour (unhealthy)"
+          }
+        ],
+        "non_running": 0,
+        "project": "dockerlocal-public",
+        "running": 1
+      },
+      {
+        "containers": [
+          {
+            "image": "redis:8",
+            "name": "firecrawl-redis-1",
+            "service": "redis",
+            "state": "exited",
+            "status": "Exited (0)"
+          },
+          {
+            "image": "firecrawl-rust:1",
+            "name": "firecrawl-rust-init-1",
+            "service": "rust-init",
+            "state": "exited",
+            "status": "Exited (0)"
+          }
+        ],
+        "non_running": 2,
+        "project": "firecrawl",
+        "running": 0
+      }
+    ],
+    "retained_legacy": [
+      {
+        "name": "firecrawl-redis-1",
+        "project": "firecrawl",
+        "service": "redis",
+        "state": "exited"
+      }
+    ],
+    "runtime_source_audit": {
+      "checked_files": 3,
+      "errors": [],
+      "status": "ok"
+    },
+    "runtime_source_drift": [
+      {
+        "file": "x"
+      }
+    ],
+    "stopped_or_unhealthy": [
+      {
+        "name": "dockerlocal-mcp-http",
+        "project": "dockerlocal-public",
+        "service": "mcp",
+        "state": "running",
+        "status": "Up 1 hour (unhealthy)"
+      },
+      {
+        "name": "",
+        "project": null,
+        "service": null,
+        "state": "exited",
+        "status": "Exited (1)"
+      }
+    ],
+    "summary": {
+      "compose_config_drift": 1,
+      "compose_projects": 2,
+      "local_image_drift": 1,
+      "local_images_without_recorded_revision": 2,
+      "missing_expected_projects": 1,
+      "retained_legacy": 1,
+      "runtime_source_drift": 1,
+      "stopped_or_unhealthy": 2,
+      "unmanaged_containers": 1,
+      "local_image_identity_unknown": 0
+    },
+    "timestamp_unix": 7,
+    "unmanaged_containers": [
+      {
+        "created": 5,
+        "image": "alpine",
+        "name": "",
+        "state": "exited",
+        "status": "Exited (1)"
+      }
+    ],
+    "local_image_identity_unknown": []
+  },
+  "usage": {
+    "cleanup_requires_explicit_ref": true,
+    "images": [
+      {
+        "created": 1,
+        "id": "sha256:new",
+        "in_use_by": [],
+        "protected_name": false,
+        "repo_digests": [],
+        "size": "2.0 KiB",
+        "superseded_repository_hint": true,
+        "tags": [
+          "dockerlocal-mcp:local"
+        ],
+        "usage_unknown_by": []
+      },
+      {
+        "created": 0,
+        "id": "sha256:old",
+        "in_use_by": [
+          "dockerlocal-mcp-http"
+        ],
+        "protected_name": true,
+        "repo_digests": [],
+        "size": "1.0 KiB",
+        "superseded_repository_hint": false,
+        "tags": [
+          "dockerlocal-mcp:rollback-1"
+        ],
+        "usage_unknown_by": []
+      },
+      {
+        "created": null,
+        "id": "sha256:bk",
+        "in_use_by": [],
+        "protected_name": true,
+        "repo_digests": [],
+        "size": "0.0 B",
+        "superseded_repository_hint": true,
+        "tags": [
+          "dockerlocal-mcp:pre-backup"
+        ],
+        "usage_unknown_by": []
+      }
+    ],
+    "repository_superseded_hints": [
+      {
+        "created": 1,
+        "id": "sha256:new",
+        "in_use_by": [],
+        "protected_name": false,
+        "repo_digests": [],
+        "size": "2.0 KiB",
+        "superseded_repository_hint": true,
+        "tags": [
+          "dockerlocal-mcp:local"
+        ],
+        "usage_unknown_by": []
+      }
+    ],
+    "safe_superseded_candidates": [],
+    "summary": {
+      "images": 3,
+      "in_use": 1,
+      "repository_superseded_hints": 1,
+      "safe_superseded_candidates": 0,
+      "unused": 2,
+      "unknown": 0
+    }
+  }
+}
