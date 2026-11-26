@@ -20,7 +20,7 @@ static GIT_SHA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{40}$")
 static GITHUB_SOURCE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^https://github[.]com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").unwrap());
 static PROTECTED_WORDS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep)(?:$|[-_.])").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[:/._-])(backup|snapshot|archive|keep|rollback)(?:$|[:/._-])").unwrap());
 
 pub struct Inventory {
     pub rows: Vec<Value>,
@@ -70,9 +70,43 @@ pub fn repo_from_tag(tag: &str) -> String {
     }
 }
 
+/// Compare the selected platform manifest, not an OCI index against a config digest.
+/// None means the identities cannot be compared safely.
+fn image_identity_match(row: &Value, inspect: &Value, image: &Value) -> Option<bool> {
+    let image_id = s(get(image, "Id"));
+    let running_id = s(or(get(inspect, "Image"), get(row, "ImageID")));
+    let descriptor = or(get(inspect, "ImageManifestDescriptor"), get(row, "ImageManifestDescriptor"));
+    let manifest = s(get(descriptor, "digest"));
+    let manifests = list(get(image, "Manifests"));
+    if image_id.is_empty() {
+        return None;
+    }
+    if !manifest.is_empty() {
+        if manifest == image_id || manifest == s(get(get(image, "Descriptor"), "digest"))
+            || manifests.iter().any(|m| get(m, "ID").as_str() == Some(manifest.as_str()))
+        {
+            return Some(true);
+        }
+        return (!manifests.is_empty()).then_some(false);
+    }
+    if !running_id.is_empty() && running_id == image_id {
+        return Some(true);
+    }
+    let container_id = s(get(row, "Id"));
+    if !container_id.is_empty() && manifests.iter().any(|m| {
+        list(get(get(m, "ImageData"), "Containers")).iter().any(|id| id.as_str() == Some(container_id.as_str()))
+    }) {
+        return Some(true);
+    }
+    if !manifests.is_empty() || running_id.is_empty() {
+        return None;
+    }
+    Some(false)
+}
+
 pub fn inventory() -> Result<Inventory, String> {
     let rows = api_json("/containers/json?all=1")?;
-    let images = api_json("/images/json?all=0")?;
+    let images = api_json("/images/json?all=0&manifests=1")?;
     let (Value::Array(rows), Value::Array(images)) = (rows, images) else {
         return Err("Docker inventory response is unavailable".into());
     };
@@ -170,14 +204,14 @@ pub fn deployment_audit(
     timestamp: i64,
 ) -> Value {
     let empty = json!({});
-    let mut image_ids_by_ref: HashMap<String, String> = HashMap::new();
+    let mut images_by_ref: HashMap<String, &Value> = HashMap::new();
     for image in &inv.images {
         let id = s(get(image, "Id"));
         if id.is_empty() {
             continue;
         }
         for r in list(get(image, "RepoTags")).iter().chain(list(get(image, "RepoDigests"))) {
-            image_ids_by_ref.insert(py_str(r), id.clone());
+            images_by_ref.insert(py_str(r), image);
         }
     }
 
@@ -186,6 +220,7 @@ pub fn deployment_audit(
     let mut stopped_or_unhealthy = Vec::new();
     let mut retained_legacy = Vec::new();
     let mut image_drift = Vec::new();
+    let mut image_identity_unknown = Vec::new();
     let mut config_drift = Vec::new();
     let mut custom_running_images: BTreeMap<String, String> = BTreeMap::new();
 
@@ -275,17 +310,21 @@ pub fn deployment_audit(
         }
 
         let normalized = normalize_image_ref(&configured_image);
-        let current_id = [configured_image.as_str(), normalized.as_str()]
+        let current = [configured_image.as_str(), normalized.as_str()]
             .into_iter()
-            .filter(|r| !r.is_empty())
-            .find_map(|r| image_ids_by_ref.get(r).filter(|id| !id.is_empty()));
-        if let Some(current_id) = current_id {
-            if !running_image_id.is_empty() && current_id != &running_image_id {
-                image_drift.push(json!({
+            .find_map(|r| images_by_ref.get(r));
+        if let Some(current) = current {
+            let findings = match image_identity_match(row, inspect, current) {
+                Some(true) => None,
+                Some(false) => Some(&mut image_drift),
+                None => Some(&mut image_identity_unknown),
+            };
+            if let Some(findings) = findings {
+                findings.push(json!({
                     "name": name, "project": project, "service": service,
                     "configured_image": configured_image,
                     "running_image_id": running_image_id,
-                    "current_local_image_id": current_id,
+                    "current_local_image_id": get(current, "Id"),
                 }));
             }
         }
@@ -332,6 +371,7 @@ pub fn deployment_audit(
         "stopped_or_unhealthy": stopped_or_unhealthy,
         "retained_legacy": retained_legacy,
         "local_image_drift": image_drift,
+        "local_image_identity_unknown": image_identity_unknown,
         "image_provenance": image_provenance,
         "compose_desired_state": {
             "status": get(desired_state, "status"),
@@ -350,6 +390,7 @@ pub fn deployment_audit(
             "stopped_or_unhealthy": stopped_or_unhealthy.len(),
             "retained_legacy": retained_legacy.len(),
             "local_image_drift": image_drift.len(),
+            "local_image_identity_unknown": image_identity_unknown.len(),
             "local_images_without_recorded_revision": without_revision,
             "compose_config_drift": config_drift.len(),
             "runtime_source_drift": drift_len,
@@ -362,12 +403,17 @@ pub fn image_usage_audit(inv: &Inventory) -> Value {
     let empty = json!({});
     // Insertion-ordered like the Python dict: container order per image.
     let mut in_use_by: HashMap<String, Vec<String>> = HashMap::new();
-    for row in &inv.rows {
-        let id = s(get(row, "Id"));
-        let inspect = inv.inspections.get(&id).unwrap_or(&empty);
-        let running = s(or(get(inspect, "Image"), get(row, "ImageID")));
-        if !running.is_empty() {
-            in_use_by.entry(running).or_default().push(first_name(row));
+    let mut unknown_by: HashMap<String, Vec<String>> = HashMap::new();
+    for image in &inv.images {
+        let image_id = s(get(image, "Id"));
+        for row in &inv.rows {
+            let id = s(get(row, "Id"));
+            let inspect = inv.inspections.get(&id).unwrap_or(&empty);
+            match image_identity_match(row, inspect, image) {
+                Some(true) => in_use_by.entry(image_id.clone()).or_default().push(first_name(row)),
+                Some(false) => (),
+                None => unknown_by.entry(image_id.clone()).or_default().push(first_name(row)),
+            }
         }
     }
     let mut used_repos: HashSet<String> = HashSet::new();
@@ -383,9 +429,10 @@ pub fn image_usage_audit(inv: &Inventory) -> Value {
         let id = s(get(image, "Id"));
         let tags: Vec<String> = list(get(image, "RepoTags")).iter().map(py_str).collect();
         let used_by = in_use_by.get(&id).cloned().unwrap_or_default();
+        let unknown = unknown_by.get(&id).cloned().unwrap_or_default();
         let repos: HashSet<String> = tags.iter().map(|t| repo_from_tag(t)).collect();
         let protected = tags.iter().any(|t| PROTECTED_WORDS.is_match(t));
-        let hint = !tags.is_empty() && used_by.is_empty() && !repos.is_empty()
+        let hint = !tags.is_empty() && used_by.is_empty() && unknown.is_empty() && !repos.is_empty()
             && repos.iter().all(|r| used_repos.contains(r));
         let item = json!({
             "id": id, "tags": tags,
@@ -393,6 +440,7 @@ pub fn image_usage_audit(inv: &Inventory) -> Value {
             "created": get(image, "Created"),
             "size": bytes_human(num(get(image, "Size"))),
             "in_use_by": used_by,
+            "usage_unknown_by": unknown,
             "protected_name": protected,
             "superseded_repository_hint": hint,
         });
@@ -402,6 +450,7 @@ pub fn image_usage_audit(inv: &Inventory) -> Value {
         items.push(item);
     }
     let in_use = items.iter().filter(|i| !list(&i["in_use_by"]).is_empty()).count();
+    let unknown = items.iter().filter(|i| list(&i["in_use_by"]).is_empty() && !list(&i["usage_unknown_by"]).is_empty()).count();
     json!({
         "images": items,
         // Compatibility field kept; no heuristic-only image is ever called safe.
@@ -411,7 +460,8 @@ pub fn image_usage_audit(inv: &Inventory) -> Value {
         "summary": {
             "images": items.len(),
             "in_use": in_use,
-            "unused": items.len() - in_use,
+            "unused": items.len() - in_use - unknown,
+            "unknown": unknown,
             "safe_superseded_candidates": 0,
             "repository_superseded_hints": candidates.len(),
         },
@@ -455,7 +505,7 @@ mod tests {
             json!({"Id": "c3", "Names": ["/firecrawl-rust-init-1"], "Image": "firecrawl-rust:1", "ImageID": "sha256:i",
                    "State": "exited", "Status": "Exited (0)",
                    "Labels": {"com.docker.compose.project": "firecrawl", "com.docker.compose.service": "rust-init"}}),
-            json!({"Id": "c4", "Names": [], "Image": "alpine", "ImageID": "", "State": "exited", "Status": "Exited (1)",
+            json!({"Id": "c4", "Names": [], "Image": "alpine", "ImageID": "sha256:unrelated", "State": "exited", "Status": "Exited (1)",
                    "Labels": {}, "Created": 5}),
         ];
         let images = vec![
@@ -513,6 +563,42 @@ mod tests {
     }
 
     #[test]
+    fn manifest_identity_prevents_false_drift_and_unused_hints() {
+        let mut inventory = inv();
+        inventory.rows.truncate(1);
+        inventory.inspections.insert("c1".into(), json!({
+            "Image": "sha256:config",
+            "ImageManifestDescriptor": {"digest": "sha256:platform"},
+            "Config": {"Image": "dockerlocal-mcp:local"}
+        }));
+        inventory.images = vec![
+            json!({"Id": "sha256:index", "RepoTags": ["dockerlocal-mcp:local"],
+                "Manifests": [{"ID": "sha256:platform", "Kind": "image", "Available": true}]}),
+            json!({"Id": "sha256:other", "RepoTags": ["dockerlocal-mcp:older"],
+                "Manifests": [{"ID": "sha256:other-platform", "Kind": "image"}]}),
+            json!({"Id": "sha256:unknown", "RepoTags": ["dockerlocal-mcp:unknown"]})
+        ];
+        let audit = deployment_audit(&inventory, &json!({}), &json!({}), &[],
+            &|_| Ok(json!({})), 7);
+        assert_eq!(audit["local_image_drift"], json!([]));
+        assert_eq!(audit["local_image_identity_unknown"], json!([]));
+        let usage = image_usage_audit(&inventory);
+        assert_eq!(usage["images"][0]["in_use_by"], json!(["dockerlocal-mcp-http"]));
+        assert_eq!(usage["images"][2]["usage_unknown_by"], json!(["dockerlocal-mcp-http"]));
+        assert_eq!(usage["summary"]["unknown"], json!(1));
+        assert_eq!(usage["repository_superseded_hints"].as_array().unwrap().len(), 1);
+        inventory.images[0]["Manifests"][0]["ID"] = json!("sha256:different");
+        let audit = deployment_audit(&inventory, &json!({}), &json!({}), &[],
+            &|_| Ok(json!({})), 7);
+        assert_eq!(audit["summary"]["local_image_drift"], json!(1));
+        inventory.images[0].as_object_mut().unwrap().remove("Manifests");
+        let audit = deployment_audit(&inventory, &json!({}), &json!({}), &[],
+            &|_| Ok(json!({})), 7);
+        assert_eq!(audit["summary"]["local_image_drift"], json!(0));
+        assert_eq!(audit["summary"]["local_image_identity_unknown"], json!(1));
+    }
+
+    #[test]
     fn image_usage_golden() {
         let audit = image_usage_audit(&inv());
         let by_id = |id: &str| audit["images"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap().clone();
@@ -520,7 +606,7 @@ mod tests {
         assert_eq!(by_id("sha256:new")["superseded_repository_hint"], json!(true));
         assert_eq!(by_id("sha256:bk")["protected_name"], json!(true));
         assert_eq!(audit["repository_superseded_hints"].as_array().unwrap().len(), 1);
-        assert_eq!(audit["summary"], json!({"images": 3, "in_use": 1, "unused": 2,
+        assert_eq!(audit["summary"], json!({"images": 3, "in_use": 1, "unused": 2, "unknown": 0,
             "safe_superseded_candidates": 0, "repository_superseded_hints": 1}));
     }
 }

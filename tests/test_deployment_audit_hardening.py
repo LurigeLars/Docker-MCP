@@ -59,6 +59,32 @@ class DeploymentAuditComposeDriftTests(unittest.TestCase):
             return {"status": "ok", "checked_files": 0, "drift": [], "errors": []}
         raise AssertionError(f"unexpected Docker API request: {method} {path}")
 
+    def test_manifest_identity_is_not_confused_with_index_or_config(self):
+        rows = self._json_side_effect("GET", "/containers/json")
+        row = rows[0]
+        manifest = "sha256:" + "a" * 64
+        inspect = {"Image": row["ImageID"], "ImageManifestDescriptor": {"digest": manifest}}
+        inspections = {row["Id"]: inspect}
+        images = [
+            {"Id": "sha256:" + "b" * 64, "RepoTags": [row["Image"]],
+             "Manifests": [{"ID": manifest, "Kind": "image", "Available": True}]},
+            {"Id": "sha256:" + "c" * 64, "RepoTags": ["node:unknown"]},
+        ]
+        with unittest.mock.patch.object(server, "_runner_request", return_value={"status": "succeeded"}):
+            with unittest.mock.patch.object(server, "_json", return_value={"status": "ok"}):
+                result = server._deployment_audit(rows, images, inspections)
+        self.assertEqual(result["local_image_drift"], [])
+        self.assertEqual(result["local_image_identity_unknown"], [])
+        usage = server._image_usage_audit(rows, images, inspections)
+        self.assertEqual(usage["images"][0]["in_use_by"], ["avanza-mcp-gateway"])
+        self.assertEqual(usage["images"][1]["usage_unknown_by"], ["avanza-mcp-gateway"])
+        self.assertEqual(usage["summary"]["unknown"], 1)
+        self.assertEqual(usage["repository_superseded_hints"], [])
+        images[0]["Manifests"][0]["ID"] = "sha256:" + "d" * 64
+        self.assertIs(server._image_identity_match(row, inspect, images[0]), False)
+        del images[0]["Manifests"]
+        self.assertIsNone(server._image_identity_match(row, inspect, images[0]))
+
     def test_two_audit_phases_each_share_one_fresh_inventory(self):
         image_id = "sha256:" + ("1" * 64)
         digest = "node@" + image_id

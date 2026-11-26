@@ -49,6 +49,9 @@ class ProxyPolicyTests(unittest.TestCase):
             proxy.allowed("GET", "/v1.54/containers/example/stats?stream=false")
         )
         self.assertTrue(proxy.allowed("GET", "/v1.54/images/json?all=0"))
+        self.assertTrue(proxy.allowed("GET", "/v1.54/images/json?all=0&manifests=1"))
+        self.assertFalse(proxy.allowed("GET", "/v1.54/images/json?all=0&manifests=0"))
+        self.assertFalse(proxy.allowed("GET", "/v1.54/images/json?all=0&manifests=1&all=1"))
         self.assertTrue(proxy.allowed("GET", "/v1.54/containers/example/json"))
         self.assertTrue(proxy.allowed("GET", "/v1.54/images/example/json"))
 
@@ -362,6 +365,25 @@ class SelectiveImageCleanupTests(unittest.TestCase):
         self.assertEqual(result["removed_count"], 0)
         self.assertEqual(result["skipped"][0]["reason"], "in_use")
         self.assertEqual(result["skipped"][0]["in_use_by"], ["secret-holder"])
+        delete.assert_not_called()
+
+    def test_cleanup_protects_manifest_used_images_and_unknown_usage(self):
+        manifest = "sha256:" + "1" * 64
+        rows = [{"Id": "", "Names": ["/guard"], "ImageID": "sha256:" + "2" * 64,
+                 "ImageManifestDescriptor": {"digest": manifest}}]
+        images = [
+            {"Id": "sha256:" + "3" * 64, "RepoTags": ["guard:local"],
+             "Manifests": [{"ID": manifest, "Kind": "image", "Available": True}]},
+            {"Id": "sha256:" + "4" * 64, "RepoTags": ["guard:unknown"]},
+            {"Id": "sha256:" + "5" * 64, "RepoTags": ["guard:rollback-123"],
+             "Manifests": [{"ID": "sha256:" + "6" * 64}]},
+        ]
+        with unittest.mock.patch.object(proxy, "engine_json", side_effect=[rows, images]):
+            with unittest.mock.patch.object(proxy, "engine_request") as delete:
+                result = proxy.cleanup_superseded_images(["guard:local", "guard:unknown", "guard:rollback-123"])
+        self.assertEqual(result["removed_count"], 0)
+        self.assertEqual([x["reason"] for x in result["skipped"]],
+                         ["in_use", "image_usage_unknown", "protected_name"])
         delete.assert_not_called()
 
     def test_cleanup_reports_unrequested_or_missing_refs_without_broadening_scope(self):
