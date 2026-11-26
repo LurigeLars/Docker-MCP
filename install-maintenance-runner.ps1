@@ -26,9 +26,12 @@ if ($ParseErrors.Count -gt 0) {
     throw "Runner syntax validation failed: $Details"
 }
 
-$PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
-if (-not $PwshCommand) { throw "PowerShell 7 (pwsh.exe) is required for the maintenance runner." }
-$PowerShell = $PwshCommand.Source
+# The launcher path is baked into the logon Run key. A pwsh inside a versioned app package
+# (another app's bundled runtime, or the Store package folder itself) vanishes on that app's
+# next update; the Store alias and the MSI install keep a stable path.
+$PowerShell = @(Get-Command pwsh.exe -All -ErrorAction SilentlyContinue | ForEach-Object Source) |
+    Where-Object { $_ -notlike (Join-Path $env:ProgramFiles "WindowsApps\*") } | Select-Object -First 1
+if (-not $PowerShell) { throw "PowerShell 7 (pwsh.exe) is required for the maintenance runner." }
 
 $Heartbeat = Join-Path $Control "runner-heartbeat.json"
 if (Test-Path -LiteralPath $Heartbeat) {
