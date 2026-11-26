@@ -8,6 +8,8 @@ Read-only tools only. Usage: python compare.py [rounds]
 from __future__ import annotations
 
 import json
+import os
+import re
 import statistics
 import subprocess
 import sys
@@ -17,7 +19,7 @@ NETWORK = "dockerlocal_default"
 API = "http://dockerlocal-socket-proxy:2375"
 SERVERS = {
     "python": "dockerlocal-mcp:local",
-    "rust": "dockerlocal-rs:batch1",
+    "rust": "dockerlocal-rs:batch2",
 }
 CALLS = [
     ("containers_list", {"include_stopped": True}),
@@ -32,9 +34,28 @@ CALLS = [
     ("compose_status", {}),
     ("compose_status", {"project": "dockerlocal"}),
     ("compose_status", {"project": "bad name"}),
+    # Batch 2: read-only runner/control-file tools. Write tools never run here.
+    ("repo_status", {"repo": "docker-mcp"}),
+    ("repo_status", {"repo": "../x"}),
+    ("repo_status", {"repo": "no-such-repo"}),
+    ("scheduled_task_status", {"task": "desktop-tradingview-http"}),
+    ("port_registry_status", {}),
+    ("host_disk_usage", {}),
+    ("maintenance_job_status", {"job_id": "9fe8d4e9c0af471fbd1b78501bebd78c"}),
+    ("maintenance_job_status", {"job_id": "0" * 32}),
+    ("maintenance_job_status", {"job_id": "../../etc"}),
+    ("runtime_supervisor_status", {}),
+    ("runtime_supervisor_status", {"log_tail": 5}),
+    ("maintenance_runner_status", {}),
+    ("maintenance_runner_status", {"include_host_checks": True}),
 ]
 # Fields that legitimately change between two reads of the same object.
-VOLATILE = {"status", "cpu_percent", "memory", "memory_percent", "network_rx", "network_tx", "pids"}
+VOLATILE = {"cpu_percent", "memory", "memory_percent", "network_rx", "network_tx", "pids",
+            "age_seconds", "updated_unix", "measured_unix", "created_unix",
+            "available_bytes", "used_bytes", "used_percent"}
+# Docker's human status text ("Up 5 minutes") changes between calls; runner status values do not.
+DOCKER_STATUS = re.compile(r"^(Up|Exited|Created|Restarting|Paused|Removing|Dead)")
+CONTROL_DIR = os.path.join(os.environ["LOCALAPPDATA"], "DockerLocalMCP", "control")
 
 
 class Server:
@@ -47,7 +68,8 @@ class Server:
             "--pids-limit", "128", "--memory", "4g",
             "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=1777",
             "-e", f"DOCKER_API_URL={API}", "-e", f"DOCKER_HOST=tcp://{API.split('//')[1]}",
-            "-e", "DOCKERLOCAL_CONTROL_DIR=/tmp/control",
+            # The real control dir, as production stdio instances mount it.
+            "-v", f"{CONTROL_DIR}:/control", "-e", "DOCKERLOCAL_CONTROL_DIR=/control",
             image,
         ]
         self.started = time.perf_counter()
@@ -115,7 +137,8 @@ def payload(msg: dict):
 
 def strip(value):
     if isinstance(value, dict):
-        return {k: strip(v) for k, v in value.items() if k not in VOLATILE}
+        return {k: strip(v) for k, v in value.items()
+                if k not in VOLATILE and not (k == "status" and DOCKER_STATUS.match(str(v)))}
     if isinstance(value, list):
         # The comparison containers see themselves; Docker orders equal timestamps arbitrarily.
         rows = [strip(v) for v in value if "dockerlocal-compare-" not in json.dumps(v)]
@@ -140,7 +163,7 @@ def main() -> None:
         lat: dict[str, dict[str, list[float]]] = {kind: {} for kind in servers}
         idle = {kind: s.stats() for kind, s in servers.items()}
         tools = {kind: s.request("tools/list", {})["result"]["tools"] for kind, s in servers.items()}
-        mismatches, compared = set(), 0
+        mismatches, transient, compared = set(), set(), 0
         for _ in range(rounds):
             for name, args in CALLS:
                 # Call both back to back so concurrent host activity rarely differs between them.
@@ -151,7 +174,16 @@ def main() -> None:
                     got[kind] = (strip(payload(msg)), text_shape(msg))
                 compared += 1
                 if got["python"] != got["rust"]:
-                    mismatches.add(f"{name}:{json.dumps(args)}")
+                    # Host state can change between two calls (another chat's container
+                    # starts, disk use moves). Repeat the pair once; report only what persists.
+                    again = {}
+                    for kind, server in servers.items():
+                        msg = server.call(name, args)[1]
+                        again[kind] = (strip(payload(msg)), text_shape(msg))
+                    if again["python"] != again["rust"]:
+                        mismatches.add(f"{name}:{json.dumps(args)}")
+                    else:
+                        transient.add(f"{name}:{json.dumps(args)}")
         for kind, server in servers.items():
             size = subprocess.run(["docker", "image", "inspect", "--format", "{{.Size}}", SERVERS[kind]],
                                   capture_output=True, text=True, check=True).stdout.strip()
@@ -163,7 +195,8 @@ def main() -> None:
                 "after_calls": server.stats(),
                 "median_ms": {k: round(statistics.median(v), 1) for k, v in lat[kind].items()},
             }
-        report["parity"] = {"paired_calls": compared, "tools_with_any_mismatch": sorted(mismatches)}
+        report["parity"] = {"paired_calls": compared, "tools_with_any_mismatch": sorted(mismatches),
+                            "transient_then_equal": sorted(transient)}
         print(json.dumps(report, indent=2))
     finally:
         for server in servers.values():

@@ -1,6 +1,8 @@
 //! DockerLocal MCP in Rust, ported tool by tool from server.py with parity checks.
-//! Batch 1: read-only Docker API tools. Not wired into any deployment yet.
+//! Batches 1-2: read-only Docker API tools and the host runner/control-file tools.
+//! Not wired into any deployment yet.
 
+mod control;
 mod docker;
 mod text;
 
@@ -57,6 +59,62 @@ fn list_result(rows: Vec<Value>) -> CallToolResult {
     result.content = vec![ContentBlock::text(text)];
     result
 }
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RepoArg {
+    repo: String,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct TaskArg {
+    task: String,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum TaskOperation {
+    Start,
+    Stop,
+    Restart,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct TaskControlArgs {
+    task: String,
+    operation: TaskOperation,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct JobArg {
+    job_id: String,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SupervisorArgs {
+    #[serde(default = "default_log_tail")]
+    log_tail: i64,
+}
+fn default_log_tail() -> i64 {
+    40
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RunnerStatusArgs {
+    #[serde(default)]
+    include_host_checks: bool,
+}
+
+/// Tools that return a pre-serialized JSON string: FastMCP sends it as plain text only.
+fn text_result(text: String) -> CallToolResult {
+    CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
+/// One `_compact_runner_request` round trip on a blocking thread.
+async fn runner(payload: Value, fields: &'static [&'static str], timeout: f64) -> Result<CallToolResult, String> {
+    let text = blocking(move || control::compact_request(&control::control_dir(), payload, fields, timeout)).await?;
+    Ok(text_result(text))
+}
+
+const REPO_STATUS_FIELDS: &[&str] = &["repo", "branch", "head", "clean", "conflicts", "origin_ok", "eligible_for_pull"];
+const REPO_PULL_FIELDS: &[&str] = &["action", "repo", "branch", "before_head", "after_head", "changed", "clean"];
+const PORT_FIELDS: &[&str] = &["version", "range_start", "range_end", "services", "docker_reserved_ports", "unregistered_listeners"];
+const TASK_STATUS_FIELDS: &[&str] = &["task", "state", "principal", "run_level", "last_run_time", "last_task_result"];
+const TASK_CONTROL_FIELDS: &[&str] = &["action", "task", "operation", "before_state", "after_state", "last_task_result"];
+const DISK_FIELDS: &[&str] = &["measurement_status", "measured_unix", "drives"];
 
 #[derive(Clone)]
 struct DockerLocal;
@@ -204,6 +262,95 @@ impl DockerLocal {
             "created": get(&raw, "Created"), "architecture": get(&raw, "Architecture"), "os": get(&raw, "Os"),
             "size": bytes_human(num(get(&raw, "Size"))),
         })))
+    }
+
+    #[tool(description = "Read HEAD and pull eligibility for one allowlisted local repository alias.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn repo_status(&self, Parameters(a): Parameters<RepoArg>) -> Result<CallToolResult, String> {
+        let repo = control::alias(a.repo)?;
+        runner(json!({"action": "repo_status", "repo": repo}), REPO_STATUS_FIELDS, 8.0).await
+    }
+
+    #[tool(description = "Fast-forward one allowlisted clean main checkout from its exact allowlisted origin.",
+           annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
+    async fn repo_pull_ff(&self, Parameters(a): Parameters<RepoArg>) -> Result<CallToolResult, String> {
+        let repo = control::alias(a.repo)?;
+        runner(json!({"action": "repo_pull_ff", "repo": repo}), REPO_PULL_FIELDS, 30.0).await
+    }
+
+    #[tool(description = "Read the persistent host MCP port registry and current listener ownership.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn port_registry_status(&self) -> Result<CallToolResult, String> {
+        runner(json!({"action": "port_registry_status"}), PORT_FIELDS, 12.0).await
+    }
+
+    #[tool(description = "Read state and execution principal for one allowlisted Windows Scheduled Task alias.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn scheduled_task_status(&self, Parameters(a): Parameters<TaskArg>) -> Result<CallToolResult, String> {
+        let task = control::alias(a.task)?;
+        runner(json!({"action": "scheduled_task_status", "task": task}), TASK_STATUS_FIELDS, 12.0).await
+    }
+
+    #[tool(description = "Start, stop, or restart one allowlisted Windows Scheduled Task alias.",
+           annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
+    async fn scheduled_task_control(&self, Parameters(a): Parameters<TaskControlArgs>) -> Result<CallToolResult, String> {
+        let task = control::alias(a.task)?;
+        let operation = match a.operation {
+            TaskOperation::Start => "start",
+            TaskOperation::Stop => "stop",
+            TaskOperation::Restart => "restart",
+        };
+        runner(json!({"action": "scheduled_task_control", "task": task, "operation": operation}), TASK_CONTROL_FIELDS, 20.0).await
+    }
+
+    #[tool(description = "Read status and bounded output for a previously queued host maintenance job.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn maintenance_job_status(&self, Parameters(a): Parameters<JobArg>) -> Result<CallToolResult, String> {
+        let job = blocking(move || control::read_job(&control::control_dir(), &a.job_id)).await?;
+        Ok(text_result(job.to_string()))
+    }
+
+    #[tool(description = "Report host runtime-supervisor state and a bounded, redacted log tail.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn runtime_supervisor_status(&self, Parameters(a): Parameters<SupervisorArgs>) -> Result<CallToolResult, String> {
+        let text = blocking(move || Ok(control::runtime_supervisor_status(&control::control_dir(), a.log_tail))).await?;
+        Ok(text_result(text))
+    }
+
+    #[tool(description = "Read fixed-drive capacity and free space from Windows, without shell access or cleanup.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn host_disk_usage(&self) -> Result<CallToolResult, String> {
+        runner(json!({"action": "host_disk_usage"}), DISK_FIELDS, 12.0).await
+    }
+
+    #[tool(description = "Read runner health and optionally disk capacity and MCP port registry, each with its own status.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn maintenance_runner_status(&self, Parameters(a): Parameters<RunnerStatusArgs>) -> Result<CallToolResult, String> {
+        let text = blocking(move || {
+            let dir = control::control_dir();
+            let mut payload = control::runner_heartbeat(&dir);
+            if a.include_host_checks {
+                let checks: [(&str, Value, &[&str]); 2] = [
+                    ("disk", json!({"action": "host_disk_usage"}), DISK_FIELDS),
+                    ("ports", json!({"action": "port_registry_status"}), PORT_FIELDS),
+                ];
+                for (name, request, fields) in checks {
+                    let result = control::compact_request(&dir, request, fields, 12.0)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                        .map(|mut v| {
+                            if let Some(m) = v.as_object_mut() {
+                                m.shift_remove("error");
+                            }
+                            v
+                        })
+                        .unwrap_or_else(|| json!({"status": "unavailable"}));
+                    payload[name] = result;
+                }
+            }
+            Ok(payload.to_string())
+        }).await?;
+        Ok(text_result(text))
     }
 }
 

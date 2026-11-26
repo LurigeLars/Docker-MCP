@@ -1,0 +1,93 @@
+{
+  "python": {
+    "image_mb": 608.7,
+    "startup_to_initialize_ms": 1210,
+    "tools_listed": 31,
+    "idle": {
+      "mem": "68.65MiB",
+      "cpu": "0.00%",
+      "anon_mib": 68.98046875,
+      "id": "f45608e1e5ea"
+    },
+    "after_calls": {
+      "mem": "82.73MiB",
+      "cpu": "0.00%",
+      "anon_mib": 82.2109375,
+      "id": "f45608e1e5ea"
+    },
+    "median_ms": {
+      "containers_list:{\"include_stopped\": true}": 96.6,
+      "container_inspect:{\"container\": \"dockerlocal-socket-proxy\"}": 8.6,
+      "container_stats:{\"container\": \"dockerlocal-socket-proxy\"}": 1012.2,
+      "images_list:{}": 423.2,
+      "image_inspect:{\"image\": \"dockerlocal-socket-proxy:local\"}": 22.9,
+      "container_inspect:{\"container\": \"../not-allowed\"}": 26.6,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 50}": 7.9,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 5000}": 7.6,
+      "compose_status:{}": 102.6,
+      "compose_status:{\"project\": \"dockerlocal\"}": 94.0,
+      "compose_status:{\"project\": \"bad name\"}": 34.9,
+      "repo_status:{\"repo\": \"docker-mcp\"}": 1563.2,
+      "repo_status:{\"repo\": \"../x\"}": 60.4,
+      "repo_status:{\"repo\": \"no-such-repo\"}": 1977.5,
+      "scheduled_task_status:{\"task\": \"desktop-tradingview-http\"}": 2689.7,
+      "port_registry_status:{}": 7585.0,
+      "host_disk_usage:{}": 2076.0,
+      "maintenance_job_status:{\"job_id\": \"9fe8d4e9c0af471fbd1b78501bebd78c\"}": 6.6,
+      "maintenance_job_status:{\"job_id\": \"00000000000000000000000000000000\"}": 4.6,
+      "maintenance_job_status:{\"job_id\": \"../../etc\"}": 71.3,
+      "runtime_supervisor_status:{}": 14.9,
+      "runtime_supervisor_status:{\"log_tail\": 5}": 14.0,
+      "maintenance_runner_status:{}": 15.2,
+      "maintenance_runner_status:{\"include_host_checks\": true}": 9457.4
+    }
+  },
+  "rust": {
+    "image_mb": 4.7,
+    "startup_to_initialize_ms": 283,
+    "tools_listed": 16,
+    "idle": {
+      "mem": "1.688MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "ab321d42d6d3"
+    },
+    "after_calls": {
+      "mem": "2.762MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "ab321d42d6d3"
+    },
+    "median_ms": {
+      "containers_list:{\"include_stopped\": true}": 88.2,
+      "container_inspect:{\"container\": \"dockerlocal-socket-proxy\"}": 6.2,
+      "container_stats:{\"container\": \"dockerlocal-socket-proxy\"}": 2004.2,
+      "images_list:{}": 419.5,
+      "image_inspect:{\"image\": \"dockerlocal-socket-proxy:local\"}": 23.8,
+      "container_inspect:{\"container\": \"../not-allowed\"}": 1.0,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 50}": 6.6,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 5000}": 5.2,
+      "compose_status:{}": 96.8,
+      "compose_status:{\"project\": \"dockerlocal\"}": 97.6,
+      "compose_status:{\"project\": \"bad name\"}": 1.2,
+      "repo_status:{\"repo\": \"docker-mcp\"}": 2273.6,
+      "repo_status:{\"repo\": \"../x\"}": 1.4,
+      "repo_status:{\"repo\": \"no-such-repo\"}": 2072.7,
+      "scheduled_task_status:{\"task\": \"desktop-tradingview-http\"}": 2684.3,
+      "port_registry_status:{}": 8370.4,
+      "host_disk_usage:{}": 1966.4,
+      "maintenance_job_status:{\"job_id\": \"9fe8d4e9c0af471fbd1b78501bebd78c\"}": 4.3,
+      "maintenance_job_status:{\"job_id\": \"00000000000000000000000000000000\"}": 3.0,
+      "maintenance_job_status:{\"job_id\": \"../../etc\"}": 1.4,
+      "runtime_supervisor_status:{}": 10.1,
+      "runtime_supervisor_status:{\"log_tail\": 5}": 10.1,
+      "maintenance_runner_status:{}": 3.5,
+      "maintenance_runner_status:{\"include_host_checks\": true}": 9655.4
+    }
+  },
+  "parity": {
+    "paired_calls": 72,
+    "tools_with_any_mismatch": [],
+    "transient_then_equal": []
+  }
+}
