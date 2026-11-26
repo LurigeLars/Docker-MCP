@@ -1,7 +1,8 @@
 //! DockerLocal MCP in Rust, ported tool by tool from server.py with parity checks.
-//! Batches 1-2: read-only Docker API tools and the host runner/control-file tools.
+//! Batches 1-3: read-only Docker API tools, host runner/control-file tools and audits.
 //! Not wired into any deployment yet.
 
+mod audit;
 mod control;
 mod docker;
 mod text;
@@ -115,6 +116,12 @@ const PORT_FIELDS: &[&str] = &["version", "range_start", "range_end", "services"
 const TASK_STATUS_FIELDS: &[&str] = &["task", "state", "principal", "run_level", "last_run_time", "last_task_result"];
 const TASK_CONTROL_FIELDS: &[&str] = &["action", "task", "operation", "before_state", "after_state", "last_task_result"];
 const DISK_FIELDS: &[&str] = &["measurement_status", "measured_unix", "drives"];
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct DeploymentAuditArgs {
+    #[serde(default)]
+    include_image_usage: bool,
+}
 
 #[derive(Clone)]
 struct DockerLocal;
@@ -350,6 +357,34 @@ impl DockerLocal {
             }
             Ok(payload.to_string())
         }).await?;
+        Ok(text_result(text))
+    }
+
+    #[tool(description = "Audit health, desired Compose config, image drift and runtime source. Optionally include image usage and digests from the same inventory.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn mcp_deployment_audit(&self, Parameters(a): Parameters<DeploymentAuditArgs>) -> Result<CallToolResult, String> {
+        let text = blocking(move || {
+            let inv = audit::inventory()?;
+            let mut payload = audit::deployment_audit(
+                &inv, &audit::desired_state(), &audit::source_audit(), &audit::expected_projects(),
+                &audit::fetch_image, audit::now(),
+            );
+            if a.include_image_usage {
+                payload["image_usage"] = audit::image_usage_audit(&inv);
+                payload["container_inspect_failures"] = Value::Array(inv.failed.clone());
+            }
+            Ok(payload.to_string())
+        }).await?;
+        Ok(text_result(text))
+    }
+
+    #[tool(description = "Classify local images by container use and report repository-level superseded hints.
+
+Hints are never declared safe for deletion because an unused local image may still
+be an active Dockerfile build-stage/base dependency.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn image_usage_audit(&self) -> Result<CallToolResult, String> {
+        let text = blocking(|| Ok(audit::image_usage_audit(&audit::inventory()?).to_string())).await?;
         Ok(text_result(text))
     }
 }

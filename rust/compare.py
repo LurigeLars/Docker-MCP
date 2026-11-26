@@ -19,7 +19,7 @@ NETWORK = "dockerlocal_default"
 API = "http://dockerlocal-socket-proxy:2375"
 SERVERS = {
     "python": "dockerlocal-mcp:local",
-    "rust": "dockerlocal-rs:batch2",
+    "rust": "dockerlocal-rs:batch3",
 }
 CALLS = [
     ("containers_list", {"include_stopped": True}),
@@ -48,11 +48,15 @@ CALLS = [
     ("runtime_supervisor_status", {"log_tail": 5}),
     ("maintenance_runner_status", {}),
     ("maintenance_runner_status", {"include_host_checks": True}),
+    # Batch 3: audits (read-only; one compose_desired_state runner read per call).
+    ("mcp_deployment_audit", {}),
+    ("mcp_deployment_audit", {"include_image_usage": True}),
+    ("image_usage_audit", {}),
 ]
 # Fields that legitimately change between two reads of the same object.
 VOLATILE = {"cpu_percent", "memory", "memory_percent", "network_rx", "network_tx", "pids",
             "age_seconds", "updated_unix", "measured_unix", "created_unix",
-            "available_bytes", "used_bytes", "used_percent"}
+            "available_bytes", "used_bytes", "used_percent", "timestamp_unix"}
 # Docker's human status text ("Up 5 minutes") changes between calls; runner status values do not.
 DOCKER_STATUS = re.compile(r"^(Up|Exited|Created|Restarting|Paused|Removing|Dead)")
 CONTROL_DIR = os.path.join(os.environ["LOCALAPPDATA"], "DockerLocalMCP", "control")
