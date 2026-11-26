@@ -29,6 +29,8 @@ Push-Location $Root
 try {
     docker compose -f compose.proxy.yaml up -d --build
     docker build -t dockerlocal-mcp:local .
+    & (Join-Path $Source 'build-gateway-runtime.ps1')
+    if (-not $?) { throw 'Reviewed gateway build failed.' }
     docker compose -f compose.public.yaml up -d --force-recreate
     & (Join-Path $Root "install-maintenance-runner.ps1")
 }

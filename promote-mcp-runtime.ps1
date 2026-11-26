@@ -514,10 +514,10 @@ switch ($Target) {
             Require-File $Path
         }
         $SourceText = Get-Content -LiteralPath $SrcCompose -Raw
-        $Wanted = [regex]::Match($SourceText,'(?m)^    image: (node:[0-9]+\.[0-9]+\.[0-9]+-alpine)\s*$').Groups[1].Value
+        $Wanted = [regex]::Match($SourceText,'(?m)^    image: (dockerlocal-gateway:node-[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+)\s*$').Groups[1].Value
         if (-not $Wanted) { throw 'Expected reviewed Node gateway image not found.' }
         $Current = Get-Content -LiteralPath $Compose -Raw
-        $Pattern = '(?m)^    image: node:[0-9]+\.[0-9]+\.[0-9]+-alpine\s*$'
+        $Pattern = '(?m)^    image: (?:node:[0-9]+\.[0-9]+\.[0-9]+-alpine|dockerlocal-gateway:node-[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+)\s*$'
         if ([regex]::Matches($Current,$Pattern).Count -ne 1) { throw 'Expected exactly one Node gateway image line.' }
         $Updated = [regex]::Replace($Current,$Pattern,"    image: $Wanted")
         $RunningGateway = @(& docker inspect --format '{{.Config.Image}}|{{.State.Running}}' dockerlocal-gateway)
@@ -529,7 +529,15 @@ switch ($Target) {
         $NeedsGatewayUpdate = ($Current -cne $Updated -or -not $CodeMatches -or
                                $RunningGateway[0] -cne "$Wanted|true")
         if ($NeedsGatewayUpdate) {
-            Run-Docker -Arguments @('pull',$Wanted)
+            $Builder = Join-Path $SourceRoot 'build-gateway-runtime.ps1'
+            Require-File $Builder
+            & $Builder
+            if (-not $?) { throw 'Reviewed gateway build failed.' }
+            $Candidate = [string](& docker image inspect --format '{{.Id}}' $Wanted)
+            if ($LASTEXITCODE -ne 0 -or $Candidate -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Reviewed gateway identity unavailable.' }
+            $EnvHash = (Get-FileHash -LiteralPath (Join-Path $Runtime 'public\gateway.env')).Hash
+            $BackendId = [string](& docker inspect --format '{{.Id}}' dockerlocal-mcp-http)
+            if ($LASTEXITCODE -ne 0 -or $BackendId -cnotmatch '^[0-9a-f]{64}$') { throw 'Backend identity unavailable.' }
             $Backup = New-Backup 'dockerlocal'
             $SavedCompose = Join-Path $Backup 'compose.public.yaml'
             $SavedGateway = Join-Path $Backup 'gateway.mjs'
@@ -538,15 +546,31 @@ switch ($Target) {
             try {
                 [IO.File]::WriteAllText($Compose,$Updated,[Text.UTF8Encoding]::new($false))
                 Copy-Item -LiteralPath $SrcGateway -Destination $Gateway -Force
-                Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway')
+                if ([string](& docker image inspect --format '{{.Id}}' $Wanted) -cne $Candidate -or $LASTEXITCODE -ne 0) { throw 'Gateway image changed before promotion.' }
+                Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--no-build','--pull','never','--force-recreate','gateway')
                 Assert-RunningImage 'dockerlocal-gateway' $Wanted
+                $StateRows = @(& docker container inspect --format '{{json .}}' dockerlocal-gateway)
+                if ($LASTEXITCODE -ne 0 -or $StateRows.Count -ne 1) { throw 'Gateway image state unavailable.' }
+                $State = $StateRows[0] | ConvertFrom-Json
+                $Manifest = $State.PSObject.Properties['ImageManifestDescriptor']
+                if ($null -ne $Manifest -and $null -ne $Manifest.Value) {
+                    $Descriptor = $Manifest.Value
+                    $Platform = "$($Descriptor.platform.os)/$($Descriptor.platform.architecture)"
+                    $Variant = $Descriptor.platform.PSObject.Properties['variant']
+                    if ($Variant -and $Variant.Value) { $Platform += "/$($Variant.Value)" }
+                    if ($Platform -cnotmatch '^linux/[a-z0-9]+(/[a-z0-9]+)?$' -or
+                        [string]$Descriptor.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+                        [string](& docker image inspect --platform $Platform --format '{{.Id}}' $Candidate) -cne [string]$Descriptor.digest -or $LASTEXITCODE -ne 0) { throw 'Gateway platform image mismatch.' }
+                } elseif ([string]$State.Image -cne $Candidate) { throw 'Gateway image identity mismatch.' }
                 Run-Docker -Arguments @('exec','dockerlocal-gateway','node','-e',"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))")
+                if ((Get-FileHash -LiteralPath (Join-Path $Runtime 'public\gateway.env')).Hash -cne $EnvHash -or
+                    [string](& docker inspect --format '{{.Id}}' dockerlocal-mcp-http) -cne $BackendId -or $LASTEXITCODE -ne 0) { throw 'Gateway config or unrelated backend changed.' }
                 Write-Output "DOCKERLOCAL_GATEWAY_PROMOTED $Wanted"
             } catch {
                 $Reason = $_.Exception.Message
                 Copy-Item -LiteralPath $SavedCompose -Destination $Compose -Force
                 Copy-Item -LiteralPath $SavedGateway -Destination $Gateway -Force
-                try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--force-recreate','gateway') }
+                try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--no-build','--pull','never','--force-recreate','gateway') }
                 catch { Write-Warning 'DockerLocal gateway rollback requires local recovery.' }
                 throw "DockerLocal gateway promotion failed; tracked files restored. Cause: $Reason"
             }

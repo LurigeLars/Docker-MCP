@@ -1,0 +1,11 @@
+# Public HTTP gateway uses only Node's built-in modules.
+FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
+ARG GATEWAY_DOCKERFILE_SHA256
+LABEL org.opencontainers.image.source="https://github.com/LurigeLars/Docker-MCP" \
+      org.dockerlocal.gateway.dockerfile-sha256="${GATEWAY_DOCKERFILE_SHA256}"
+RUN apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+    && test ! -e /usr/local/lib/node_modules/npm \
+    && test -x /usr/local/bin/node
+USER node
+WORKDIR /app
