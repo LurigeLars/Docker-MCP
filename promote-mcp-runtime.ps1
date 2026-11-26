@@ -427,6 +427,9 @@ switch ($Target) {
         $ExpectedMcpImage = [regex]::Match($ComposeText,'(?m)^    image: (ghcr\.io/github/github-mcp-server:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64})\s*$').Groups[1].Value
         $ExpectedGateway = [regex]::Match($ComposeText,'(?m)^    image: (dockerlocal-gateway:node-[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+)\s*$').Groups[1].Value
         if (-not $ExpectedMcpImage -or -not $ExpectedGateway) { throw 'Reviewed GitHub runtime image pins invalid.' }
+        $LocalCompose = Get-Content -LiteralPath (Join-Path $SourceRoot 'compose.public.yaml') -Raw
+        $SharedPin = [regex]::Match($LocalCompose,'(?m)^    image: (dockerlocal-gateway:node-[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+)\s*$').Groups[1].Value
+        if (-not $SharedPin -or $ExpectedGateway -cne $SharedPin) { throw 'GitHub gateway must use the exact reviewed shared runtime pin.' }
         $Builder = Join-Path $SourceRoot 'build-gateway-runtime.ps1'
         Require-File $Builder
         & $Builder
@@ -445,6 +448,7 @@ switch ($Target) {
         try {
             # Existing reviewed wrapper: sync tracked runtime, preserve config/DPAPI,
             # force reimport credentials to tmpfs and verify the gateway health.
+            if ([string](& docker image inspect --format '{{.Id}}' $ExpectedGateway) -cne $ReviewedGatewayId -or $LASTEXITCODE -ne 0) { throw 'Reviewed shared gateway changed before deployment.' }
             & $Deploy -Action Up -RuntimeTarget $Runtime
             if (-not $?) { throw 'GitHub runtime deployment wrapper failed.' }
             Assert-RunningImage 'github-mcp-local-github-mcp-1' $ExpectedMcpImage
