@@ -1,4 +1,7 @@
 FROM python:3.12-alpine
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/LurigeLars/Docker-MCP" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
 # The base tag lags Alpine security fixes (zlib, krb5, openssl, musl on 2026-11-25).
 RUN apk upgrade --no-cache
 COPY proxy.py /app/proxy.py
