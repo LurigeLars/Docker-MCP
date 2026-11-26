@@ -47,6 +47,17 @@ function Assert-RunningImage([string]$Container,[string]$Expected) {
     }
 }
 
+function Wait-DockerLocalGatewayReady {
+    # Compose start is not an application readiness signal. Transient errors
+    # remain local and are retried; persistent failure still triggers rollback.
+    for ($Attempt=0; $Attempt -lt 30; $Attempt++) {
+        & docker exec dockerlocal-gateway node -e "fetch('http://127.0.0.1:8080/healthz',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { return }
+        Start-Sleep -Seconds 2
+    }
+    throw 'DockerLocal gateway HTTP readiness failed after bounded retries.'
+}
+
 function New-Backup([string]$Name) {
     $Path = Join-Path $BackupRoot "$Name-$Stamp"
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
@@ -562,7 +573,7 @@ switch ($Target) {
                         [string]$Descriptor.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or
                         [string](& docker image inspect --platform $Platform --format '{{.Id}}' $Candidate) -cne [string]$Descriptor.digest -or $LASTEXITCODE -ne 0) { throw 'Gateway platform image mismatch.' }
                 } elseif ([string]$State.Image -cne $Candidate) { throw 'Gateway image identity mismatch.' }
-                Run-Docker -Arguments @('exec','dockerlocal-gateway','node','-e',"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))")
+                Wait-DockerLocalGatewayReady
                 if ((Get-FileHash -LiteralPath (Join-Path $Runtime 'public\gateway.env')).Hash -cne $EnvHash -or
                     [string](& docker inspect --format '{{.Id}}' dockerlocal-mcp-http) -cne $BackendId -or $LASTEXITCODE -ne 0) { throw 'Gateway config or unrelated backend changed.' }
                 Write-Output "DOCKERLOCAL_GATEWAY_PROMOTED $Wanted"
@@ -570,7 +581,10 @@ switch ($Target) {
                 $Reason = $_.Exception.Message
                 Copy-Item -LiteralPath $SavedCompose -Destination $Compose -Force
                 Copy-Item -LiteralPath $SavedGateway -Destination $Gateway -Force
-                try { Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--no-build','--pull','never','--force-recreate','gateway') }
+                try {
+                    Run-Docker -Arguments @('compose','-f',$Compose,'up','-d','--no-deps','--no-build','--pull','never','--force-recreate','gateway')
+                    Wait-DockerLocalGatewayReady
+                }
                 catch { Write-Warning 'DockerLocal gateway rollback requires local recovery.' }
                 throw "DockerLocal gateway promotion failed; tracked files restored. Cause: $Reason"
             }
