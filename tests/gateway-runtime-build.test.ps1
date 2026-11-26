@@ -66,4 +66,31 @@ if (-not $GatewayFixture.Exists -or $GatewayFixture.Tags -ne 1 -or $GatewayFixtu
 if ($GatewayFixture.Tags -ne 1 -or $GatewayFixture.Builds -ne 2 -or $GatewayFixture.Scans -ne 3) { throw 'Existing versioned tag was replaced.' }
 $GatewayFixture.WrongHash = $true
 Assert-Blocked '*advance the revision tag*'
+# Test the production readiness function without Docker or actual sleeping.
+$Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'promote-mcp-runtime.ps1'), [ref]$null, [ref]$null)
+$Definition = $Ast.Find({param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'Wait-DockerLocalGatewayReady'}, $true)
+if ($null -eq $Definition) { throw 'Expected gateway readiness function missing.' }
+. ([scriptblock]::Create($Definition.Extent.Text))
+$Readiness = @{Attempts=0;Failures=2;Sleeps=0}
+function docker {
+    if (($args[0..3] -join '|') -cne 'exec|dockerlocal-gateway|node|-e' -or
+        $args[4] -notlike '*127.0.0.1:8080/healthz*') { throw 'Unexpected readiness command.' }
+    $Readiness.Attempts++
+    $Code = if ($Readiness.Attempts -le $Readiness.Failures) { 1 } else { 0 }
+    Set-Variable -Name LASTEXITCODE -Value $Code -Scope 1
+}
+function Start-Sleep {
+    param([int]$Seconds)
+    if ($Seconds -ne 2) { throw 'Unexpected readiness retry delay.' }
+    $Readiness.Sleeps++
+}
+Wait-DockerLocalGatewayReady
+if ($Readiness.Attempts -ne 3 -or $Readiness.Sleeps -ne 2) { throw 'Transient readiness failure was not retried.' }
+$Readiness.Attempts=0; $Readiness.Failures=100; $Readiness.Sleeps=0
+$Blocked = $false
+try { Wait-DockerLocalGatewayReady } catch {
+    if ($_.Exception.Message -notlike '*HTTP readiness failed after bounded retries*') { throw }
+    $Blocked=$true
+}
+if (-not $Blocked -or $Readiness.Attempts -ne 30) { throw 'Persistent readiness failure was not bounded.' }
 Write-Output 'GATEWAY_RUNTIME_BUILD_FIXTURES_OK'
