@@ -122,8 +122,13 @@ foreach ($Path in @($Compose,$PublicCompose,$GatewayEnv)) {
 }
 $ComposeArgs = @('compose','--project-directory',$Runtime,'-f',$Compose)
 Invoke-CheckedDocker ($ComposeArgs + @('config','--quiet'))
+$ConfiguredImages = @(& docker @ComposeArgs config --images $Service)
+if ($LASTEXITCODE -ne 0 -or $ConfiguredImages.Count -ne 1 -or $ConfiguredImages[0] -cne $Tag) {
+    throw 'Installed Compose image does not match the fixed target.'
+}
 $Gateway = Get-RunningState 'dockerlocal-gateway' 'dockerlocal-public' 'gateway'
 $Backend = Get-RunningState 'dockerlocal-mcp-http' 'dockerlocal-public' 'mcp'
+$Proxy = Get-RunningState 'dockerlocal-socket-proxy' 'dockerlocal' 'socket-proxy'
 $SecretNames = @('scout_hub_user','scout_hub_password')
 $Configured = @($SecretNames | Where-Object { Test-Path -LiteralPath (Join-Path $LocalRoot "secrets\$_.dpapi") -PathType Leaf }).Count
 if ($Configured -notin @(0,2)) { throw 'Scout DPAPI configuration incomplete.' }
@@ -170,6 +175,7 @@ function Confirm-Ready([string]$Expected) {
     Assert-ImageMatches (Get-RunningState $Container $Project $Service) $Expected
     if ((Get-RunningState 'dockerlocal-gateway' 'dockerlocal-public' 'gateway').Id -cne $Gateway.Id) { throw 'Unrelated gateway changed.' }
     if ($Target -ceq 'Proxy' -and (Get-RunningState 'dockerlocal-mcp-http' 'dockerlocal-public' 'mcp').Id -cne $Backend.Id) { throw 'Unrelated backend changed.' }
+    if ($Target -ceq 'Backend' -and (Get-RunningState 'dockerlocal-socket-proxy' 'dockerlocal' 'socket-proxy').Id -cne $Proxy.Id) { throw 'Unrelated socket proxy changed.' }
     Assert-ConfigUnchanged
 }
 $RecreateAttempted = $false
