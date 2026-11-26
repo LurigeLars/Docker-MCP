@@ -425,8 +425,14 @@ switch ($Target) {
 
         $ComposeText = Get-Content -LiteralPath $ComposeSrc -Raw
         $ExpectedMcpImage = [regex]::Match($ComposeText,'(?m)^    image: (ghcr\.io/github/github-mcp-server:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64})\s*$').Groups[1].Value
-        $ExpectedGateway = [regex]::Match($ComposeText,'(?m)^    image: (node:[0-9]+\.[0-9]+\.[0-9]+-alpine)\s*$').Groups[1].Value
+        $ExpectedGateway = [regex]::Match($ComposeText,'(?m)^    image: (dockerlocal-gateway:node-[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+)\s*$').Groups[1].Value
         if (-not $ExpectedMcpImage -or -not $ExpectedGateway) { throw 'Reviewed GitHub runtime image pins invalid.' }
+        $Builder = Join-Path $SourceRoot 'build-gateway-runtime.ps1'
+        Require-File $Builder
+        & $Builder
+        if (-not $?) { throw 'Shared gateway security review failed.' }
+        $ReviewedGatewayId = [string](& docker image inspect --format '{{.Id}}' $ExpectedGateway)
+        if ($LASTEXITCODE -ne 0 -or $ReviewedGatewayId -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Reviewed shared gateway identity unavailable.' }
 
         $Backup = New-Backup 'github'
         $CopyNames = @('compose.yaml','github-mcp.ps1','public','scripts','local-mcp')
@@ -443,6 +449,19 @@ switch ($Target) {
             if (-not $?) { throw 'GitHub runtime deployment wrapper failed.' }
             Assert-RunningImage 'github-mcp-local-github-mcp-1' $ExpectedMcpImage
             Assert-RunningImage 'github-mcp-local-github-gateway-1' $ExpectedGateway
+            $StateRows = @(& docker container inspect --format '{{json .}}' github-mcp-local-github-gateway-1)
+            if ($LASTEXITCODE -ne 0 -or $StateRows.Count -ne 1) { throw 'GitHub gateway image state unavailable.' }
+            $State = $StateRows[0] | ConvertFrom-Json
+            $Manifest = $State.PSObject.Properties['ImageManifestDescriptor']
+            if ($null -ne $Manifest -and $null -ne $Manifest.Value) {
+                $Descriptor = $Manifest.Value
+                $Platform = "$($Descriptor.platform.os)/$($Descriptor.platform.architecture)"
+                $Variant = $Descriptor.platform.PSObject.Properties['variant']
+                if ($Variant -and $Variant.Value) { $Platform += "/$($Variant.Value)" }
+                if ($Platform -cnotmatch '^linux/[a-z0-9]+(/[a-z0-9]+)?$' -or
+                    [string]$Descriptor.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+                    [string](& docker image inspect --platform $Platform --format '{{.Id}}' $ReviewedGatewayId) -cne [string]$Descriptor.digest -or $LASTEXITCODE -ne 0) { throw 'GitHub gateway platform image mismatch.' }
+            } elseif ([string]$State.Image -cne $ReviewedGatewayId) { throw 'GitHub gateway image identity mismatch.' }
             # Docker's health status may remain "starting" briefly even after
             # the wrapper's direct /healthz probe has passed. Poll the real
             # container health instead of prematurely invoking rollback.
