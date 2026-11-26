@@ -496,9 +496,34 @@ def compose_status(project: str | None = None) -> list[dict[str, Any]]:
     return list(grouped.values())
 
 
+def _image_identity_match(row, inspect, image):
+    """True/False only for comparable identities; None when evidence is incomplete."""
+    image_id = str(image.get("Id") or "")
+    running_id = str(inspect.get("Image") or row.get("ImageID") or "")
+    manifest = (inspect.get("ImageManifestDescriptor") or row.get("ImageManifestDescriptor") or {}).get("digest")
+    manifests = image.get("Manifests") or []
+    if not image_id:
+        return None
+    if manifest:
+        if manifest in {image_id, (image.get("Descriptor") or {}).get("digest")}:
+            return True
+        if any(m.get("ID") == manifest for m in manifests):
+            return True
+        # A config ID is not a manifest ID; a missing manifest list is not proof of drift.
+        return False if manifests else None
+    if running_id and running_id == image_id:
+        return True
+    container_id = row.get("Id")
+    if container_id and any(container_id in ((m.get("ImageData") or {}).get("Containers") or []) for m in manifests):
+        return True
+    if manifests or not running_id:
+        return None
+    return False
+
+
 def _audit_inventory():
     rows = _json("GET", "/containers/json", query={"all": "1"})
-    images = _json("GET", "/images/json", query={"all": "0"})
+    images = _json("GET", "/images/json", query={"all": "0", "manifests": "1"})
     if not isinstance(rows, list) or not isinstance(images, list):
         raise RuntimeError("Docker inventory response is unavailable")
     inspections = {}
@@ -565,21 +590,22 @@ def _deployment_audit(rows, images, inspections):
             "errors": [{"error": type(exc).__name__}],
         }
 
-    image_ids_by_ref: dict[str, str] = {}
+    images_by_ref: dict[str, dict] = {}
     for image in images:
         image_id = str(image.get("Id") or "")
         if not image_id:
             continue
         for ref in image.get("RepoTags") or []:
-            image_ids_by_ref[str(ref)] = image_id
+            images_by_ref[str(ref)] = image
         for ref in image.get("RepoDigests") or []:
-            image_ids_by_ref[str(ref)] = image_id
+            images_by_ref[str(ref)] = image
 
     projects: dict[str, dict[str, Any]] = {}
     unmanaged: list[dict[str, Any]] = []
     stopped_or_unhealthy: list[dict[str, Any]] = []
     retained_legacy: list[dict[str, Any]] = []
     image_drift: list[dict[str, Any]] = []
+    image_identity_unknown: list[dict[str, Any]] = []
     compose_config_drift: list[dict[str, Any]] = []
     custom_running_images: dict[str, dict[str, str]] = {}
     for row in rows:
@@ -703,18 +729,19 @@ def _deployment_audit(rows, images, inspections):
 
         normalized = _normalize_image_ref(configured_image)
         refs = [configured_image, normalized]
-        current_id = next((image_ids_by_ref.get(ref) for ref in refs if ref and image_ids_by_ref.get(ref)), None)
-        if current_id and running_image_id and current_id != running_image_id:
-            image_drift.append(
-                {
+        current = next((images_by_ref[ref] for ref in refs if ref in images_by_ref), None)
+        if current:
+            match = _image_identity_match(row, inspect, current)
+            if match is not True:
+                findings = image_drift if match is False else image_identity_unknown
+                findings.append({
                     "name": name,
                     "project": project,
                     "service": service,
                     "configured_image": configured_image,
                     "running_image_id": running_image_id,
-                    "current_local_image_id": current_id,
-                }
-            )
+                    "current_local_image_id": current["Id"],
+                })
 
     # OCI image metadata is a recorded build claim, not a cryptographic
     # attestation. Keep unlabeled images explicitly UNKNOWN; never guess a SHA
@@ -756,6 +783,7 @@ def _deployment_audit(rows, images, inspections):
         "stopped_or_unhealthy": stopped_or_unhealthy,
         "retained_legacy": retained_legacy,
         "local_image_drift": image_drift,
+        "local_image_identity_unknown": image_identity_unknown,
         "image_provenance": image_provenance,
         "compose_desired_state": {
             "status": desired_state.get("status"),
@@ -774,6 +802,7 @@ def _deployment_audit(rows, images, inspections):
             "stopped_or_unhealthy": len(stopped_or_unhealthy),
             "retained_legacy": len(retained_legacy),
             "local_image_drift": len(image_drift),
+            "local_image_identity_unknown": len(image_identity_unknown),
             "local_images_without_recorded_revision": sum(
                 item["status"] != "recorded" for item in image_provenance
             ),
@@ -799,12 +828,17 @@ def image_usage_audit():
 
 def _image_usage_audit(rows, images, inspections):
     in_use_by: dict[str, list[str]] = {}
-    for row in rows:
-        container_id = str(row.get("Id") or "")
-        name = ((row.get("Names") or [""])[0] or "").lstrip("/")
-        running_id = str(inspections.get(container_id, {}).get("Image") or row.get("ImageID") or "")
-        if running_id:
-            in_use_by.setdefault(running_id, []).append(name)
+    unknown_by: dict[str, list[str]] = {}
+    for image in images:
+        image_id = str(image.get("Id") or "")
+        for row in rows:
+            container_id = str(row.get("Id") or "")
+            name = ((row.get("Names") or [""])[0] or "").lstrip("/")
+            match = _image_identity_match(row, inspections.get(container_id, {}), image)
+            if match is True:
+                in_use_by.setdefault(image_id, []).append(name)
+            elif match is None:
+                unknown_by.setdefault(image_id, []).append(name)
 
     used_repos: set[str] = set()
     for image in images:
@@ -816,7 +850,7 @@ def _image_usage_audit(rows, images, inspections):
 
     items: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
-    protected_words = re.compile(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep)(?:$|[-_.])")
+    protected_words = re.compile(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep|rollback)(?:$|[-_.])")
 
     for image in images:
         image_id = str(image.get("Id") or "")
@@ -824,7 +858,8 @@ def _image_usage_audit(rows, images, inspections):
         used_by = in_use_by.get(image_id, [])
         repos = {_repo_from_tag(tag) for tag in tags}
         protected = any(protected_words.search(tag) for tag in tags)
-        superseded_hint = bool(tags) and not used_by and bool(repos) and all(repo in used_repos for repo in repos)
+        unknown = unknown_by.get(image_id, [])
+        superseded_hint = bool(tags) and not used_by and not unknown and bool(repos) and all(repo in used_repos for repo in repos)
         item = {
             "id": image_id,
             "tags": tags,
@@ -832,6 +867,7 @@ def _image_usage_audit(rows, images, inspections):
             "created": image.get("Created"),
             "size": _bytes_human(float(image.get("Size") or 0)),
             "in_use_by": used_by,
+            "usage_unknown_by": unknown,
             "protected_name": protected,
             "superseded_repository_hint": superseded_hint,
         }
@@ -850,7 +886,8 @@ def _image_usage_audit(rows, images, inspections):
         "summary": {
             "images": len(items),
             "in_use": sum(1 for item in items if item["in_use_by"]),
-            "unused": sum(1 for item in items if not item["in_use_by"]),
+            "unused": sum(1 for item in items if not item["in_use_by"] and not item["usage_unknown_by"]),
+            "unknown": sum(1 for item in items if not item["in_use_by"] and item["usage_unknown_by"]),
             "safe_superseded_candidates": 0,
             "repository_superseded_hints": len(candidates),
         },
