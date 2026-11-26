@@ -1,11 +1,12 @@
 //! DockerLocal MCP in Rust, ported tool by tool from server.py with parity checks.
-//! Batches 1-3: read-only Docker API tools, host runner/control-file tools and audits.
+//! Batches 1-4: Docker API reads, host runner/control-file tools, audits and proxy writes.
 //! Not wired into any deployment yet.
 
 mod audit;
 mod control;
 mod docker;
 mod text;
+mod writes;
 
 use rmcp::{
     ServiceExt,
@@ -17,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use docker::{
-    COMPOSE_PROJECT, CONTAINER_REF, IMAGE_REF, api_json, api_raw, blocking, get, num, obj, quote,
+    COMPOSE_PROJECT, CONTAINER_REF, IMAGE_REF, api_json, api_post_json, api_post_raw, api_raw, blocking, get, num, obj, quote,
     round2, valid,
 };
 use text::{bytes_human, decode_logs, redact};
@@ -126,6 +127,52 @@ const DEV_MAINTENANCE_FIELDS: &[&str] = &[
 struct DeploymentAuditArgs {
     #[serde(default)]
     include_image_usage: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct CleanupArgs {
+    image_refs: Vec<String>,
+}
+#[derive(Deserialize, serde::Serialize, schemars::JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+enum RedeployOperation {
+    RedeployCurrent,
+    #[default]
+    RebuildAndRedeploy,
+    SyncUpstream,
+    BuildOnly,
+    DeployStaged,
+    UpdateStateless,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RedeployArgs {
+    project: String,
+    #[serde(default)]
+    services: Option<Vec<String>>,
+    #[serde(default)]
+    operation: RedeployOperation,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct StaleArgs {
+    #[serde(default = "default_stale_minutes")]
+    min_age_minutes: i64,
+}
+fn default_stale_minutes() -> i64 {
+    15
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RestartArgs {
+    container: String,
+    #[serde(default = "default_restart_timeout")]
+    timeout_seconds: i64,
+}
+fn default_restart_timeout() -> i64 {
+    10
+}
+
+/// Python `_json(...) or {}`.
+fn or_empty(v: Value) -> Value {
+    if control::py_truthy(&v) { v } else { json!({}) }
 }
 
 #[derive(Clone)]
@@ -397,6 +444,64 @@ be an active Dockerfile build-stage/base dependency.",
     async fn image_usage_audit(&self) -> Result<CallToolResult, String> {
         let text = blocking(|| Ok(audit::image_usage_audit(&audit::inventory()?).to_string())).await?;
         Ok(text_result(text))
+    }
+
+    #[tool(description = "Remove only explicitly requested local image refs that no container uses.",
+           annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
+    async fn cleanup_superseded_images(&self, Parameters(a): Parameters<CleanupArgs>) -> Result<CallToolResult, String> {
+        let target = writes::cleanup_target(&a.image_refs)?;
+        let raw = blocking(move || api_post_json(&target, 180)).await?;
+        Ok(text_result(or_empty(raw).to_string()))
+    }
+
+    #[tool(description = "Queue a reviewed allowlisted project action; no paths, commands or image refs accepted.",
+           annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
+    async fn compose_redeploy(&self, Parameters(a): Parameters<RedeployArgs>) -> Result<CallToolResult, String> {
+        let operation = serde_json::to_value(&a.operation).map_err(|e| e.to_string())?;
+        let operation = operation.as_str().unwrap_or_default().to_string();
+        let Value::Object(job) = writes::redeploy_job(&a.project, &a.services.unwrap_or_default(), &operation)? else {
+            unreachable!()
+        };
+        let job_id = blocking(move || control::write_job(&control::control_dir(), job)).await?;
+        Ok(text_result(json!({"job_id": job_id, "status": "queued", "operation": operation}).to_string()))
+    }
+
+    #[tool(description = "Remove only stale, unmanaged MCP discovery-probe containers proven by their probe log signature.",
+           annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
+    async fn cleanup_stale_mcp_containers(&self, Parameters(a): Parameters<StaleArgs>) -> Result<CallToolResult, String> {
+        let (target, minutes) = writes::stale_target(a.min_age_minutes);
+        let mut raw = or_empty(blocking(move || api_post_json(&target, 90)).await?);
+        let map = raw.as_object_mut().ok_or("Unexpected cleanup response")?;
+        map.insert("min_age_minutes".into(), json!(minutes));
+        Ok(text_result(raw.to_string()))
+    }
+
+    #[tool(description = "Pull a public image. Does not recreate running containers.",
+           annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
+    async fn image_pull(&self, Parameters(a): Parameters<ImageArg>) -> Result<Json<Value>, String> {
+        let image = valid(&IMAGE_REF, a.image, "Invalid image reference")?;
+        let target = writes::pull_target(&image);
+        let body = blocking(move || api_post_raw(&target, 180)).await?;
+        Ok(Json(json!({"image": image, "status": writes::pull_messages(&body)?})))
+    }
+
+    #[tool(description = "Restart an existing container without changing its image or configuration.",
+           annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
+    async fn container_restart(&self, Parameters(a): Parameters<RestartArgs>) -> Result<Json<Value>, String> {
+        let c = valid(&CONTAINER_REF, a.container, "Invalid container name or ID")?;
+        let (target, _) = writes::restart_target(&c, a.timeout_seconds);
+        blocking(move || api_post_raw(&target, 90)).await?;
+        Ok(Json(json!({"container": c, "restarted": true})))
+    }
+
+    #[tool(description = "Delete only dangling unused image layers; tagged images are not targeted.",
+           annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false))]
+    async fn image_prune_dangling(&self) -> Result<Json<Value>, String> {
+        let raw = or_empty(blocking(|| api_post_json(&writes::prune_target(), 90)).await?);
+        Ok(Json(json!({
+            "images_deleted": if control::py_truthy(get(&raw, "ImagesDeleted")) { get(&raw, "ImagesDeleted").clone() } else { json!([]) },
+            "space_reclaimed": bytes_human(num(get(&raw, "SpaceReclaimed"))),
+        })))
     }
 }
 

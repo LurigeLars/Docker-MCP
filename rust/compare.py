@@ -19,7 +19,7 @@ NETWORK = "dockerlocal_default"
 API = "http://dockerlocal-socket-proxy:2375"
 SERVERS = {
     "python": "dockerlocal-mcp:local",
-    "rust": "dockerlocal-rs:batch3",
+    "rust": "dockerlocal-rs:batch4",
 }
 CALLS = [
     ("containers_list", {"include_stopped": True}),
@@ -53,6 +53,18 @@ CALLS = [
     ("mcp_deployment_audit", {}),
     ("mcp_deployment_audit", {"include_image_usage": True}),
     ("image_usage_audit", {}),
+    # Batch 4 write tools: only inputs rejected before any API call or job write, plus one
+    # harmless re-pull of a tag already present locally. No restart, prune, cleanup or redeploy runs.
+    ("cleanup_superseded_images", {"image_refs": []}),
+    ("cleanup_superseded_images", {"image_refs": ["host:5000/app"]}),
+    ("cleanup_superseded_images", {"image_refs": ["../x:1"]}),
+    ("compose_redeploy", {"project": "bad name"}),
+    ("compose_redeploy", {"project": "firecrawl", "services": ["redis"], "operation": "update_stateless"}),
+    ("compose_redeploy", {"project": "x", "services": ["svc"], "operation": "build_only"}),
+    ("compose_redeploy", {"project": "x", "operation": "rm -rf"}),
+    ("container_restart", {"container": "../x"}),
+    ("image_pull", {"image": "-bad"}),
+    ("image_pull", {"image": "node:26.13.1-alpine"}),
 ]
 # Fields that legitimately change between two reads of the same object.
 VOLATILE = {"cpu_percent", "memory", "memory_percent", "network_rx", "network_tx", "pids",
@@ -160,6 +172,40 @@ def text_shape(msg: dict) -> str:
         return "text"
 
 
+def definition(tool: dict) -> dict:
+    """What a client relies on: annotations and arguments (names, required, defaults, enums)."""
+    schema = tool.get("inputSchema") or {}
+    props = {}
+    for name, prop in (schema.get("properties") or {}).items():
+        kinds = prop.get("anyOf") or [prop]
+        enum = next((k.get("enum") for k in kinds if k.get("enum")), None)
+        if enum is None and "$ref" in json.dumps(prop):
+            ref = json.dumps(prop).split('"$ref": "#/$defs/')[1].split('"')[0]
+            enum = (schema.get("$defs") or {}).get(ref, {}).get("enum")
+        props[name] = {"default": prop.get("default"), "enum": sorted(enum) if enum else None}
+    ann = tool.get("annotations") or {}
+    return {
+        "description": (tool.get("description") or "").strip(),
+        "annotations": {k: ann.get(k) for k in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")},
+        "required": sorted(schema.get("required") or []),
+        "properties": props,
+    }
+
+
+def compare_definitions(python_tools: list, rust_tools: list) -> dict:
+    py = {t["name"]: definition(t) for t in python_tools}
+    diffs = {}
+    for tool in rust_tools:
+        mine, theirs = definition(tool), py.get(tool["name"])
+        if theirs is None:
+            diffs[tool["name"]] = "missing in python"
+            continue
+        bad = [k for k in mine if mine[k] != theirs[k]]
+        if bad:
+            diffs[tool["name"]] = {k: {"python": theirs[k], "rust": mine[k]} for k in bad}
+    return {"compared": len(rust_tools), "mismatches": diffs}
+
+
 def main() -> None:
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 5
     servers = {kind: Server(kind, image) for kind, image in SERVERS.items()}
@@ -202,6 +248,7 @@ def main() -> None:
             }
         report["parity"] = {"paired_calls": compared, "tools_with_any_mismatch": sorted(mismatches),
                             "transient_then_equal": sorted(transient)}
+        report["definitions"] = compare_definitions(tools["python"], tools["rust"])
         print(json.dumps(report, indent=2))
     finally:
         for server in servers.values():

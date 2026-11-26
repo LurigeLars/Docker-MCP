@@ -54,7 +54,7 @@ fn str_field<'a>(map: &'a Map<String, Value>, key: &str) -> &'a str {
 }
 
 /// Python str.splitlines() boundaries (not just \n).
-fn py_splitlines(text: &str) -> Vec<&str> {
+pub fn py_splitlines(text: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0;
     let mut chars = text.char_indices().peekable();
