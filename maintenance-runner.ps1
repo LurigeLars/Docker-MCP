@@ -402,10 +402,11 @@ function ConvertFrom-ScoutGitLabReport {
         throw "Docker Scout returned invalid GitLab JSON."
     }
 
-    $Vulnerabilities = @()
-    if ($null -ne $Report.vulnerabilities) {
-        $Vulnerabilities = @($Report.vulnerabilities)
+    if ($null -eq $Report -or $null -eq $Report.PSObject.Properties['vulnerabilities'] -or
+        $Report.vulnerabilities -isnot [array]) {
+        throw 'Docker Scout report has no explicit vulnerability array.'
     }
+    $Vulnerabilities = @($Report.vulnerabilities)
 
     $Counts = [ordered]@{}
     $UniqueCves = [ordered]@{}
@@ -1373,6 +1374,79 @@ function Get-ComposeDesiredState {
     return @{ projects = $Desired; errors = $Errors }
 }
 
+# Fresh host-side scan only: never trust a caller-provided digest or a writable
+# control-directory receipt as deployment authorization.
+function Get-ReviewedRuntimeScan {
+    param([string]$ImageId)
+    if ($ImageId -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Invalid immutable image identity.' }
+    $ScanId = [guid]::NewGuid().ToString('N')
+    $Scan = Invoke-ScoutFullScan -JobId $ScanId -Job ([pscustomobject]@{
+        job_id=$ScanId; created_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        action='scout_full_scan'; image=$ImageId; severity=@('critical','high')
+        only_fixed=$true; cisa_kev=$false
+    })
+    if ($Scan.status -cne 'succeeded' -or $Scan.scan_complete -ne $true -or
+        $Scan.cleanup_complete -ne $true -or $Scan.image_id -cne $ImageId -or
+        $Scan.only_fixed -ne $true -or $Scan.cisa_kev -ne $false -or
+        @($Scan.severity).Count -ne 2 -or 'critical' -notin @($Scan.severity) -or
+        'high' -notin @($Scan.severity) -or $null -eq $Scan.vulnerability_counts -or
+        $null -eq $Scan.cve_ids) {
+        throw 'Fresh immutable image security scan incomplete; deployment blocked.'
+    }
+    foreach ($Level in @('critical','high','medium','low','unspecified')) {
+        $Count = $Scan.vulnerability_counts[$Level]
+        $Ids = @($Scan.cve_ids[$Level])
+        if ($null -eq $Count -or $Count -isnot [ValueType] -or $Count -lt 0 -or
+            ($Level -in @('critical','high') -and ($Count -ne $Ids.Count -or
+            @($Ids | Where-Object { $_ -cnotmatch '^CVE-[0-9]{4}-[0-9]{4,}$' }).Count -gt 0)) -or
+            ($Level -notin @('critical','high') -and $Count -ne 0)) {
+            throw 'Security scan counts or CVE identities are not comparable; deployment blocked.'
+        }
+    }
+    return $Scan
+}
+
+function Assert-ReviewedRuntimeSecurity {
+    param($Candidate,$Baseline)
+    if ($Candidate.vulnerability_counts.critical -ne 0) { throw 'Candidate contains fixable Critical findings.' }
+    if ($Candidate.vulnerability_counts.high -eq 0) { return }
+    if ($null -eq $Baseline -or $Candidate.vulnerability_counts.high -gt $Baseline.vulnerability_counts.high -or
+        @($Candidate.cve_ids.high | Where-Object { $_ -cnotin @($Baseline.cve_ids.high) }).Count -gt 0) {
+        throw 'Candidate introduces or increases fixable High findings.'
+    }
+}
+
+function Invoke-ReviewedRuntimeRefresh {
+    param([string]$JobId,[string]$Project,[string]$Script,[string]$WorkingDirectory,[string]$Target)
+    # The caller selects only an allowlisted alias. Stage/apply parameters and
+    # digests originate here in the trusted host worker, not in MCP arguments.
+    $Stage = Invoke-ScriptHandler -JobId $JobId -Project $Project -Script $Script -WorkingDirectory $WorkingDirectory -Arguments @('-Target',$Target,'-Mode','Stage')
+    if ($Stage.exit_code -ne 0) { return @{exit_code=$Stage.exit_code;output='Reviewed stage failed; no promotion attempted.'} }
+    $Receipts = [regex]::Matches([string]$Stage.output,'(?m)^REVIEWED_RUNTIME_STAGE baseline=(sha256:[0-9a-f]{64}) candidate=(sha256:[0-9a-f]{64}) revision=([0-9a-f]{40})\r?$')
+    if ($Receipts.Count -ne 1) { throw 'Missing unique staged image receipt.' }
+    $Old = $Receipts[0].Groups[1].Value
+    $New = $Receipts[0].Groups[2].Value
+    $Revision = $Receipts[0].Groups[3].Value
+    if ($Old -ceq $New) { return @{exit_code=0;output='REVIEWED_RUNTIME_ALREADY_CURRENT'} }
+    $Review = 'Proxy VEX-aware Critical/High gate passed.'
+    if ($Target -cne 'Proxy') {
+        $Candidate = Get-ReviewedRuntimeScan -ImageId $New
+        $Baseline = $null
+        if ($Candidate.vulnerability_counts.high -gt 0 -and $Candidate.vulnerability_counts.critical -eq 0) {
+            $Baseline = Get-ReviewedRuntimeScan -ImageId $Old
+        }
+        Assert-ReviewedRuntimeSecurity -Candidate $Candidate -Baseline $Baseline
+        # Existing High findings remain visible; this is a non-regression
+        # decision, never a VEX waiver or a claim that the image is clean.
+        $Review = "Critical=0 High=$($Candidate.vulnerability_counts.high) remaining=$(@($Candidate.cve_ids.high) -join ',')"
+    }
+    $Apply = Invoke-ScriptHandler -JobId $JobId -Project $Project -Script $Script -WorkingDirectory $WorkingDirectory -Arguments @('-Target',$Target,'-Mode','Apply','-ReviewedDigest',$New,'-BaselineDigest',$Old,'-Revision',$Revision)
+    if ($Apply.exit_code -ne 0 -or [string]$Apply.output -notmatch '(?m)^REVIEWED_RUNTIME_APPLY_OK\r?$') {
+        return @{exit_code=1;output="$Review; scoped apply failed; inspect runtime before retry."}
+    }
+    return @{exit_code=0;output="REVIEWED_RUNTIME_APPLY_OK image=$New $Review"}
+}
+
 function Run-ProjectRedeploy {
     param($Job)
 
@@ -1431,6 +1505,24 @@ function Run-ProjectRedeploy {
         }
         if ($Operation -eq "update_stateless") {
             $HandlerArgs += @("-Service", [string]$Requested[0])
+        }
+        $ReviewedRuntimeTargets = @{
+            'dockerlocal-backend-refresh'='Backend'
+            'dockerlocal-proxy-refresh'='Proxy'
+            'firecrawl-camofox-refresh'='Camofox'
+        }
+        if ($ReviewedRuntimeTargets.ContainsKey($Project)) {
+            $Target = $ReviewedRuntimeTargets[$Project]
+            if ($Operation -cne 'redeploy_current' -or $HandlerArgs.Count -ne 2 -or
+                $HandlerArgs[0] -cne '-Target' -or $HandlerArgs[1] -cne $Target -or
+                [IO.Path]::GetFileName($Script) -cne 'maintain-reviewed-runtime.ps1') {
+                throw 'Unexpected fixed runtime maintenance binding.'
+            }
+            $HandlerRun = Invoke-ReviewedRuntimeRefresh -JobId ([string]$Job.job_id) -Project $Project -Script $Script -WorkingDirectory $WorkingDir -Target $Target
+            return @{
+                exit_code=$HandlerRun.exit_code; output=$HandlerRun.output; project=$Project
+                services=@($Cfg.Services); operation=$Operation; execution_mode='script'
+            }
         }
         # Builds and two Scout gates can exceed the generic 15-minute handler limit.
         # The bound remains finite and applies to only one selected service.
