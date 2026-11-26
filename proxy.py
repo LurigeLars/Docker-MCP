@@ -281,30 +281,50 @@ def repo_from_tag(tag: str) -> str:
     return tag[:colon] if colon > slash else tag
 
 
+def _image_identity_match(row, inspect, image):
+    """True/False only for comparable identities; None when evidence is incomplete."""
+    image_id = str(image.get("Id") or "")
+    running_id = str(inspect.get("Image") or row.get("ImageID") or "")
+    manifest = (inspect.get("ImageManifestDescriptor") or row.get("ImageManifestDescriptor") or {}).get("digest")
+    manifests = image.get("Manifests") or []
+    if not image_id:
+        return None
+    if manifest:
+        if manifest in {image_id, (image.get("Descriptor") or {}).get("digest")}:
+            return True
+        if any(m.get("ID") == manifest for m in manifests):
+            return True
+        # A config ID is not a manifest ID; a missing manifest list is not proof of drift.
+        return False if manifests else None
+    if running_id and running_id == image_id:
+        return True
+    container_id = row.get("Id")
+    if container_id and any(container_id in ((m.get("ImageData") or {}).get("Containers") or []) for m in manifests):
+        return True
+    if manifests or not running_id:
+        return None
+    return False
+
+
 def cleanup_superseded_images(refs: list[str]) -> dict:
     """Delete only explicitly requested local image refs that are unused by every container."""
     rows = engine_json("GET", "/containers/json?all=1") or []
-    images = engine_json("GET", "/images/json?all=0") or []
+    images = engine_json("GET", "/images/json?all=0&manifests=1") or []
 
-    used_image_ids = set()
-    in_use_by = {}
+    inspected_rows = []
     for row in rows:
         container_id = str(row.get("Id") or "")
-        name = ((row.get("Names") or [""])[0] or "").lstrip("/")
-        image_id = str(row.get("ImageID") or "")
+        inspect = {}
         if container_id:
             try:
                 inspect = engine_json(
                     "GET",
                     f"/containers/{urllib.parse.quote(container_id, safe='')}/json",
                 ) or {}
-                image_id = str(inspect.get("Image") or image_id)
             except Exception:
-                # Best-effort inspect: fall back to ImageID from the container list.
+                # Container-list descriptors are a fallback; unknown use blocks deletion.
                 pass
-        if image_id:
-            used_image_ids.add(image_id)
-            in_use_by.setdefault(image_id, []).append(name)
+        inspected_rows.append((row, inspect))
 
     by_ref: dict[str, list[dict]] = {}
     for image in images:
@@ -316,7 +336,7 @@ def cleanup_superseded_images(refs: list[str]) -> dict:
         for digest in image.get("RepoDigests") or []:
             by_ref.setdefault(str(digest), []).append(image)
 
-    protected_words = re.compile(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep)(?:$|[-_.])")
+    protected_words = re.compile(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep|rollback)(?:$|[-_.])")
     candidates = []
     skipped = []
     removed = []
@@ -339,16 +359,29 @@ def cleanup_superseded_images(refs: list[str]) -> dict:
         image_id, image = next(iter(unique.items()))
         tags = [str(x) for x in (image.get("RepoTags") or [])]
 
-        if image_id in used_image_ids:
+        in_use_by = []
+        unknown_by = []
+        for row, inspect in inspected_rows:
+            name = ((row.get("Names") or [""])[0] or "").lstrip("/")
+            match = _image_identity_match(row, inspect, image)
+            if match is True:
+                in_use_by.append(name)
+            elif match is None:
+                unknown_by.append(name)
+        if in_use_by:
             skipped.append(
                 {
                     "ref": ref,
                     "id": image_id[:19],
                     "tags": tags,
                     "reason": "in_use",
-                    "in_use_by": in_use_by.get(image_id, []),
+                    "in_use_by": in_use_by,
                 }
             )
+            continue
+        if unknown_by:
+            skipped.append({"ref": ref, "id": image_id[:19], "reason": "image_usage_unknown",
+                            "usage_unknown_by": unknown_by})
             continue
         if any(protected_words.search(tag) for tag in tags):
             skipped.append(
@@ -462,7 +495,8 @@ def allowed(method: str, target: str) -> bool:
         )
 
     if method == "GET" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/json$", path):
-        return set(query) == {"all"} and _single(query, "all") == "0"
+        return (_single(query, "all") == "0" and (set(query) == {"all"} or
+                (set(query) == {"all", "manifests"} and _single(query, "manifests") == "1")))
 
     if method == "GET" and re.fullmatch(r"^/(?:v\d+\.\d+/)?images/get$", path):
         return set(query) == {"names"} and IMMUTABLE_IMAGE_ID.fullmatch(
