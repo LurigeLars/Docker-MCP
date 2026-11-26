@@ -1,0 +1,101 @@
+{
+  "python": {
+    "image_mb": 608.7,
+    "startup_to_initialize_ms": 1602,
+    "tools_listed": 31,
+    "idle": {
+      "mem": "76.9MiB",
+      "cpu": "0.00%",
+      "anon_mib": 69.24609375,
+      "id": "a591990509f6"
+    },
+    "after_calls": {
+      "mem": "93.84MiB",
+      "cpu": "0.00%",
+      "anon_mib": 83.9453125,
+      "id": "a591990509f6"
+    },
+    "median_ms": {
+      "containers_list:{\"include_stopped\": true}": 120.8,
+      "container_inspect:{\"container\": \"dockerlocal-socket-proxy\"}": 10.1,
+      "container_stats:{\"container\": \"dockerlocal-socket-proxy\"}": 1013.9,
+      "images_list:{}": 483.0,
+      "image_inspect:{\"image\": \"dockerlocal-socket-proxy:local\"}": 30.0,
+      "container_inspect:{\"container\": \"../not-allowed\"}": 41.9,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 50}": 8.6,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 5000}": 7.8,
+      "compose_status:{}": 111.2,
+      "compose_status:{\"project\": \"dockerlocal\"}": 104.6,
+      "compose_status:{\"project\": \"bad name\"}": 34.6,
+      "repo_status:{\"repo\": \"docker-mcp\"}": 1158.1,
+      "repo_status:{\"repo\": \"../x\"}": 96.6,
+      "repo_status:{\"repo\": \"no-such-repo\"}": 1975.0,
+      "scheduled_task_status:{\"task\": \"desktop-tradingview-http\"}": 2694.0,
+      "port_registry_status:{}": 8149.7,
+      "host_disk_usage:{}": 2043.8,
+      "maintenance_job_status:{\"job_id\": \"9fe8d4e9c0af471fbd1b78501bebd78c\"}": 6.1,
+      "maintenance_job_status:{\"job_id\": \"00000000000000000000000000000000\"}": 4.7,
+      "maintenance_job_status:{\"job_id\": \"../../etc\"}": 73.0,
+      "runtime_supervisor_status:{}": 16.8,
+      "runtime_supervisor_status:{\"log_tail\": 5}": 12.7,
+      "maintenance_runner_status:{}": 12.7,
+      "maintenance_runner_status:{\"include_host_checks\": true}": 9758.1,
+      "mcp_deployment_audit:{}": 7883.6,
+      "mcp_deployment_audit:{\"include_image_usage\": true}": 7222.8,
+      "image_usage_audit:{}": 793.7
+    }
+  },
+  "rust": {
+    "image_mb": 4.8,
+    "startup_to_initialize_ms": 385,
+    "tools_listed": 18,
+    "idle": {
+      "mem": "1.086MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "b67635539dce"
+    },
+    "after_calls": {
+      "mem": "3.145MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "b67635539dce"
+    },
+    "median_ms": {
+      "containers_list:{\"include_stopped\": true}": 106.7,
+      "container_inspect:{\"container\": \"dockerlocal-socket-proxy\"}": 6.5,
+      "container_stats:{\"container\": \"dockerlocal-socket-proxy\"}": 2003.9,
+      "images_list:{}": 460.7,
+      "image_inspect:{\"image\": \"dockerlocal-socket-proxy:local\"}": 31.4,
+      "container_inspect:{\"container\": \"../not-allowed\"}": 1.4,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 50}": 6.7,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 5000}": 5.5,
+      "compose_status:{}": 100.5,
+      "compose_status:{\"project\": \"dockerlocal\"}": 90.9,
+      "compose_status:{\"project\": \"bad name\"}": 1.1,
+      "repo_status:{\"repo\": \"docker-mcp\"}": 2382.2,
+      "repo_status:{\"repo\": \"../x\"}": 1.4,
+      "repo_status:{\"repo\": \"no-such-repo\"}": 2068.3,
+      "scheduled_task_status:{\"task\": \"desktop-tradingview-http\"}": 2673.2,
+      "port_registry_status:{}": 7763.1,
+      "host_disk_usage:{}": 2066.5,
+      "maintenance_job_status:{\"job_id\": \"9fe8d4e9c0af471fbd1b78501bebd78c\"}": 5.0,
+      "maintenance_job_status:{\"job_id\": \"00000000000000000000000000000000\"}": 3.1,
+      "maintenance_job_status:{\"job_id\": \"../../etc\"}": 1.4,
+      "runtime_supervisor_status:{}": 9.9,
+      "runtime_supervisor_status:{\"log_tail\": 5}": 12.9,
+      "maintenance_runner_status:{}": 3.7,
+      "maintenance_runner_status:{\"include_host_checks\": true}": 10180.4,
+      "mcp_deployment_audit:{}": 7277.9,
+      "mcp_deployment_audit:{\"include_image_usage\": true}": 6403.7,
+      "image_usage_audit:{}": 829.4
+    }
+  },
+  "parity": {
+    "paired_calls": 81,
+    "tools_with_any_mismatch": [],
+    "transient_then_equal": [
+      "mcp_deployment_audit:{\"include_image_usage\": true}"
+    ]
+  }
+}

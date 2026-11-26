@@ -32,7 +32,7 @@ fn now_unix() -> i64 {
 }
 
 /// Python `int(x or 0)` for the timestamp fields the runner writes.
-fn py_int_or_zero(v: Option<&Value>) -> Result<i64, String> {
+pub fn py_int_or_zero(v: Option<&Value>) -> Result<i64, String> {
     match v {
         None | Some(Value::Null) => Ok(0),
         Some(Value::Bool(b)) => Ok(*b as i64),
@@ -126,7 +126,7 @@ pub fn read_job(dir: &Path, job_id: &str) -> Result<Value, String> {
     Ok(json!({ "job_id": job_id, "status": status }))
 }
 
-fn runner_request(dir: &Path, payload: Map<String, Value>, timeout: Duration) -> Result<Value, String> {
+pub fn runner_request(dir: &Path, payload: Map<String, Value>, timeout: Duration) -> Result<Value, String> {
     let job_id = write_job(dir, payload)?;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -172,7 +172,7 @@ fn compact(raw: &Value, fields: &[&str]) -> Value {
     Value::Object(out)
 }
 
-fn py_truthy(v: &Value) -> bool {
+pub fn py_truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -184,7 +184,7 @@ fn py_truthy(v: &Value) -> bool {
 }
 
 /// Runner errors are strings; any other type is rendered as JSON (Python would use repr).
-fn py_str(v: &Value) -> String {
+pub fn py_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
