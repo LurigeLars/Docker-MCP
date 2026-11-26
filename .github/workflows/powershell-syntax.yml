@@ -99,6 +99,10 @@ jobs:
         shell: pwsh
         run: ./tests/reviewed-runtime-maintenance.test.ps1
 
+      - name: Verify reviewed gateway image build
+        shell: pwsh
+        run: ./tests/gateway-runtime-build.test.ps1
+
       - name: Verify maintenance runner stays hidden
         shell: pwsh
         run: |
