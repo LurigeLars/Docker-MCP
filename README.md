@@ -217,6 +217,7 @@ Read-only inspection:
 - `image_inspect`
 - `mcp_deployment_audit` — checks deployment health, local image drift, runtime source drift and desired Compose hashes/images for allowlisted projects. Pass `include_image_usage=true` to also get image use and repository digests from the same inventory, plus any incomplete container inspections. For a pre/post maintenance sequence, call it once before and once after the cleanup steps. Each call takes a fresh inventory.
 - `image_usage_audit` — reports container usage plus repository-level superseded hints; hints are not deletion-safe because unused images can still be Dockerfile build-stage inputs
+- Image audits compare the actual platform manifest against the configured image's manifest list on the containerd store, with legacy image-ID comparison only when appropriate. `local_image_identity_unknown` and `usage_unknown_by` distinguish missing evidence from confirmed drift or unused images. Explicit cleanup also blocks unknown usage and protects rollback tags.
 - `maintenance_job_status`
 - `maintenance_runner_status`
 - `port_registry_status` — persistent host MCP port reservations plus listeners in the managed range that are not registered. `maintenance_runner_status(include_host_checks=true)` combines this with runner health and fixed-drive capacity, with separate results for disk and ports.
