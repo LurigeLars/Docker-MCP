@@ -1,0 +1,27 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/LurigeLars/Docker-MCP/security/vex/socket-proxy.openvex.json",
+  "author": "DockerLocal maintainers",
+  "timestamp": "2026-11-26T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-107891"
+      },
+      "products": [
+        {
+          "@id": "pkg:docker/dockerlocal-socket-proxy",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/alpine/musl@1.2.6-r3?os_name=alpine&os_version=3.24"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "Alpine v3.24 stable security data (https://secdb.alpinelinux.org/v3.24/main.json) and OSV (https://osv.dev/vulnerability/ALPINE-CVE-2026-107891) record the fix in 1.2.6-r3. Docker Scout incorrectly uses the edge r6 threshold (https://github.com/docker/scout-cli/issues/248). Applies only to this exact patched stable musl package in the DockerLocal socket proxy; other package versions and vulnerabilities are not exempted."
+    }
+  ]
+}

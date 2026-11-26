@@ -1,4 +1,4 @@
-FROM docker/scout-cli:1.29 AS scout
+FROM docker/scout-cli:1.30.0@sha256:01f7e63d8ee0668b2c19f09920d7e7eff8d3e507ca931df2b8c00ae19b71d588 AS scout
 
 FROM python:3.12.15-slim
 
@@ -10,7 +10,7 @@ LABEL org.opencontainers.image.source="https://github.com/LurigeLars/Docker-MCP"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && apt-get install -y --no-install-recommends --only-upgrade apt zlib1g \
+    && apt-get install -y --no-install-recommends --only-upgrade apt zlib1g libc6 libc-bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
