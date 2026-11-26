@@ -118,3 +118,12 @@ def test_playwright_host_allowlist_migration_is_six_exact_actions():
     assert "maintenance-projects.local.json" in PROMOTE
     assert "files = @()" in PROMOTE
     assert "FIRECRAWL_PLAYWRIGHT_ACTIONS_ENABLED" in PROMOTE
+
+
+def test_github_gateway_uses_exact_reviewed_shared_pin_and_identity():
+    assert "$ExpectedGateway -cne $SharedPin" in PROMOTE
+    assert "GitHub gateway must use the exact reviewed shared runtime pin." in PROMOTE
+    assert "Shared gateway security review failed." in PROMOTE
+    assert "Reviewed shared gateway changed before deployment." in PROMOTE
+    assert "GitHub gateway platform image mismatch." in PROMOTE
+    assert "GitHub gateway image identity mismatch." in PROMOTE
