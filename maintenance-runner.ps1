@@ -863,6 +863,14 @@ function Invoke-ScoutFullScan {
     }
 }
 
+# Extract the exact bounded stage receipt from stdout, independently of
+# diagnostic log truncation. Never use stderr or arbitrary log text as approval.
+function Get-ReviewedStageReceipt([AllowEmptyString()][string]$StdOut) {
+    $MatchesFound = [regex]::Matches($StdOut,'(?m)^REVIEWED_RUNTIME_STAGE baseline=(sha256:[0-9a-f]{64}) candidate=(sha256:[0-9a-f]{64}) revision=([0-9a-f]{40})\r?$')
+    if ($MatchesFound.Count -ne 1) { return $null }
+    return $MatchesFound[0].Value.TrimEnd([char]13)
+}
+
 function Invoke-ScriptHandler {
     param(
         [Parameter(Mandatory)][string]$JobId,
@@ -951,13 +959,18 @@ function Invoke-ScriptHandler {
         $ExitCode = [int]$Process.ExitCode
         $StdOut = if (Test-Path -LiteralPath $StdOutPath) { Get-Content -LiteralPath $StdOutPath -Raw -ErrorAction SilentlyContinue } else { "" }
         $StdErr = if (Test-Path -LiteralPath $StdErrPath) { Get-Content -LiteralPath $StdErrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $StageReceipt = $null
+        if ($Project -cin @('dockerlocal-backend-refresh','dockerlocal-proxy-refresh','firecrawl-camofox-refresh') -and
+            ($Arguments -join '|') -cin @('-Target|Backend|-Mode|Stage','-Target|Proxy|-Mode|Stage','-Target|Camofox|-Mode|Stage') -and $ExitCode -eq 0) {
+            $StageReceipt = Get-ReviewedStageReceipt -StdOut ([string]$StdOut)
+        }
         $Output = @($StdOut, $StdErr) -join [Environment]::NewLine
 
         if ($Output.Length -gt 16000) {
             $Output = $Output.Substring($Output.Length - 16000)
         }
 
-        return @{ exit_code = $ExitCode; output = $Output }
+        return @{ exit_code = $ExitCode; output = $Output; stage_receipt = $StageReceipt }
     }
     finally {
         if ($Process) {
@@ -1433,7 +1446,7 @@ function Invoke-ReviewedRuntimeRefresh {
     # digests originate here in the trusted host worker, not in MCP arguments.
     $Stage = Invoke-ScriptHandler -JobId $JobId -Project $Project -Script $Script -WorkingDirectory $WorkingDirectory -Arguments @('-Target',$Target,'-Mode','Stage')
     if ($Stage.exit_code -ne 0) { return @{exit_code=$Stage.exit_code;output='Reviewed stage failed; no promotion attempted.'} }
-    $Receipts = [regex]::Matches([string]$Stage.output,'(?m)^REVIEWED_RUNTIME_STAGE baseline=(sha256:[0-9a-f]{64}) candidate=(sha256:[0-9a-f]{64}) revision=([0-9a-f]{40})\r?$')
+    $Receipts = [regex]::Matches([string]$Stage.stage_receipt,'^REVIEWED_RUNTIME_STAGE baseline=(sha256:[0-9a-f]{64}) candidate=(sha256:[0-9a-f]{64}) revision=([0-9a-f]{40})$')
     if ($Receipts.Count -ne 1) { return @{exit_code=1;output='REVIEWED_STAGE_RECEIPT_INVALID; no promotion attempted.'} }
     $Old = $Receipts[0].Groups[1].Value
     $New = $Receipts[0].Groups[2].Value
