@@ -40,8 +40,8 @@ function Invoke-ScoutFullScan {
     param($JobId,$Job)
     $script:ScanCount++
     if ($Job.action -cne 'scout_full_scan' -or -not $Job.only_fixed -or $Job.cisa_kev -or ($Job.severity -join '|') -cne 'critical|high') { throw 'Unexpected scan scope.' }
-    $High = if ($Job.image -ceq $Old) { $script:OldHigh } elseif ($Job.image -ceq $New) { $script:NewHigh } else { throw 'Unexpected image.' }
-    $Critical = if ($Job.image -ceq $New) { $script:NewCritical } else { @() }
+    $High = @(if ($Job.image -ceq $Old) { $script:OldHigh } elseif ($Job.image -ceq $New) { $script:NewHigh } else { throw 'Unexpected image.' })
+    $Critical = @(if ($Job.image -ceq $New) { $script:NewCritical })
     $Identity = if ($script:WrongId) { $Old } else { $Job.image }
     return @{
         status='succeeded'; scan_complete=(-not $script:Incomplete); cleanup_complete=$true
