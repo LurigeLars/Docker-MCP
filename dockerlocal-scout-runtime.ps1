@@ -254,6 +254,9 @@ function Download-DeploymentFiles {
         "proxy.py",
         "Dockerfile",
         "Dockerfile.proxy",
+        "Dockerfile.gateway",
+        "build-gateway-runtime.ps1",
+        "security/vex/gateway.openvex.json",
         "requirements.txt",
         "compose.proxy.yaml",
         "compose.public.yaml",
@@ -420,6 +423,8 @@ switch ($Action) {
                 throw "DockerLocal MCP image build failed."
             }
 
+            & (Join-Path $ContainerizedRoot 'build-gateway-runtime.ps1')
+            if (-not $?) { throw 'Reviewed gateway build failed.' }
             & docker compose -f $ComposePath up -d --force-recreate mcp gateway
             if ($LASTEXITCODE -ne 0) {
                 throw "DockerLocal MCP/gateway recreation failed."
