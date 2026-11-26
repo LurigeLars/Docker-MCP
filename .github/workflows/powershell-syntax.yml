@@ -95,6 +95,10 @@ jobs:
         run: |
           ./maintenance-runner.ps1 -SelfTest
 
+      - name: Verify reviewed runtime security gates
+        shell: pwsh
+        run: ./tests/reviewed-runtime-maintenance.test.ps1
+
       - name: Verify maintenance runner stays hidden
         shell: pwsh
         run: |
