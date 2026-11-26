@@ -850,7 +850,7 @@ def _image_usage_audit(rows, images, inspections):
 
     items: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
-    protected_words = re.compile(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep|rollback)(?:$|[-_.])")
+    protected_words = re.compile(r"(?i)(?:^|[:/._-])(backup|snapshot|archive|keep|rollback)(?:$|[:/._-])")
 
     for image in images:
         image_id = str(image.get("Id") or "")
