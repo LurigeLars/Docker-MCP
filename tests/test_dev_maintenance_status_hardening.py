@@ -81,6 +81,12 @@ class DevMaintenanceStatusTests(unittest.TestCase):
         self.assertIn("host_disk_usage,dev_maintenance_status,", PUBLIC_COMPOSE)
         self.assertIn("dev_maintenance_status", KNOWN_TOOLS)
 
+    def test_runtime_refresh_adds_only_the_read_only_report_tools(self):
+        refresh = (ROOT / "refresh-public-runtime.ps1").read_text(encoding="utf-8")
+        migration = _section(refresh, "function Add-UsageState", "$MigratedCompose = Add-UsageState")
+        self.assertIn("@('tool_usage','dev_maintenance_status' | Where-Object { $_ -notin $Names })", migration)
+        self.assertEqual(migration.count("ALLOWED_TOOLS: "), 2)  # the match pattern and the one rewrite
+
     def test_runner_launcher_never_binds_an_app_packaged_pwsh(self):
         self.assertIn('Where-Object { $_ -notlike (Join-Path $env:ProgramFiles "WindowsApps\\*") }', INSTALLER)
         self.assertNotIn("$PwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue", INSTALLER)

@@ -1,5 +1,5 @@
 # Refresh DockerLocal's tagged MCP image from a clean reviewed main checkout.
-# Preserves existing authorization, adding only the metrics mount and report tool.
+# Preserves existing authorization, adding only the metrics mount and the read-only report tools.
 # Never prunes containers/images or deletes Community data.
 [CmdletBinding()]
 param([Parameter(Mandatory)][switch]$Apply)
@@ -51,7 +51,7 @@ if ($ServerText -match 'def\s+community_probe\b' -or
     throw 'Refusing: source still exposes Community probe.'
 }
 
-# Add only the fixed metrics mount and read-only report to the existing config.
+# Add only the fixed metrics mount and the read-only report tools to the existing config.
 function Add-UsageState([string]$Text) {
     $Mount = '      - dockerlocal-tool-usage:/var/lib/dockerlocal-tool-usage'
     $Anchor = '(?m)^        target: /control\r?$'
@@ -59,8 +59,10 @@ function Add-UsageState([string]$Text) {
     $Lines = [regex]::Matches($Text,$Allow)
     if ($Lines.Count -ne 1) { throw 'Unrecognized installed tool allowlist; no migration.' }
     $Names = $Lines[0].Groups[1].Value.Split(',')
-    if ('tool_usage' -notin $Names) {
-        $Text = [regex]::Replace($Text,$Allow,('      ALLOWED_TOOLS: tool_usage,' + ($Names -join ',')))
+    # Only these argument-free, read-only report tools are ever added; nothing else widens here.
+    $Missing = @('tool_usage','dev_maintenance_status' | Where-Object { $_ -notin $Names })
+    if ($Missing.Count -gt 0) {
+        $Text = [regex]::Replace($Text,$Allow,('      ALLOWED_TOOLS: ' + (($Missing + $Names) -join ',')))
     }
     $MountCount = [regex]::Matches($Text,'(?m)^' + [regex]::Escape($Mount) + '\r?$').Count
     $VolumeCount = [regex]::Matches($Text,'(?m)^  dockerlocal-tool-usage:[ \t]*\r?$').Count
