@@ -3,23 +3,39 @@ name: Secure local regression runner tests
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "local-test-runner/**"
-      - "tests/test_secure_repo_runner.py"
-      - "tests/test_repo_runner_exposure_guard.py"
-      - "tests/test_offline_stage_installer.py"
-      - "tests/test_safe_test_diagnostics.py"
-      - "scripts/windows/stage-secure-test-runner.ps1"
-      - ".github/workflows/secure-repo-runner.yml"
-      - "compose.public.yaml"
-      - "public/gateway/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    # pull_request has no paths filter so that the required gate always reports; this job
+    # applies the same filter and the jobs below are skipped when nothing relevant changed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then echo run=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          # The PR merge commit: HEAD^1 is the base, so this diff is exactly the PR's changes.
+          if git diff --quiet HEAD^1 HEAD -- ':(glob)local-test-runner/**' ':(glob)tests/test_secure_repo_runner.py' ':(glob)tests/test_repo_runner_exposure_guard.py' ':(glob)tests/test_offline_stage_installer.py' ':(glob)tests/test_safe_test_diagnostics.py' ':(glob)scripts/windows/stage-secure-test-runner.ps1' ':(glob).github/workflows/secure-repo-runner.yml' ':(glob)compose.public.yaml' ':(glob)public/gateway/**'; then
+            echo run=false >> "$GITHUB_OUTPUT"
+          else
+            echo run=true >> "$GITHUB_OUTPUT"
+          fi
+
   broker-security-tests:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     name: Offline broker security tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -39,6 +55,8 @@ jobs:
         run: node tests/repo_runner_gateway_denial.mjs
 
   windows-offline-contract:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     name: Windows broker input validation
     runs-on: windows-latest
     timeout-minutes: 10
@@ -55,6 +73,8 @@ jobs:
         run: python -m unittest discover -s tests -p "test_safe_test_diagnostics.py" -v
 
   actual-docker-sandbox:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     name: Disposable Docker isolation smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -103,3 +123,21 @@ jobs:
           path: image-sbom.cdx.json
           if-no-files-found: error
           retention-days: 14
+
+  gate:
+    name: gate (secure-repo-runner)
+    if: always()
+    needs: [changes, broker-security-tests, windows-offline-contract, actual-docker-sandbox]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed or be skipped by the path filter
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::A job in this workflow ended with: $result"; exit 1 ;;
+            esac
+          done
