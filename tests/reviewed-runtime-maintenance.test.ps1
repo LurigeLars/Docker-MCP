@@ -54,12 +54,12 @@ function Invoke-Fixture {
     Invoke-ReviewedRuntimeRefresh -JobId ('f' * 32) -Project 'dockerlocal-backend-refresh' -Script 'fixture.ps1' -WorkingDirectory 'fixture' -Target Backend
 }
 function Expect-Blocked([string]$Expected) {
-    $Before=$script:ApplyCount; $Rejected=$false
-    try { $null=Invoke-Fixture } catch {
-        if ($_.Exception.Message -notlike $Expected) { throw }
-        $Rejected=$true
+    $Before=$script:ApplyCount
+    $Blocked=Invoke-Fixture
+    if ($Blocked.exit_code -ne 1 -or $Blocked.output -notlike 'REVIEWED_RUNTIME_BLOCKED*' -or
+        $Blocked.output -notlike $Expected -or $script:ApplyCount -ne $Before) {
+        throw 'Security gate did not fail closed with a sanitized receipt.'
     }
-    if (-not $Rejected -or $script:ApplyCount -ne $Before) { throw 'Security gate did not fail closed.' }
 }
 $script:ScoutSeverities = @('critical','high','medium','low','unspecified')
 $Rejected = $false
