@@ -1391,7 +1391,18 @@ function Get-ReviewedRuntimeScan {
         @($Scan.severity).Count -ne 2 -or 'critical' -notin @($Scan.severity) -or
         'high' -notin @($Scan.severity) -or $null -eq $Scan.vulnerability_counts -or
         $null -eq $Scan.cve_ids) {
-        throw 'Fresh immutable image security scan incomplete; deployment blocked.'
+        # Only bounded, fixed reason codes cross the host boundary.
+        $Code = [string]$Scan.error_code
+        if ($Code -cnotin @('INVALID_REQUEST','IMAGE_NOT_FOUND','INSUFFICIENT_DISK','SCAN_FAILED_DOCKER','SCAN_FAILED_RESOURCE_LIMIT','SCAN_FAILED_FORMATTER','SCAN_FAILED_SCOUT','SCAN_FAILED_PARSE','SCAN_FAILED_INTERNAL','SCAN_TIMEOUT')) {
+            if ($Scan.status -ceq 'succeeded' -and $Scan.scan_complete -eq $true -and $Scan.cleanup_complete -ne $true) {
+                $Code = 'SCAN_CLEANUP_INCOMPLETE'
+            } elseif ($Scan.image_id -cne $ImageId) {
+                $Code = 'SCAN_IMAGE_ID_MISMATCH'
+            } else {
+                $Code = 'SCAN_RECEIPT_INVALID'
+            }
+        }
+        throw "Fresh immutable image security scan incomplete; deployment blocked. [$Code]"
     }
     foreach ($Level in @('critical','high','medium','low','unspecified')) {
         $Count = $Scan.vulnerability_counts[$Level]
@@ -1423,19 +1434,31 @@ function Invoke-ReviewedRuntimeRefresh {
     $Stage = Invoke-ScriptHandler -JobId $JobId -Project $Project -Script $Script -WorkingDirectory $WorkingDirectory -Arguments @('-Target',$Target,'-Mode','Stage')
     if ($Stage.exit_code -ne 0) { return @{exit_code=$Stage.exit_code;output='Reviewed stage failed; no promotion attempted.'} }
     $Receipts = [regex]::Matches([string]$Stage.output,'(?m)^REVIEWED_RUNTIME_STAGE baseline=(sha256:[0-9a-f]{64}) candidate=(sha256:[0-9a-f]{64}) revision=([0-9a-f]{40})\r?$')
-    if ($Receipts.Count -ne 1) { throw 'Missing unique staged image receipt.' }
+    if ($Receipts.Count -ne 1) { return @{exit_code=1;output='REVIEWED_STAGE_RECEIPT_INVALID; no promotion attempted.'} }
     $Old = $Receipts[0].Groups[1].Value
     $New = $Receipts[0].Groups[2].Value
     $Revision = $Receipts[0].Groups[3].Value
     if ($Old -ceq $New) { return @{exit_code=0;output='REVIEWED_RUNTIME_ALREADY_CURRENT'} }
     $Review = 'Proxy VEX-aware Critical/High gate passed.'
     if ($Target -cne 'Proxy') {
-        $Candidate = Get-ReviewedRuntimeScan -ImageId $New
-        $Baseline = $null
-        if ($Candidate.vulnerability_counts.high -gt 0 -and $Candidate.vulnerability_counts.critical -eq 0) {
-            $Baseline = Get-ReviewedRuntimeScan -ImageId $Old
+        $Phase = 'candidate'
+        try {
+            $Candidate = Get-ReviewedRuntimeScan -ImageId $New
+            $Baseline = $null
+            if ($Candidate.vulnerability_counts.high -gt 0 -and $Candidate.vulnerability_counts.critical -eq 0) {
+                $Phase = 'baseline'
+                $Baseline = Get-ReviewedRuntimeScan -ImageId $Old
+            }
+            $Phase = 'comparison'
+            Assert-ReviewedRuntimeSecurity -Candidate $Candidate -Baseline $Baseline
+        } catch {
+            $Reason = [string]$_.Exception.Message
+            if ($Reason -cnotmatch '^Fresh immutable image security scan incomplete; deployment blocked\. \[(INVALID_REQUEST|IMAGE_NOT_FOUND|INSUFFICIENT_DISK|SCAN_FAILED_DOCKER|SCAN_FAILED_RESOURCE_LIMIT|SCAN_FAILED_FORMATTER|SCAN_FAILED_SCOUT|SCAN_FAILED_PARSE|SCAN_FAILED_INTERNAL|SCAN_TIMEOUT|SCAN_CLEANUP_INCOMPLETE|SCAN_IMAGE_ID_MISMATCH|SCAN_RECEIPT_INVALID)\]$' -and
+                $Reason -cnotin @('Invalid immutable image identity.','Security scan counts or CVE identities are not comparable; deployment blocked.','Candidate contains fixable Critical findings.','Candidate introduces or increases fixable High findings.')) {
+                $Reason = 'REVIEWED_RUNTIME_GATE_INTERNAL_ERROR'
+            }
+            return @{exit_code=1;output="REVIEWED_RUNTIME_BLOCKED phase=$Phase candidate=$New baseline=$Old reason=$Reason"}
         }
-        Assert-ReviewedRuntimeSecurity -Candidate $Candidate -Baseline $Baseline
         # Existing High findings remain visible; this is a non-regression
         # decision, never a VEX waiver or a claim that the image is clean.
         $Review = "Critical=0 High=$($Candidate.vulnerability_counts.high) remaining=$(@($Candidate.cve_ids.high) -join ',')"
