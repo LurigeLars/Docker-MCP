@@ -561,5 +561,9 @@ switch ($Target) {
         Require-File $RetireScript
         & $RetireScript
         if (-not $?) { throw 'Reviewed GitHub stdio retirement verification failed.' }
+        $RefreshStdio = Join-Path $SourceRoot 'refresh-github-stdio.ps1'
+        Require-File $RefreshStdio
+        & $RefreshStdio
+        if (-not $?) { throw 'Reviewed GitHub stdio refresh failed.' }
     }
 }
