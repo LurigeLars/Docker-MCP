@@ -308,8 +308,10 @@ def _image_identity_match(row, inspect, image):
 
 def cleanup_superseded_images(refs: list[str]) -> dict:
     """Delete only explicitly requested local image refs that are unused by every container."""
-    rows = engine_json("GET", "/containers/json?all=1") or []
-    images = engine_json("GET", "/images/json?all=0&manifests=1") or []
+    rows = engine_json("GET", "/containers/json?all=1")
+    images = engine_json("GET", "/images/json?all=0&manifests=1")
+    if not isinstance(rows, list) or not isinstance(images, list):
+        raise RuntimeError("Docker image usage inventory is unavailable")
 
     inspected_rows = []
     for row in rows:
