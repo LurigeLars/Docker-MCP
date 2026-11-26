@@ -20,7 +20,7 @@ static GIT_SHA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{40}$")
 static GITHUB_SOURCE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^https://github[.]com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").unwrap());
 static PROTECTED_WORDS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:^|[-_.])(backup|snapshot|archive|keep|rollback)(?:$|[-_.])").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[:/._-])(backup|snapshot|archive|keep|rollback)(?:$|[:/._-])").unwrap());
 
 pub struct Inventory {
     pub rows: Vec<Value>,
