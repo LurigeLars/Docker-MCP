@@ -29,7 +29,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or $Candidate -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Gateway image identity unavailable.' }
     $BuiltHash = [string](& docker image inspect --format '{{index .Config.Labels "org.dockerlocal.gateway.dockerfile-sha256"}}' $CandidateTag)
     if ($LASTEXITCODE -ne 0 -or $BuiltHash -cne $Hashes[$Dockerfile]) { throw 'Gateway image tag does not match the reviewed Dockerfile; advance the revision tag.' }
-    & docker scout cves --only-severity critical,high --only-fixed --exit-code --vex-location $Vex --vex-author 'DockerLocal maintainers' ("local://" + $Candidate)
+    & docker scout cves --only-severity 'critical,high' --only-fixed --exit-code --vex-location $Vex --vex-author 'DockerLocal maintainers' ("local://" + $Candidate)
     if ($LASTEXITCODE -ne 0) { throw 'Gateway candidate did not pass Scout.' }
     foreach ($Path in $Hashes.Keys) {
         if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -cne $Hashes[$Path]) { throw 'Gateway source changed during review.' }
