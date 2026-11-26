@@ -41,6 +41,7 @@ CALLS = [
     ("scheduled_task_status", {"task": "desktop-tradingview-http"}),
     ("port_registry_status", {}),
     ("host_disk_usage", {}),
+    ("dev_maintenance_status", {}),
     ("maintenance_job_status", {"job_id": "9fe8d4e9c0af471fbd1b78501bebd78c"}),
     ("maintenance_job_status", {"job_id": "0" * 32}),
     ("maintenance_job_status", {"job_id": "../../etc"}),

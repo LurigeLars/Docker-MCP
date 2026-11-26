@@ -238,7 +238,7 @@ async def observe_call(store, name, context, call_next):
 
 SERVICE = 'DockerLocalMCP'
 ENV_PREFIX = 'DOCKERLOCAL'
-KNOWN_TOOLS = frozenset(["cleanup_stale_mcp_containers","cleanup_superseded_images","compose_redeploy","compose_status","container_inspect","container_logs","container_restart","container_stats","containers_list","host_disk_usage","image_inspect","image_prune_dangling","image_pull","image_usage_audit","images_list","maintenance_job_status","maintenance_runner_status","mcp_deployment_audit","port_registry_status","repo_pull_ff","repo_status","runtime_supervisor_status","scheduled_task_control","scheduled_task_status","scout_compare","scout_cves","scout_full_scan","scout_quickview","scout_recommendations","scout_sbom"])
+KNOWN_TOOLS = frozenset(["cleanup_stale_mcp_containers","cleanup_superseded_images","compose_redeploy","compose_status","container_inspect","container_logs","container_restart","container_stats","containers_list","dev_maintenance_status","host_disk_usage","image_inspect","image_prune_dangling","image_pull","image_usage_audit","images_list","maintenance_job_status","maintenance_runner_status","mcp_deployment_audit","port_registry_status","repo_pull_ff","repo_status","runtime_supervisor_status","scheduled_task_control","scheduled_task_status","scout_compare","scout_cves","scout_full_scan","scout_quickview","scout_recommendations","scout_sbom"])
 
 def install_tool_usage(server, path: Path):
     # Keep dependency-free hardening tests able to import the pure metrics store.

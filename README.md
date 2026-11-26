@@ -220,6 +220,7 @@ Read-only inspection:
 - `maintenance_job_status`
 - `maintenance_runner_status`
 - `port_registry_status` — persistent host MCP port reservations plus listeners in the managed range that are not registered. `maintenance_runner_status(include_host_checks=true)` combines this with runner health and fixed-drive capacity, with separate results for disk and ports.
+- `dev_maintenance_status` — summary of the newest weekly Windows dev-toolchain report (`dev-maintenance.ps1`, see [docs/dev-maintenance.md](docs/dev-maintenance.md)): run time and age, updates done, available, deferred and awaiting approval, errors, verification and the next scheduled run. No arguments; the runner reads one fixed folder and returns validated fields only, never paths or notes.
 
 Narrow maintenance:
 
@@ -591,7 +592,7 @@ The runner also disables Git hooks and recursive submodule updates for maintenan
 
 Scheduled Task lookup is exact after local alias resolution. The remote MCP caller cannot choose a Task Scheduler name/path or PowerShell argument.
 
-The four host-maintenance tools return compact structured JSON. If a bounded synchronous call times out, it returns a `job_id` that can be inspected with `maintenance_job_status`.
+The host-maintenance tools return compact structured JSON. If a bounded synchronous call times out, it returns a `job_id` that can be inspected with `maintenance_job_status`.
 
 For the initial activation on an already-installed DockerLocal stack, `enable-host-maintenance.ps1` validates one repository and one Scheduled Task, merges them into the local allowlist, preserves the existing Cloudflare gateway configuration, rebuilds the MCP image and restarts the Maintenance Runner. Re-run it with another pair of aliases to extend the local allowlist later.
 

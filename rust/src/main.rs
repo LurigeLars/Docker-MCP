@@ -116,6 +116,11 @@ const PORT_FIELDS: &[&str] = &["version", "range_start", "range_end", "services"
 const TASK_STATUS_FIELDS: &[&str] = &["task", "state", "principal", "run_level", "last_run_time", "last_task_result"];
 const TASK_CONTROL_FIELDS: &[&str] = &["action", "task", "operation", "before_state", "after_state", "last_task_result"];
 const DISK_FIELDS: &[&str] = &["measurement_status", "measured_unix", "drives"];
+const DEV_MAINTENANCE_FIELDS: &[&str] = &[
+    "report_status", "reason", "report_mode", "started", "finished", "age_hours", "run_status",
+    "agent_state", "updated", "available", "deferred", "failed", "needs_approval", "errors",
+    "verification", "path_duplicates", "invalid_rows", "task_state", "next_run",
+];
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct DeploymentAuditArgs {
@@ -328,6 +333,12 @@ impl DockerLocal {
            annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
     async fn host_disk_usage(&self) -> Result<CallToolResult, String> {
         runner(json!({"action": "host_disk_usage"}), DISK_FIELDS, 12.0).await
+    }
+
+    #[tool(description = "Summarize the latest weekly Windows dev-toolchain maintenance report: run time, age, updates done, available, deferred or awaiting approval, errors, verification and next scheduled run.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    async fn dev_maintenance_status(&self) -> Result<CallToolResult, String> {
+        runner(json!({"action": "dev_maintenance_status"}), DEV_MAINTENANCE_FIELDS, 12.0).await
     }
 
     #[tool(description = "Read runner health and optionally disk capacity and MCP port registry, each with its own status.",

@@ -1042,6 +1042,23 @@ def _host_disk_usage():
     )
 
 
+DEV_MAINTENANCE_FIELDS = (
+    "report_status", "reason", "report_mode", "started", "finished", "age_hours", "run_status",
+    "agent_state", "updated", "available", "deferred", "failed", "needs_approval", "errors",
+    "verification", "path_duplicates", "invalid_rows", "task_state", "next_run",
+)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def dev_maintenance_status():
+    """Summarize the latest weekly Windows dev-toolchain maintenance report: run time, age, updates done, available, deferred or awaiting approval, errors, verification and next scheduled run."""
+    return _compact_runner_request(
+        {"action": "dev_maintenance_status"},
+        DEV_MAINTENANCE_FIELDS,
+        timeout_seconds=12.0,
+    )
+
+
 @mcp.tool(annotations=READ_ONLY)
 def maintenance_runner_status(include_host_checks: bool = False):
     """Read runner health and optionally disk capacity and MCP port registry, each with its own status."""

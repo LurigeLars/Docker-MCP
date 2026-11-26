@@ -1493,6 +1493,85 @@ function Run-ProjectRedeploy {
     }
 }
 
+# Read-only summary of the newest DevToolMaintenance report (dev-maintenance.ps1). The folder
+# and task name are fixed; every field is validated, and notes, mechanisms and paths stay local.
+$DevMaintenanceReports = Join-Path $env:LOCALAPPDATA "DevToolMaintenance\reports"
+$DevMaintenanceTask = "DevToolMaintenance"
+
+function ConvertTo-DevMaintenanceText {
+    param($Value, [int]$Max = 160)
+    $Text = [regex]::Replace([string]$Value, '(?i)\b[a-z]:\\\S*|%[a-z_]+%\S*|\\\\\S+|<user>|<host>', '<redacted>')
+    $Text = [regex]::Replace($Text, '[^\x20-\x7E]', '')
+    if ($Text.Length -gt $Max) { $Text = $Text.Substring(0, $Max) }
+    return $Text
+}
+
+function Get-DevMaintenanceStatus {
+    param([string]$ReportDir = $DevMaintenanceReports, [datetime]$Now = (Get-Date), [int]$StaleDays = 8)
+    $Latest = Get-ChildItem -LiteralPath $ReportDir -File -Filter "*.json" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}-\d{6}-(report|update)\.json$' } |
+        Sort-Object Name | Select-Object -Last 1
+    if (-not $Latest) { return @{ report_status = "missing" } }
+    if ($Latest.Length -gt 524288) { return @{ report_status = "invalid"; reason = "report too large" } }
+    try { $Report = Get-Content -LiteralPath $Latest.FullName -Raw | ConvertFrom-Json }
+    catch { return @{ report_status = "invalid"; reason = "report is not valid JSON" } }
+    if ($null -eq $Report -or [string]$Report.schema -ne "1" -or [string]$Report.mode -notin @("Report", "Update") -or $null -eq $Report.tools) {
+        return @{ report_status = "invalid"; reason = "unsupported report schema" }
+    }
+    $Times = @{}
+    foreach ($Field in @("started", "finished")) {
+        $Raw = $Report.$Field
+        $Parsed = [datetime]::MinValue
+        if ($Raw -is [datetime]) { $Parsed = $Raw }
+        elseif (-not [datetime]::TryParse([string]$Raw, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$Parsed)) {
+            return @{ report_status = "invalid"; reason = "report timestamp is not valid" }
+        }
+        $Times[$Field] = $Parsed
+    }
+
+    $Version = '^[0-9A-Za-z][0-9A-Za-z.+_~-]{0,39}$'
+    $Policies = @("auto (same major)", "controlled", "individual approval", "own updater")
+    $Updated = @(); $Available = @(); $Deferred = @(); $Failed = @(); $Invalid = 0
+    foreach ($Row in @($Report.tools | Select-Object -First 400)) {
+        $Tool = [string]$Row.Tool
+        $StatusMatch = [regex]::Match([string]$Row.Status, '^(OK|UPDATE_AVAILABLE|UPDATED|NOT_INSTALLED|FAILED|SKIPPED|NEEDS_APPROVAL)(?:: (.*))?$')
+        if ($Tool -notmatch '^[A-Za-z0-9][A-Za-z0-9@._+:/ -]{0,79}$' -or -not $StatusMatch.Success) { $Invalid++; continue }
+        $Code = $StatusMatch.Groups[1].Value
+        $Reason = ConvertTo-DevMaintenanceText $StatusMatch.Groups[2].Value
+        $Before = if ([string]$Row.Before -match $Version) { [string]$Row.Before } else { $null }
+        $After = if ([string]$Row.After -match $Version) { [string]$Row.After } else { $null }
+        $Offered = if ([string]$Row.Available -match $Version) { [string]$Row.Available } else { $null }
+        $Policy = if ([string]$Row.Policy -in $Policies) { [string]$Row.Policy } else { "unknown" }
+        switch ($Code) {
+            "UPDATED" { $Updated += @{ tool = $Tool; before = $Before; after = $After } }
+            "UPDATE_AVAILABLE" { $Available += @{ tool = $Tool; policy = $Policy; installed = $Before; available = $Offered } }
+            "FAILED" { $Failed += @{ tool = $Tool; reason = $Reason } }
+            { $_ -in @("SKIPPED", "NEEDS_APPROVAL") } {
+                $Deferred += @{ tool = $Tool; status = $Code; reason = $Reason; installed = $Before; available = $Offered }
+            }
+        }
+    }
+    $Errors = @($Report.errors | Select-Object -First 10 | ForEach-Object { ConvertTo-DevMaintenanceText $_ 200 })
+    $Verification = @($Report.verification | Select-Object -First 10 | Where-Object { [string]$_.tool -match '^[a-z]{1,20}$' } |
+        ForEach-Object { @{ tool = [string]$_.tool; ok = [bool]$_.ok } })
+    $Duplicates = @($Report.path_duplicates | Select-Object -First 20 | Where-Object { [string]$_.command -match '^[a-z]{1,20}$' } |
+        ForEach-Object { @{ command = [string]$_.command; copies = [int]$_.copies } })
+    $NeedsApproval = @($Report.needs_approval | Select-Object -First 200 | Where-Object { [string]$_ -match '^[A-Za-z0-9][A-Za-z0-9@._+:/ -]{0,79}$' } | ForEach-Object { [string]$_ })
+    $AgentState = if ([string]$Report.agent_state -in @("none", "idle", "active", "not checked")) { [string]$Report.agent_state } else { "unknown" }
+    $AgeHours = [Math]::Round(($Now - $Times.finished).TotalHours, 1)
+    $Healthy = $Errors.Count -eq 0 -and $Failed.Count -eq 0 -and -not ($Verification | Where-Object { -not $_.ok })
+    return @{
+        report_status = if ($AgeHours -gt 24 * $StaleDays) { "stale" } else { "ok" }
+        report_mode = ([string]$Report.mode).ToLowerInvariant()
+        started = $Times.started.ToString("s"); finished = $Times.finished.ToString("s"); age_hours = $AgeHours
+        run_status = if ($Healthy) { "ok" } else { "errors" }
+        agent_state = $AgentState
+        updated = $Updated; available = $Available; deferred = $Deferred; failed = $Failed
+        needs_approval = $NeedsApproval; errors = $Errors; verification = $Verification
+        path_duplicates = $Duplicates; invalid_rows = $Invalid
+    }
+}
+
 # Read-only fixed-volume telemetry; no caller paths and no mutating operations.
 function Get-HostDiskUsage {
     $Drives = @()
@@ -1787,6 +1866,38 @@ $null = $DefinitelyUnsetVariable
 
         $HostRepositories.Remove("selftest-repo")
 
+        $DevDir = Join-Path $TestRoot "dev-reports"
+        $DevNow = [datetime]"2026-11-28T10:00:00"
+        if ((Get-DevMaintenanceStatus -ReportDir $DevDir -Now $DevNow).report_status -ne "missing") { throw "Missing DevToolMaintenance report was not reported as missing." }
+        New-Item -ItemType Directory -Force -Path $DevDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $DevDir "20261128-090000-update.json") -Value "{not json" -Encoding utf8
+        if ((Get-DevMaintenanceStatus -ReportDir $DevDir -Now $DevNow).report_status -ne "invalid") { throw "Corrupt DevToolMaintenance report was accepted." }
+        Set-Content -LiteralPath (Join-Path $DevDir "20261128-090000-update.json") -Value '{"schema":0,"mode":"Update","tools":[]}' -Encoding utf8
+        if ((Get-DevMaintenanceStatus -ReportDir $DevDir -Now $DevNow).report_status -ne "invalid") { throw "Unknown DevToolMaintenance schema was accepted." }
+        $DevReport = @{
+            schema = 1; mode = "Update"; started = "2026-11-28T09:00:00"; finished = "2026-11-28T09:02:00"; agent_state = "idle"
+            tools = @(
+                @{ Tool = "Gyan.FFmpeg"; Policy = "auto (same major)"; Before = "9.0.1"; Available = "9.1"; After = "9.1"; Status = "UPDATED" }
+                @{ Tool = "GitHub.cli"; Policy = "auto (same major)"; Before = "2.97.0"; Available = "2.105.0"; After = "2.97.0"; Status = "SKIPPED: busy (gh) at C:\Users\someone\AppData\x" }
+                @{ Tool = "Git.Git"; Policy = "controlled"; Before = "2.55.0"; Available = "2.56.1"; After = "2.55.0"; Status = "UPDATE_AVAILABLE" }
+                @{ Tool = "C:\evil\path"; Policy = "controlled"; Before = "1"; Status = "OK" }
+            )
+            errors = @("npm: failed under %USERPROFILE%\AppData\Roaming\npm")
+            verification = @(@{ tool = "ffmpeg"; ok = $true })
+            needs_approval = @("Git.Git")
+        }
+        $DevReport | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $DevDir "20261128-090000-update.json") -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $DevDir "zzz-evil.json") -Value '{"schema":1}' -Encoding utf8
+        $DevState = Get-DevMaintenanceStatus -ReportDir $DevDir -Now $DevNow
+        $DevJson = $DevState | ConvertTo-Json -Depth 8 -Compress
+        if ($DevState.report_status -ne "ok" -or $DevState.updated.Count -ne 1 -or $DevState.deferred.Count -ne 1 -or
+            $DevState.available.Count -ne 1 -or $DevState.invalid_rows -ne 1 -or $DevState.run_status -ne "errors" -or
+            $DevState.agent_state -ne "idle" -or $DevState.needs_approval[0] -ne "Git.Git") {
+            throw "DevToolMaintenance report summary regression: $DevJson"
+        }
+        if ($DevJson -match '(?i)[a-z]:\\|%USERPROFILE%|someone|evil') { throw "DevToolMaintenance summary leaked a path or rejected row: $DevJson" }
+        if ((Get-DevMaintenanceStatus -ReportDir $DevDir -Now $DevNow.AddDays(10)).report_status -ne "stale") { throw "Old DevToolMaintenance report was not reported as stale." }
+
         Write-Host "maintenance runner self-test: PASS"
     }
     finally {
@@ -2045,6 +2156,7 @@ try {
                     "scheduled_task_status",
                     "scheduled_task_control",
                     "host_disk_usage",
+                    "dev_maintenance_status",
                     "scout_full_scan"
                 )) { throw "Action is not allowlisted." }
 
@@ -2139,6 +2251,20 @@ try {
                         measured_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                         drives=$Drives
                     }
+                }
+                elseif ($Action -eq "dev_maintenance_status") {
+                    # Fixed report folder and task name; nothing from the request is used.
+                    $DevState = Get-DevMaintenanceStatus
+                    $DevTask = Get-ScheduledTask -TaskName $DevMaintenanceTask -ErrorAction SilentlyContinue | Select-Object -First 1
+                    $DevState.task_state = if ($DevTask) { [string]$DevTask.State } else { "missing" }
+                    $DevNext = if ($DevTask) { ($DevTask | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue).NextRunTime } else { $null }
+                    $DevState.next_run = if ($DevNext -and $DevNext.Year -gt 2000) { $DevNext.ToString("s") } else { $null }
+                    $DevResult = @{
+                        job_id=$JobId; status="succeeded"; started_unix=$Started
+                        finished_unix=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                    }
+                    foreach ($DevKey in $DevState.Keys) { $DevResult[$DevKey] = $DevState[$DevKey] }
+                    Write-JsonAtomic -Path (Join-Path $Results "$JobId.json") -Value $DevResult
                 }
                 elseif ($Action -eq "scout_full_scan") {
                     $Run = Invoke-ScoutFullScan -JobId $JobId -Job $Job
