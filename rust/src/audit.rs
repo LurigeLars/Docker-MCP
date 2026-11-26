@@ -12,7 +12,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use crate::control::{py_int_or_zero, py_str, py_truthy, runner_request};
-use crate::docker::{api_json, get, num, obj, quote};
+use crate::docker::{api_json, get, num, quote};
 use crate::text::bytes_human;
 
 static SHA256_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^sha256:[0-9a-f]{64}$").unwrap());

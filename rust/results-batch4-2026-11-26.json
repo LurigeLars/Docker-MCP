@@ -1,0 +1,125 @@
+{
+  "python": {
+    "image_mb": 608.7,
+    "startup_to_initialize_ms": 2179,
+    "tools_listed": 31,
+    "idle": {
+      "mem": "79.82MiB",
+      "cpu": "0.00%",
+      "anon_mib": 65.50390625,
+      "id": "a4128a50650e"
+    },
+    "after_calls": {
+      "mem": "99.62MiB",
+      "cpu": "0.00%",
+      "anon_mib": 80.29296875,
+      "id": "a4128a50650e"
+    },
+    "median_ms": {
+      "containers_list:{\"include_stopped\": true}": 174.9,
+      "container_inspect:{\"container\": \"dockerlocal-socket-proxy\"}": 13.3,
+      "container_stats:{\"container\": \"dockerlocal-socket-proxy\"}": 1015.2,
+      "images_list:{}": 560.2,
+      "image_inspect:{\"image\": \"dockerlocal-socket-proxy:local\"}": 26.4,
+      "container_inspect:{\"container\": \"../not-allowed\"}": 57.3,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 50}": 8.0,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 5000}": 8.1,
+      "compose_status:{}": 105.9,
+      "compose_status:{\"project\": \"dockerlocal\"}": 111.5,
+      "compose_status:{\"project\": \"bad name\"}": 46.2,
+      "repo_status:{\"repo\": \"docker-mcp\"}": 1048.5,
+      "repo_status:{\"repo\": \"../x\"}": 62.7,
+      "repo_status:{\"repo\": \"no-such-repo\"}": 1975.1,
+      "scheduled_task_status:{\"task\": \"desktop-tradingview-http\"}": 2746.7,
+      "port_registry_status:{}": 9273.0,
+      "host_disk_usage:{}": 2078.9,
+      "maintenance_job_status:{\"job_id\": \"9fe8d4e9c0af471fbd1b78501bebd78c\"}": 19.9,
+      "maintenance_job_status:{\"job_id\": \"00000000000000000000000000000000\"}": 6.5,
+      "maintenance_job_status:{\"job_id\": \"../../etc\"}": 74.5,
+      "runtime_supervisor_status:{}": 19.0,
+      "runtime_supervisor_status:{\"log_tail\": 5}": 13.2,
+      "maintenance_runner_status:{}": 13.3,
+      "maintenance_runner_status:{\"include_host_checks\": true}": 10999.1,
+      "mcp_deployment_audit:{}": 8542.1,
+      "mcp_deployment_audit:{\"include_image_usage\": true}": 7325.4,
+      "image_usage_audit:{}": 868.1,
+      "cleanup_superseded_images:{\"image_refs\": []}": 79.6,
+      "cleanup_superseded_images:{\"image_refs\": [\"host:5000/app\"]}": 59.0,
+      "cleanup_superseded_images:{\"image_refs\": [\"../x:1\"]}": 95.4,
+      "compose_redeploy:{\"project\": \"bad name\"}": 66.0,
+      "compose_redeploy:{\"operation\": \"update_stateless\", \"project\": \"firecrawl\", \"services\": [\"redis\"]}": 57.6,
+      "compose_redeploy:{\"operation\": \"build_only\", \"project\": \"x\", \"services\": [\"svc\"]}": 58.5,
+      "compose_redeploy:{\"operation\": \"rm -rf\", \"project\": \"x\"}": 4.6,
+      "container_restart:{\"container\": \"../x\"}": 79.1,
+      "image_pull:{\"image\": \"-bad\"}": 77.1,
+      "image_pull:{\"image\": \"node:26.13.1-alpine\"}": 3708.7
+    }
+  },
+  "rust": {
+    "image_mb": 4.9,
+    "startup_to_initialize_ms": 545,
+    "tools_listed": 24,
+    "idle": {
+      "mem": "1.305MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "f1f2db6fc385"
+    },
+    "after_calls": {
+      "mem": "3.367MiB",
+      "cpu": "0.00%",
+      "anon_mib": null,
+      "id": "f1f2db6fc385"
+    },
+    "median_ms": {
+      "containers_list:{\"include_stopped\": true}": 196.0,
+      "container_inspect:{\"container\": \"dockerlocal-socket-proxy\"}": 11.2,
+      "container_stats:{\"container\": \"dockerlocal-socket-proxy\"}": 2007.4,
+      "images_list:{}": 472.6,
+      "image_inspect:{\"image\": \"dockerlocal-socket-proxy:local\"}": 25.1,
+      "container_inspect:{\"container\": \"../not-allowed\"}": 1.2,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 50}": 7.1,
+      "container_logs:{\"container\": \"firecrawl-rust-init-1\", \"tail\": 5000}": 5.4,
+      "compose_status:{}": 116.7,
+      "compose_status:{\"project\": \"dockerlocal\"}": 146.3,
+      "compose_status:{\"project\": \"bad name\"}": 1.5,
+      "repo_status:{\"repo\": \"docker-mcp\"}": 2324.0,
+      "repo_status:{\"repo\": \"../x\"}": 1.1,
+      "repo_status:{\"repo\": \"no-such-repo\"}": 2069.6,
+      "scheduled_task_status:{\"task\": \"desktop-tradingview-http\"}": 2786.9,
+      "port_registry_status:{}": 9086.6,
+      "host_disk_usage:{}": 2155.0,
+      "maintenance_job_status:{\"job_id\": \"9fe8d4e9c0af471fbd1b78501bebd78c\"}": 18.1,
+      "maintenance_job_status:{\"job_id\": \"00000000000000000000000000000000\"}": 27.5,
+      "maintenance_job_status:{\"job_id\": \"../../etc\"}": 1.6,
+      "runtime_supervisor_status:{}": 10.1,
+      "runtime_supervisor_status:{\"log_tail\": 5}": 9.8,
+      "maintenance_runner_status:{}": 3.4,
+      "maintenance_runner_status:{\"include_host_checks\": true}": 11513.9,
+      "mcp_deployment_audit:{}": 7712.1,
+      "mcp_deployment_audit:{\"include_image_usage\": true}": 7969.4,
+      "image_usage_audit:{}": 918.3,
+      "cleanup_superseded_images:{\"image_refs\": []}": 2.0,
+      "cleanup_superseded_images:{\"image_refs\": [\"host:5000/app\"]}": 1.3,
+      "cleanup_superseded_images:{\"image_refs\": [\"../x:1\"]}": 1.7,
+      "compose_redeploy:{\"project\": \"bad name\"}": 1.3,
+      "compose_redeploy:{\"operation\": \"update_stateless\", \"project\": \"firecrawl\", \"services\": [\"redis\"]}": 1.4,
+      "compose_redeploy:{\"operation\": \"build_only\", \"project\": \"x\", \"services\": [\"svc\"]}": 1.4,
+      "compose_redeploy:{\"operation\": \"rm -rf\", \"project\": \"x\"}": 1.4,
+      "container_restart:{\"container\": \"../x\"}": 1.5,
+      "image_pull:{\"image\": \"-bad\"}": 1.4,
+      "image_pull:{\"image\": \"node:26.13.1-alpine\"}": 2174.1
+    }
+  },
+  "parity": {
+    "paired_calls": 74,
+    "tools_with_any_mismatch": [],
+    "transient_then_equal": [
+      "mcp_deployment_audit:{\"include_image_usage\": true}"
+    ]
+  },
+  "definitions": {
+    "compared": 24,
+    "mismatches": {}
+  }
+}

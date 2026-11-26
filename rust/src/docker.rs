@@ -39,15 +39,47 @@ pub fn quote(value: &str) -> String {
     value.replace('/', "%2F").replace('@', "%40").replace(':', "%3A")
 }
 
+/// urllib.parse.urlencode for one value (quote_plus): only unreserved bytes stay literal.
+pub fn qs(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'~' => (b as char).to_string(),
+            b' ' => "+".into(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// Raw GET. Like `_api`, an oversized body is cut and marked rather than rejected.
 pub fn api_raw(path: &str) -> Result<Vec<u8>, String> {
-    let url = format!("{}{}", *API, path);
-    let mut resp = AGENT
-        .get(&url)
-        .header("Accept", "application/json")
-        .header("User-Agent", "DockerLocal-MCP/1.0")
-        .call()
-        .map_err(|e| format!("Docker API unavailable: {e}"))?;
+    request_at(&API, "GET", path, 30)
+}
+
+/// POST with an empty body, as `_api` sends it; the proxy rejects any request body.
+pub fn api_post_raw(path: &str, timeout_secs: u64) -> Result<Vec<u8>, String> {
+    request_at(&API, "POST", path, timeout_secs)
+}
+
+pub fn api_post_json(path: &str, timeout_secs: u64) -> Result<Value, String> {
+    parse_json(api_post_raw(path, timeout_secs)?)
+}
+
+fn request_at(base: &str, method: &str, path: &str, timeout_secs: u64) -> Result<Vec<u8>, String> {
+    let url = format!("{base}{path}");
+    let timeout = Some(Duration::from_secs(timeout_secs));
+    let sent = if method == "POST" {
+        AGENT.post(&url).config().timeout_global(timeout).build()
+            .header("Accept", "application/json")
+            .header("User-Agent", "DockerLocal-MCP/1.0")
+            .send_empty()
+    } else {
+        AGENT.get(&url).config().timeout_global(timeout).build()
+            .header("Accept", "application/json")
+            .header("User-Agent", "DockerLocal-MCP/1.0")
+            .call()
+    };
+    let mut resp = sent.map_err(|e| format!("Docker API unavailable: {e}"))?;
     let status = resp.status().as_u16();
     let mut body = Vec::new();
     resp.body_mut()
@@ -67,7 +99,10 @@ pub fn api_raw(path: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn api_json(path: &str) -> Result<Value, String> {
-    let body = api_raw(path)?;
+    parse_json(api_raw(path)?)
+}
+
+fn parse_json(body: Vec<u8>) -> Result<Value, String> {
     if body.is_empty() {
         return Ok(Value::Null);
     }
@@ -106,5 +141,44 @@ mod tests {
         assert!(!IMAGE_REF.is_match("-bad"));
         assert!(COMPOSE_PROJECT.is_match("dockerlocal-public"));
         assert!(!COMPOSE_PROJECT.is_match("a b"));
+    }
+
+    #[test]
+    fn qs_matches_python_urlencode() {
+        // Expected strings produced by urllib.parse.urlencode and accepted by proxy.allowed().
+        assert_eq!(qs(r#"{"dangling":["true"]}"#), "%7B%22dangling%22%3A%5B%22true%22%5D%7D");
+        assert_eq!(qs("ghcr.io/a/b:1@sha256:bb"), "ghcr.io%2Fa%2Fb%3A1%40sha256%3Abb");
+        assert_eq!(qs("a b~c"), "a+b~c");
+    }
+
+    /// One request against a fake proxy: method, target, empty body, no chunked encoding.
+    #[test]
+    fn post_sends_an_empty_unchunked_body() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = Vec::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() { break; }
+                head.push(line.trim_end().to_string());
+            }
+            let body = br#"{"ok":true}"#;
+            let mut stream = stream;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+            head
+        });
+        let body = request_at(&base, "POST", "/images/prune?filters=%7B%7D", 5).unwrap();
+        let head = server.join().unwrap();
+        assert_eq!(body, br#"{"ok":true}"#);
+        assert_eq!(head[0], "POST /images/prune?filters=%7B%7D HTTP/1.1");
+        let lower: Vec<String> = head.iter().map(|h| h.to_ascii_lowercase()).collect();
+        assert!(!lower.iter().any(|h| h.starts_with("transfer-encoding")));
+        assert!(lower.iter().all(|h| !h.starts_with("content-length") || h == "content-length: 0"));
     }
 }
