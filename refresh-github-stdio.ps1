@@ -19,7 +19,7 @@ function Get-DockerState([string]$Name) {
     return ($Rows[0] | ConvertFrom-Json -ErrorAction Stop)
 }
 function Invoke-ScopedDocker([string[]]$Arguments) {
-    & docker @Arguments | Out-Null
+    & docker @Arguments 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Scoped GitHub stdio operation failed.' }
 }
 $Names = @(& docker ps -a --filter "label=$Label=1" --filter "ancestor=$OldPin" --format '{{.Names}}')
@@ -96,20 +96,24 @@ function Test-ActiveRequest {
     return (@($Tcp | Where-Object { $_.State -eq 'Established' -and ($_.LocalPort -eq $Port -or $_.RemotePort -eq $Port) }).Count -gt 0)
 }
 if (Test-ActiveRequest) { Write-Output 'GITHUB_STDIO_220_RETAINED_ACTIVE_REQUEST'; return }
-$Created = $false
+$CandidateId = ''
 $Stopped = $false
 try {
-    Invoke-ScopedDocker @($Plan.args)
-    $Created = $true
+    $CreateArgs = @($Plan.args)
+    $CreateOutput = @(& docker @CreateArgs 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $CreateOutput.Count -ne 1 -or $CreateOutput[0] -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Candidate creation did not produce a verified identity.'
+    }
+    $CandidateId = [string]$CreateOutput[0]
     $Candidate = Get-DockerState $NewName
-    if ($Candidate.Config.Image -cne $NewPin -or $Candidate.Config.Labels.$Label -cne '1' -or
+    if ($Candidate.Id -cne $CandidateId -or $Candidate.Config.Image -cne $NewPin -or $Candidate.Config.Labels.$Label -cne '1' -or
         $Candidate.HostConfig.ReadonlyRootfs -ne $true -or @($Candidate.Mounts).Count -ne 0) { throw 'Candidate identity or isolation mismatch.' }
     if ((Get-FileHash -LiteralPath $Config).Hash -cne $ConfigHash -or (Get-DockerState $OldName).Id -cne $OldState.Id -or (Test-ActiveRequest)) {
         throw 'Old stdio backend or config changed during preflight.'
     }
-    Invoke-ScopedDocker @('stop','--time','10',$OldName)
+    Invoke-ScopedDocker @('stop','--time','10',[string]$OldState.Id)
     $Stopped = $true
-    Invoke-ScopedDocker @('start',$NewName)
+    Invoke-ScopedDocker @('start',$CandidateId)
     $Published = @(& docker port $NewName '8082/tcp')
     if ($LASTEXITCODE -ne 0 -or $Published.Count -ne 1 -or $Published[0] -cne "127.0.0.1:$Port") { throw 'Replacement loopback endpoint mismatch.' }
 
@@ -136,15 +140,15 @@ process.exit(ok?0:1);
         (Get-FileHash -LiteralPath $Config).Hash -cne $ConfigHash) { throw 'GitHub runtime changed during migration.' }
 } catch {
     try {
-        if ($Created) {
-            if ((Get-DockerState $NewName).State.Running) { Invoke-ScopedDocker @('stop','--time','10',$NewName) }
-            Invoke-ScopedDocker @('rm',$NewName)
+        if ($CandidateId) {
+            if ((Get-DockerState $CandidateId).State.Running) { Invoke-ScopedDocker @('stop','--time','10',$CandidateId) }
+            Invoke-ScopedDocker @('rm',$CandidateId)
         }
-        if ($Stopped) { Invoke-ScopedDocker @('start',$OldName) }
+        if ($Stopped) { Invoke-ScopedDocker @('start',[string]$OldState.Id) }
     } catch { throw 'Stdio migration rollback failed; inspect local runtime.' }
     throw 'Stdio migration stopped; old backend retained or restored.'
 }
 # The old backend has no data mounts. Retire only after the new authenticated
 # launcher is proven and the public gateway container identities are unchanged.
-Invoke-ScopedDocker @('rm',$OldName)
+Invoke-ScopedDocker @('rm',[string]$OldState.Id)
 Write-Output 'GITHUB_STDIO_230_REFRESH_OK authenticated_initialize=true loopback_endpoint_preserved=true public_gateway_unchanged=true'
