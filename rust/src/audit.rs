@@ -563,6 +563,42 @@ mod tests {
     }
 
     #[test]
+    fn manifest_identity_prevents_false_drift_and_unused_hints() {
+        let mut inventory = inv();
+        inventory.rows.truncate(1);
+        inventory.inspections.insert("c1".into(), json!({
+            "Image": "sha256:config",
+            "ImageManifestDescriptor": {"digest": "sha256:platform"},
+            "Config": {"Image": "dockerlocal-mcp:local"}
+        }));
+        inventory.images = vec![
+            json!({"Id": "sha256:index", "RepoTags": ["dockerlocal-mcp:local"],
+                "Manifests": [{"ID": "sha256:platform", "Kind": "image", "Available": true}]}),
+            json!({"Id": "sha256:other", "RepoTags": ["dockerlocal-mcp:older"],
+                "Manifests": [{"ID": "sha256:other-platform", "Kind": "image"}]}),
+            json!({"Id": "sha256:unknown", "RepoTags": ["dockerlocal-mcp:unknown"]})
+        ];
+        let audit = deployment_audit(&inventory, &json!({}), &json!({}), &[],
+            &|_| Ok(json!({})), 7);
+        assert_eq!(audit["local_image_drift"], json!([]));
+        assert_eq!(audit["local_image_identity_unknown"], json!([]));
+        let usage = image_usage_audit(&inventory);
+        assert_eq!(usage["images"][0]["in_use_by"], json!(["dockerlocal-mcp-http"]));
+        assert_eq!(usage["images"][2]["usage_unknown_by"], json!(["dockerlocal-mcp-http"]));
+        assert_eq!(usage["summary"]["unknown"], json!(1));
+        assert_eq!(usage["repository_superseded_hints"].as_array().unwrap().len(), 1);
+        inventory.images[0]["Manifests"][0]["ID"] = json!("sha256:different");
+        let audit = deployment_audit(&inventory, &json!({}), &json!({}), &[],
+            &|_| Ok(json!({})), 7);
+        assert_eq!(audit["summary"]["local_image_drift"], json!(1));
+        inventory.images[0].as_object_mut().unwrap().remove("Manifests");
+        let audit = deployment_audit(&inventory, &json!({}), &json!({}), &[],
+            &|_| Ok(json!({})), 7);
+        assert_eq!(audit["summary"]["local_image_drift"], json!(0));
+        assert_eq!(audit["summary"]["local_image_identity_unknown"], json!(1));
+    }
+
+    #[test]
     fn image_usage_golden() {
         let audit = image_usage_audit(&inv());
         let by_id = |id: &str| audit["images"].as_array().unwrap().iter().find(|i| i["id"] == id).unwrap().clone();
