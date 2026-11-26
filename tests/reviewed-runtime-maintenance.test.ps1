@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot -Parent
 $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'maintenance-runner.ps1'), [ref]$null, [ref]$null)
-foreach ($Name in @('ConvertFrom-ScoutGitLabReport','Get-ReviewedRuntimeScan','Assert-ReviewedRuntimeSecurity','Invoke-ReviewedRuntimeRefresh')) {
+foreach ($Name in @('Get-ReviewedStageReceipt','ConvertFrom-ScoutGitLabReport','Get-ReviewedRuntimeScan','Assert-ReviewedRuntimeSecurity','Invoke-ReviewedRuntimeRefresh')) {
     $Definition = $Ast.Find({param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $Name},$true)
     if ($null -eq $Definition) { throw 'Expected runtime gate function missing.' }
     . ([scriptblock]::Create($Definition.Extent.Text))
@@ -28,7 +28,8 @@ function Invoke-ScriptHandler {
         if ($Arguments.Count -ne 4) { throw 'Unexpected stage arguments.' }
         if ($script:StageFail) { return @{exit_code=1;output='failed'} }
         $Staged = if ($script:SameImage) { $Old } else { $New }
-        return @{exit_code=0;output="REVIEWED_RUNTIME_STAGE baseline=$Old candidate=$Staged revision=$Revision"}
+        $Receipt = "REVIEWED_RUNTIME_STAGE baseline=$Old candidate=$Staged revision=$Revision"
+        return @{exit_code=0;output=('x' * 16000);stage_receipt=(Get-ReviewedStageReceipt -StdOut $Receipt)}
     }
     if ($Arguments[3] -cne 'Apply' -or ($Arguments[4..9] -join '|') -cne "-ReviewedDigest|$New|-BaselineDigest|$Old|-Revision|$Revision") {
         throw 'Apply did not receive independently staged identities.'
@@ -61,6 +62,10 @@ function Expect-Blocked([string]$Expected) {
         throw 'Security gate did not fail closed with a sanitized receipt.'
     }
 }
+$Receipt = "REVIEWED_RUNTIME_STAGE baseline=$Old candidate=$New revision=$Revision"
+if ((Get-ReviewedStageReceipt -StdOut ("build output" + [Environment]::NewLine + $Receipt + [Environment]::NewLine)) -cne $Receipt) { throw 'Valid stage receipt rejected.' }
+if ($null -ne (Get-ReviewedStageReceipt -StdOut ($Receipt + [Environment]::NewLine + $Receipt))) { throw 'Duplicate stage receipt accepted.' }
+if ($null -ne (Get-ReviewedStageReceipt -StdOut 'build output only')) { throw 'Missing stage receipt accepted.' }
 $script:ScoutSeverities = @('critical','high','medium','low','unspecified')
 $Rejected = $false
 try { $null=ConvertFrom-ScoutGitLabReport '{}' } catch { $Rejected=$true }
