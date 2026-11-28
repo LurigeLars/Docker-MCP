@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "server.py"
 RECORD = Path(__file__).resolve().parent / "port_sync.json"
 
-# Tools that exist in Rust (rust/src/main.rs). Scout tools are not ported yet.
+# Tools that exist in Rust (rust/src/main.rs).
 PORTED_TOOLS = (
     "containers_list", "container_inspect", "container_logs", "container_stats", "compose_status",
     "images_list", "image_inspect",
@@ -29,20 +29,21 @@ PORTED_TOOLS = (
     "mcp_deployment_audit", "image_usage_audit",
     "cleanup_superseded_images", "compose_redeploy", "cleanup_stale_mcp_containers",
     "image_pull", "container_restart", "image_prune_dangling",
-)
-NOT_PORTED_TOOLS = (
     "scout_quickview", "scout_cves", "scout_full_scan", "scout_recommendations", "scout_sbom", "scout_compare",
 )
+NOT_PORTED_TOOLS: tuple[str, ...] = ()
 # Helpers and constants the ported tools depend on.
 HELPERS = (
     "_container", "_image", "_project", "_maintenance_alias", "_api", "_json", "_quote", "_redact",
     "_decode_logs", "_bytes_human", "_normalize_image_ref", "_repo_from_tag", "_write_job", "_read_job",
     "_runner_request", "_compact_runner_request", "_runner_heartbeat", "_port_registry_status",
     "_host_disk_usage", "_audit_inventory", "_image_identity_match", "_deployment_audit", "_image_usage_audit",
+    "_read_runtime_secret", "_assert_scout_image_size", "_scout",
 )
 CONSTANTS = (
     "API", "MAX_OUTPUT", "JOB_ID", "CONTAINER_REF", "IMAGE_REF", "COMPOSE_PROJECT", "HOST_MAINTENANCE_ALIAS",
     "EXPECTED_MCP_PROJECTS", "READ_ONLY", "WRITE_SAFE", "DESTRUCTIVE", "DEV_MAINTENANCE_FIELDS",
+    "SCOUT_READ", "SEVERITIES", "SCOUT_MAX_IMAGE_BYTES", "SCOUT_EPHEMERAL_CACHE", "_SCOUT_LOCK",
 )
 
 
