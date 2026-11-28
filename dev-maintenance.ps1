@@ -4,8 +4,7 @@ Weekly maintenance of the local Windows developer toolchain (DevToolMaintenance)
 Policy and operation: docs/dev-maintenance.md. The Scheduled Task runs the deployed copy in
 %LOCALAPPDATA%\DevToolMaintenance; this repository file is the source.
 
-  -Mode Report   (default) inventory only. Installs nothing and never runs a tool that updates
-                 itself when invoked (gk).
+  -Mode Report   (default) inventory only. Installs nothing.
   -Mode Update   also upgrades the $AutoUpdate allowlist within the same major version (the same
                  0.minor before 1.0), only when nothing that could be disturbed is running.
   -SelfTest      assert-based checks of parsing, version policy and the activity guard.
@@ -34,7 +33,6 @@ $WingetTools = [ordered]@{
     'Microsoft.PowerShell'              = 'PowerShell'
     'Git.Git'                           = 'Git'
     'GitHub.cli'                        = 'GitHub CLI'
-    'GitKraken.cli'                     = 'GitKraken CLI launcher'
     'Gyan.FFmpeg'                       = 'FFmpeg'
     'BurntSushi.ripgrep.MSVC'           = 'RipGrep'
     'Python.Python.3.12'                = 'Python 3.12'
@@ -51,7 +49,6 @@ $WingetTools = [ordered]@{
 }
 $MechanismNote = @{
     'Microsoft.PowerShell'              = 'runs from Microsoft Store (MSIX)'
-    'GitKraken.cli'                     = 'the gk core in GitKrakenCLI updates itself when gk runs'
     'Gyan.FFmpeg'                       = 'portable; PATH points at a versioned folder'
     'BurntSushi.ripgrep.MSVC'           = 'portable; PATH points at a versioned folder'
     'astral-sh.uv'                      = 'before 1.0 a minor release may break; MCP clients and tasks call this copy'
@@ -60,9 +57,8 @@ $MechanismNote = @{
     'Microsoft.WSL'                     = 'also: wsl --update; Docker Desktop depends on it'
     'Anthropic.ClaudeCode'              = 'the Claude desktop app bundles its own copy'
 }
-$PolicyOverride = @{ 'GitKraken.cli' = 'own updater' }
 # Commands whose PATH copies are counted: more than one copy means an overlapping install.
-$PathCommands = 'pwsh', 'git', 'gh', 'gk', 'ffmpeg', 'rg', 'python', 'py', 'uv', 'node', 'npm', 'claude', 'codex', 'cargo'
+$PathCommands = 'pwsh', 'git', 'gh', 'ffmpeg', 'rg', 'python', 'py', 'uv', 'node', 'npm', 'claude', 'codex', 'cargo'
 # Builds and installers: any of these running skips all updates.
 $BusyName = '^(cargo|rustc|msbuild|cl|link|devenv|winget|msiexec|setup|vs_installer|vs_installershell)$'
 $AgentPattern = 'claude-code|Anthropic\.ClaudeCode|\\codex\.exe|@openai[\\/]codex|@anthropic-ai[\\/]claude-code'
@@ -142,16 +138,15 @@ if ($SelfTest) {
     Assert ((Get-AgentState ($idle + $agent) $now.AddMinutes(-90) $now) -eq 'idle') 'old transcript means idle'
     Assert ((Get-AgentState ($idle + $agent) $now.AddMinutes(-5) $now) -eq 'active') 'recent transcript means active'
     Assert ((Get-AgentState ($idle + $agent) $null $now) -eq 'active') 'unknown activity is treated as active'
-    Assert ((Get-Blockers ($idle + $agent) @('gk') 'idle').Count -eq 0) 'idle agent does not block'
-    Assert ((Get-Blockers ($idle + $agent) @('gk') 'active') -contains 'claude') 'active agent blocks'
+    Assert ((Get-Blockers ($idle + $agent) @('ffmpeg') 'idle').Count -eq 0) 'idle agent does not block'
+    Assert ((Get-Blockers ($idle + $agent) @('ffmpeg') 'active') -contains 'claude') 'active agent blocks'
     $codexNpm = & $p 'node.exe' 'C:\n\node.exe' 'node C:\npm\node_modules\@openai\codex\bin\codex.js'
-    Assert ((Get-Blockers ($idle + $codexNpm) @('gk') 'active').Count -eq 1) 'npm agent blocks when active'
+    Assert ((Get-Blockers ($idle + $codexNpm) @('ffmpeg') 'active').Count -eq 1) 'npm agent blocks when active'
     Assert ((Get-Blockers ($idle + (& $p 'gh.exe' 'C:\x\gh.exe' 'gh pr list')) @('gh') 'idle') -contains 'gh') 'tool in use blocks even when agents idle'
-    Assert ((Get-Blockers ($idle + (& $p 'gh.exe' 'C:\x\gh.exe' '')) @('gk') 'none').Count -eq 0) 'other tool does not block'
+    Assert ((Get-Blockers ($idle + (& $p 'gh.exe' 'C:\x\gh.exe' '')) @('ffmpeg') 'none').Count -eq 0) 'other tool does not block'
     $mcp = & $p 'pythonw.exe' 'C:\ClaudeCode\x-mcp\.venv\Scripts\pythonw.exe' 'pythonw C:\ClaudeCode\x-mcp\run.py'
-    Assert ((Get-Blockers ($idle + $mcp) @('gk') 'active').Count -eq 0) 'MCP server under a ClaudeCode folder does not block'
-    Assert ((Get-Blockers ($idle + (& $p 'cargo.exe' $null $null)) @('gk') 'none') -contains 'cargo') 'build blocks even without path'
-    Assert (-not ((Get-Content -LiteralPath $PSCommandPath -Raw) -match '(?m)^[^#''"]*\bgk(\.exe)?\s+\w')) 'gk is never invoked'
+    Assert ((Get-Blockers ($idle + $mcp) @('ffmpeg') 'active').Count -eq 0) 'MCP server under a ClaudeCode folder does not block'
+    Assert ((Get-Blockers ($idle + (& $p 'cargo.exe' $null $null)) @('ffmpeg') 'none') -contains 'cargo') 'build blocks even without path'
     'SELFTEST OK'
     return
 }
@@ -177,7 +172,6 @@ $errors = [System.Collections.Generic.List[string]]::new()
 $verification = [System.Collections.Generic.List[object]]::new()
 function Add-Row($Tool, $Mechanism, $Installed, $Available, $Note = '') {
     $policy = if ($AutoUpdate.Contains($Tool)) { 'auto (same major)' }
-    elseif ($PolicyOverride[$Tool]) { $PolicyOverride[$Tool] }
     elseif ($Tool -match '^(npm|pip|uv-tool):') { 'individual approval' }
     else { 'controlled' }
     $rows.Add([pscustomobject]@{ Key = $Tool; Tool = $Tool; Mechanism = $Mechanism; Policy = $policy; Before = $Installed; Available = $Available; After = $Installed; Status = ''; Note = $Note })
