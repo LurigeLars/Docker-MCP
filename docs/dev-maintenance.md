@@ -12,8 +12,7 @@ shares only the Maintenance Runner, which reads its report for the `dev_maintena
 - The task runs the deployed copy in `%LOCALAPPDATA%\DevToolMaintenance`. Deploy or re-register
   from a clean `main` checkout with `pwsh -File dev-maintenance.ps1 -RegisterTask`; it replaces the
   same task and never creates a second one.
-- `-Mode Report` (the default) installs nothing. It never runs `gk`, whose core updates itself
-  when invoked; `-SelfTest` asserts that.
+- `-Mode Report` (the default) installs nothing.
 - Reports go to `%LOCALAPPDATA%\DevToolMaintenance\reports\<yyyyMMdd-HHmmss>-<mode>.json` and
   `.md`. They contain versions before, available and after, status, errors, verification and
   overlapping PATH copies. The profile path, user name and host name are replaced by placeholders.
@@ -30,7 +29,6 @@ shares only the Maintenance Runner, which reads its report for the `dev_maintena
 | PowerShell 7 | Microsoft Store | copies bundled inside agent apps |
 | Git, GitHub CLI, FFmpeg, RipGrep, Python 3.12, Python Launcher, Node.js 22, Visual Studio Build Tools, VC++ Redistributable, WSL, Docker Desktop | WinGet | Docker Desktop and VS Build Tools also have their own updater |
 | uv | WinGet | no standalone copy; MCP clients and tasks call the WinGet copy by full path |
-| GitKraken CLI | the `gk` core's own updater | the WinGet package is only the launcher |
 | Claude Code CLI | WinGet | the copy bundled in the Claude desktop app |
 | Codex CLI | npm global | the copies bundled in the Codex app |
 | Global npm packages, global uv tools, global pip packages | npm, uv, pip | |
@@ -43,7 +41,7 @@ maintenance and are never changed here.
 | Policy | Tools | Meaning |
 |---|---|---|
 | auto (same major) | FFmpeg, GitHub CLI | Upgraded to the exact available version when the major version is unchanged (the same `0.minor` before 1.0). GitHub CLI is machine-wide, so an unelevated run reports it as awaiting approval instead of prompting for UAC. |
-| own updater | GitKraken CLI core, the Codex and Claude apps | Reported only; the tool updates itself. |
+| own updater | the Codex and Claude apps | Reported only; the tool updates itself. |
 | controlled | everything else from WinGet, uv, Python, Node.js, Claude Code, WSL, Docker Desktop, Build Tools, Rust when installed | Reported with the available version; upgraded by hand after review. |
 | individual approval | each global npm, uv tool and pip package | Reported per package; never updated in bulk. |
 

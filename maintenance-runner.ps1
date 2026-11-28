@@ -1693,14 +1693,14 @@ function Get-DevMaintenanceStatus {
     $Version = '^[vV]?\d{1,10}(?:\.\d{1,10}){1,4}(?:[-+][0-9A-Za-z.-]{1,24})?$'
     $Policies = @("auto (same major)", "controlled", "individual approval", "own updater")
     $PublicTools = @(
-        "winget", "npm", "Microsoft.PowerShell", "Git.Git", "GitHub.cli", "GitKraken.cli",
+        "winget", "npm", "Microsoft.PowerShell", "Git.Git", "GitHub.cli",
         "Gyan.FFmpeg", "BurntSushi.ripgrep.MSVC", "Python.Python.3.12", "Python.Launcher",
         "astral-sh.uv", "OpenJS.NodeJS.22", "Rustlang.Rustup", "Anthropic.ClaudeCode",
         "Microsoft.VisualStudio.BuildTools", "Microsoft.VCRedist.2015+.x64", "Microsoft.VCRedist.2015+.x86",
         "Microsoft.WSL", "Docker.DockerDesktop", "app:OpenAI.Codex", "app:Claude", "rustup check",
         "cargo install --list", "Rust/Cargo", "npm:@openai/codex"
     )
-    $PathCommands = @("pwsh", "git", "gh", "gk", "ffmpeg", "rg", "python", "py", "uv", "node", "npm", "claude", "codex", "cargo")
+    $PathCommands = @("pwsh", "git", "gh", "ffmpeg", "rg", "python", "py", "uv", "node", "npm", "claude", "codex", "cargo")
     $Updated = @(); $Available = @(); $Deferred = @(); $Failed = @(); $Invalid = 0
     foreach ($Row in @($Report.tools | Select-Object -First 400)) {
         $Tool = [string]$Row.Tool
