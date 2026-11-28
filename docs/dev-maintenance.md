@@ -62,3 +62,22 @@ Before each upgrade the script reads the process list once more and skips the pa
   is open but idle does not block. If activity cannot be read, the agent counts as working.
 
 A skipped package is retried on the next run.
+
+## Manual upgrades of controlled tools
+
+Some installers have side effects that the weekly script cannot rule out, which is one reason these
+tools stay `controlled`. Observed when upgrading by hand with `winget upgrade --id <id> --exact`:
+
+- **Node.js (MSI)** stops every running `node.exe` through Windows Restart Manager, even with
+  `--custom "MSIRESTARTMANAGERCONTROL=Disable REBOOT=ReallySuppress"`. Every Node-based MCP server,
+  gateway and stdio launcher goes down. Self-restarting tasks come back on their next repetition.
+  A server can also stay half-stopped: its process lives on but no longer listens. Restart scripts
+  that first verify a live listener then refuse to act, so restart such a server through its
+  Scheduled Task (`scheduled_task_control` for an allowlisted alias). Afterwards check every MCP port
+  and each client's server list; open agent sessions reconnect their stdio servers when next used.
+  Upgrade Node only when those servers may restart.
+- **Git for Windows (Inno Setup)** upgrades cleanly with
+  `--custom "/NOCLOSEAPPLICATIONS /NORESTARTAPPLICATIONS"` when no process runs from the Git folder;
+  check that first, because agents start `git` constantly.
+
+Both are machine-wide installs and prompt for UAC, which the user answers.
