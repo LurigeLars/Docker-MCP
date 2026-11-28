@@ -1,10 +1,11 @@
 //! DockerLocal MCP in Rust, ported tool by tool from server.py with parity checks.
-//! Batches 1-4: Docker API reads, host runner/control-file tools, audits and proxy writes.
+//! Batches 1-5: Docker API reads, host runner/control-file tools, audits, proxy writes and Scout.
 //! Not wired into any deployment yet.
 
 mod audit;
 mod control;
 mod docker;
+mod scout;
 mod text;
 mod writes;
 
@@ -173,6 +174,48 @@ fn default_restart_timeout() -> i64 {
 /// Python `_json(...) or {}`.
 fn or_empty(v: Value) -> Value {
     if control::py_truthy(&v) { v } else { json!({}) }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ScoutCvesArgs {
+    image: String,
+    #[serde(default)]
+    severity: Option<Vec<String>>,
+    #[serde(default)]
+    only_fixed: bool,
+    #[serde(default)]
+    cisa_kev: bool,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ScoutSbomArgs {
+    image: String,
+    #[serde(default)]
+    package_type: Option<String>,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ScoutCompareArgs {
+    image: String,
+    baseline: String,
+    #[serde(default)]
+    only_fixed: bool,
+}
+
+/// FastMCP's `-> str` contract: the raw text as content, `{"result": text}` as structured content.
+fn string_result(text: String) -> CallToolResult {
+    let mut result = CallToolResult::structured(json!({ "result": text }));
+    result.content = vec![ContentBlock::text(text)];
+    result
+}
+
+/// Size guard plus one Scout run on a blocking thread.
+async fn scout_run(images: Vec<String>, args: Vec<String>) -> Result<CallToolResult, String> {
+    let output = blocking(move || {
+        for image in &images {
+            scout::assert_image_size(image)?;
+        }
+        scout::run(&args, std::time::Duration::from_secs(180))
+    }).await?;
+    Ok(string_result(output))
 }
 
 #[derive(Clone)]
@@ -502,6 +545,64 @@ be an active Dockerfile build-stage/base dependency.",
             "images_deleted": if control::py_truthy(get(&raw, "ImagesDeleted")) { get(&raw, "ImagesDeleted").clone() } else { json!([]) },
             "space_reclaimed": bytes_human(num(get(&raw, "SpaceReclaimed"))),
         })))
+    }
+
+    #[tool(description = "Run Docker Scout quickview for a local image.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true))]
+    async fn scout_quickview(&self, Parameters(a): Parameters<ImageArg>) -> Result<CallToolResult, String> {
+        let image = valid(&IMAGE_REF, a.image, "Invalid image reference")?;
+        let args = vec!["quickview".into(), format!("local://{image}")];
+        scout_run(vec![image], args).await
+    }
+
+    #[tool(description = "Scan a local image for CVEs with optional severity, fixability and CISA KEV filters.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true))]
+    async fn scout_cves(&self, Parameters(a): Parameters<ScoutCvesArgs>) -> Result<CallToolResult, String> {
+        let image = valid(&IMAGE_REF, a.image, "Invalid image reference")?;
+        // Python checks the size before validating severities; keep that order for the error a caller sees.
+        let severity = a.severity.unwrap_or_default();
+        let probe = image.clone();
+        blocking(move || scout::assert_image_size(&probe)).await?;
+        let args = scout::cves_args(&image, &severity, a.only_fixed, a.cisa_kev)?;
+        scout_run(vec![], args).await
+    }
+
+    #[tool(description = "Queue a host-based Docker Scout CVE scan for a local image, including images above the public 1 GiB limit.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true))]
+    async fn scout_full_scan(&self, Parameters(a): Parameters<ScoutCvesArgs>) -> Result<CallToolResult, String> {
+        let image = valid(&IMAGE_REF, a.image, "Invalid image reference")?;
+        let Value::Object(job) = scout::full_scan_job(&image, &a.severity.unwrap_or_default(), a.only_fixed, a.cisa_kev)? else {
+            unreachable!()
+        };
+        let job_id = blocking(move || control::write_job(&control::control_dir(), job)).await?;
+        Ok(string_result(json!({"job_id": job_id, "status": "queued"}).to_string()))
+    }
+
+    #[tool(description = "Show Docker Scout remediation recommendations for a local image.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true))]
+    async fn scout_recommendations(&self, Parameters(a): Parameters<ImageArg>) -> Result<CallToolResult, String> {
+        let image = valid(&IMAGE_REF, a.image, "Invalid image reference")?;
+        let args = vec!["recommendations".into(), format!("local://{image}")];
+        scout_run(vec![image], args).await
+    }
+
+    #[tool(description = "Return a package-list SBOM for a local image.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true))]
+    async fn scout_sbom(&self, Parameters(a): Parameters<ScoutSbomArgs>) -> Result<CallToolResult, String> {
+        let image = valid(&IMAGE_REF, a.image, "Invalid image reference")?;
+        let probe = image.clone();
+        blocking(move || scout::assert_image_size(&probe)).await?;
+        let args = scout::sbom_args(&image, a.package_type.as_deref())?;
+        scout_run(vec![], args).await
+    }
+
+    #[tool(description = "Compare two local images with Docker Scout.",
+           annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true))]
+    async fn scout_compare(&self, Parameters(a): Parameters<ScoutCompareArgs>) -> Result<CallToolResult, String> {
+        let image = valid(&IMAGE_REF, a.image, "Invalid image reference")?;
+        let baseline = valid(&IMAGE_REF, a.baseline, "Invalid image reference")?;
+        let args = scout::compare_args(&image, &baseline, a.only_fixed);
+        scout_run(vec![image, baseline], args).await
     }
 }
 

@@ -16,7 +16,7 @@ Response times are set by the Docker API and do not change.
 | 2. Host runner and control files | `maintenance_job_status`, `runtime_supervisor_status`, `maintenance_runner_status`, `repo_status`, `repo_pull_ff`, `port_registry_status`, `scheduled_task_status`, `scheduled_task_control`, `host_disk_usage`, `dev_maintenance_status` | Ported (`dev_maintenance_status` was added later on the same runner round trip; it is in the `compare.py` list but not in a recorded paired run yet). 72/72 paired calls identical with the real `/control` mount (read-only tools only). `repo_pull_ff` and `scheduled_task_control` share the unit-tested job protocol and are never run by the parity script. Accepted differences: a non-string runner `error` renders as JSON instead of Python repr; input schemas lack `additionalProperties: false` until batch 6 |
 | 3. Audits | `mcp_deployment_audit`, `image_usage_audit` | Ported. Unit test requires full-structure equality with `server.py`'s own output on a fixture (`src/audit_golden.json`, produced by running the Python functions in the production image); 81/81 live paired calls equal |
 | 4. Writes through the proxy | `image_pull`, `container_restart`, `image_prune_dangling`, `cleanup_superseded_images`, `cleanup_stale_mcp_containers`, `compose_redeploy` | Ported. Unit tests pin every validation rule and the exact proxy targets `urllib` builds (all accepted by `proxy.allowed`); a fake-proxy test checks POSTs carry no body and no chunked encoding. Live parity only on rejected inputs and one re-pull of a present tag; nothing is restarted, pruned, cleaned or redeployed |
-| 5. Docker Scout | `scout_quickview`, `scout_cves`, `scout_full_scan`, `scout_recommendations`, `scout_sbom`, `scout_compare` | Planned. The static `docker-scout` binary goes into the same `FROM scratch` image (with CA roots); Hub credentials stay in per-container tmpfs files, read only for the subprocess |
+| 5. Docker Scout | `scout_quickview`, `scout_cves`, `scout_full_scan`, `scout_recommendations`, `scout_sbom`, `scout_compare` | Ported. The static `docker-scout` (same pinned 1.30.0 digest as the Python image) and CA roots ship in the `FROM scratch` image (276 MB, almost all Scout). Hub credentials are read only from the tmpfs files and passed only to the subprocess; one scan at a time; optional per-job cache; merged stdout/stderr; timeout. Unit tests cover argument building, credential handling, output merging, errors and timeout; live parity runs real SBOM indexing on both servers. `scout_full_scan` queues a host job and is never run by the parity script |
 | 6. Runtime | tool-usage statistics, streamable HTTP transport, server instructions, full tool-list/schema/annotation parity, hardening tests | Planned. Then side by side on one stdio client before any switch |
 
 Scout stays inside the server image: it is a static binary, so the image becomes roughly
@@ -26,7 +26,7 @@ containers, and without moving the Hub credentials.
 ## Build and check
 
 ```powershell
-docker build -t dockerlocal-rs:batch4 rust
+docker build -t dockerlocal-rs:batch5 rust
 python rust/compare.py 3
 ```
 
@@ -36,10 +36,11 @@ hardening flags on `dockerlocal_default`, calls every listed tool on both back t
 through the read-only socket proxy, and reports memory, startup, latency and any
 mismatch (volatile counters and the comparison containers themselves excluded).
 Only read-only tools, inputs rejected before any API call, and harmless re-pulls belong in
-its call list. It mounts the real `/control` dir, as production stdio instances do.
+its call list. It mounts the real `/control` dir and gives `/tmp` the production 3 GB tmpfs
+(Scout exports the image there; 64 MB made Scout fail identically on both servers).
 
 It also compares the definition of every ported tool with `server.py`'s: description,
-annotations, required arguments, defaults and enum values (24/24 equal at batch 4).
+annotations, required arguments, defaults and enum values (31/31 equal at batch 5).
 Host state can change between the two calls of a pair (another chat starts a container,
 disk use moves): live measurements are listed in `VOLATILE`, Docker's human status text is
 ignored, and a mismatching pair is retried once and only reported if it persists.

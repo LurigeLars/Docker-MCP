@@ -19,7 +19,7 @@ NETWORK = "dockerlocal_default"
 API = "http://dockerlocal-socket-proxy:2375"
 SERVERS = {
     "python": "dockerlocal-mcp:local",
-    "rust": "dockerlocal-rs:batch4",
+    "rust": "dockerlocal-rs:batch5",
 }
 CALLS = [
     ("containers_list", {"include_stopped": True}),
@@ -65,6 +65,14 @@ CALLS = [
     ("container_restart", {"container": "../x"}),
     ("image_pull", {"image": "-bad"}),
     ("image_pull", {"image": "node:26.13.1-alpine"}),
+    # Batch 5 Scout: local indexing of a small image plus rejected inputs. scout_full_scan
+    # queues a real host job and is never called here.
+    ("scout_sbom", {"image": "dockerlocal-socket-proxy:local"}),
+    ("scout_sbom", {"image": "dockerlocal-socket-proxy:local", "package_type": "apk"}),
+    ("scout_sbom", {"image": "dockerlocal-socket-proxy:local", "package_type": "a b"}),
+    ("scout_cves", {"image": "dockerlocal-socket-proxy:local", "severity": ["nope"]}),
+    ("scout_quickview", {"image": "-bad"}),
+    ("scout_compare", {"image": "dockerlocal-socket-proxy:local", "baseline": "../x"}),
 ]
 # Fields that legitimately change between two reads of the same object.
 VOLATILE = {"cpu_percent", "memory", "memory_percent", "network_rx", "network_tx", "pids",
@@ -72,6 +80,7 @@ VOLATILE = {"cpu_percent", "memory", "memory_percent", "network_rx", "network_tx
             "available_bytes", "used_bytes", "used_percent", "timestamp_unix"}
 # Docker's human status text ("Up 5 minutes") changes between calls; runner status values do not.
 DOCKER_STATUS = re.compile(r"^(Up|Exited|Created|Restarting|Paused|Removing|Dead)")
+SCOUT_LOG_TIME = re.compile(r'"time":"[^"]*"')
 CONTROL_DIR = os.path.join(os.environ["LOCALAPPDATA"], "DockerLocalMCP", "control")
 
 
@@ -83,7 +92,7 @@ class Server:
             "docker", "run", "-i", "--rm", "--name", self.name, "--network", NETWORK,
             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--pids-limit", "128", "--memory", "4g",
-            "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,uid=65532,gid=65532,mode=1777",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=3g,uid=65532,gid=65532,mode=1777",
             "-e", f"DOCKER_API_URL={API}", "-e", f"DOCKER_HOST=tcp://{API.split('//')[1]}",
             # The real control dir, as production stdio instances mount it.
             "-v", f"{CONTROL_DIR}:/control", "-e", "DOCKERLOCAL_CONTROL_DIR=/control",
@@ -156,6 +165,9 @@ def strip(value):
     if isinstance(value, dict):
         return {k: strip(v) for k, v in value.items()
                 if k not in VOLATILE and not (k == "status" and DOCKER_STATUS.match(str(v)))}
+    if isinstance(value, str):
+        # Scout's JSON log lines carry their own wall-clock "time" field.
+        return SCOUT_LOG_TIME.sub('"time":""', value)
     if isinstance(value, list):
         # The comparison containers see themselves; Docker orders equal timestamps arbitrarily.
         rows = [strip(v) for v in value if "dockerlocal-compare-" not in json.dumps(v)]
