@@ -44,6 +44,14 @@ Host state can change between the two calls of a pair (another chat starts a con
 disk use moves): live measurements are listed in `VOLATILE`, Docker's human status text is
 ignored, and a mismatching pair is retried once and only reported if it persists.
 
+## Keeping the port in sync
+
+`rust/port_sync.json` holds a fingerprint of every `server.py` function and constant the Rust
+port mirrors. `tests/test_rust_port_sync_hardening.py` (run by CI whenever `server.py` changes)
+fails when one of them changes, when a new tool is neither ported nor listed as not ported,
+or when the ported list and the Rust tools differ. Update `rust/` to match, then run
+`python rust/port_sync.py --write`.
+
 ## Contract rules for every port
 
 - Same tool names, descriptions, annotations, argument names and defaults as `server.py`.
